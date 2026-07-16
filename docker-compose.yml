@@ -30,9 +30,14 @@ services:
       SSH_PRIVATE_KEY_PATH: ${SSH_PRIVATE_KEY_PATH:-}
       SSH_PASSWORD: ${SSH_PASSWORD:-}
       DATABASE_URL: ${DATABASE_URL:-}
-      MCP_POSTGRES_URL: ${MCP_POSTGRES_URL:-}
-      MCP_POSTGRES_COMMAND: ${MCP_POSTGRES_COMMAND:-}
-      MCP_POSTGRES_ARGS: ${MCP_POSTGRES_ARGS:-}
+      PG_HOST: ${PG_HOST:-}
+      PG_PORT: ${PG_PORT:-5432}
+      PG_USER: ${PG_USER:-postgres}
+      PG_PASSWORD: ${PG_PASSWORD:-}
+      PG_DATABASE: ${PG_DATABASE:-postgres}
+      # antonorlov/mcp-postgres-server (agent queries DB only via this MCP)
+      MCP_POSTGRES_COMMAND: ${MCP_POSTGRES_COMMAND:-npx}
+      MCP_POSTGRES_ARGS: ${MCP_POSTGRES_ARGS:-"-y mcp-postgres-server"}
     volumes:
       - ./checklists:/app/checklists:ro
       # Optional: mount SSH private key, e.g. ./secrets/id_rsa:/keys/id_rsa:ro
