@@ -1,23 +1,22 @@
-"""LangGraph workflow: load checklist → parallel assess → finalize report.
+"""LangGraph workflow: load checklist → parallel fill report cells → finalize.
 
-Control flow (high level)::
+Control flow::
 
     START
-      → load_checklist      # parse MD, seed pending_ids
-      → assess_parallel     # asyncio fan-out over REQ-* (bounded concurrency)
-      → finalize → END      # compact digest → summary + full report
+      → load_checklist
+      → assess_parallel   # per REQ: gather evidence → fill 3 cells
+      → finalize → END
 
-Quality + context policy (unchanged):
+Fixed report format:
 
-* Each requirement uses an **isolated** local message window (no shared transcript).
-* Tool outputs truncated; tool rounds capped; then forced JSON decision.
-* Finalize LLM sees a compact findings digest; full report stays in the response.
+* Checklist supplies immutable cells: ID, title, category, severity, pass criteria.
+* Model fills only: **status**, **observation**, **recommendation**.
 
-Parallelism:
+Token strategy:
 
-* Up to ``MAX_PARALLEL_ASSESSMENTS`` requirements assessed concurrently.
-* LLM calls overlap; MCP stdio remains serialized under a lock (protocol-safe).
-* SSH / other tools may run concurrently across workers.
+1. Evidence phase — short tool loop; keep only truncated evidence text.
+2. Fill phase — tiny no-tool prompt (requirement + evidence → JSON cells).
+3. Assembly — deterministic Markdown template (no LLM rewriting of checklist).
 """
 
 from __future__ import annotations
@@ -46,10 +45,12 @@ from psql_auditor.context import (
 )
 from psql_auditor.llm import build_chat_model
 from psql_auditor.prompts import (
-    ASSESS_PROMPT,
+    EVIDENCE_FORCE_PROMPT,
+    EVIDENCE_PROMPT,
+    EVIDENCE_SYSTEM_PROMPT,
+    FILL_CELL_PROMPT,
+    FILL_SYSTEM_PROMPT,
     FINALIZE_PROMPT,
-    FORCE_DECIDE_PROMPT,
-    SYSTEM_PROMPT,
 )
 from psql_auditor.state import AuditorState, Finding, render_report
 from psql_auditor.tools.mcp_client import get_mcp_tools
@@ -57,7 +58,7 @@ from psql_auditor.tools.ssh import get_ssh_tools
 
 
 def _all_tools() -> list:
-    """Collect every LangChain tool bound into the assess-loop model."""
+    """Collect LangChain tools for the evidence-gathering phase."""
     return [*get_ssh_tools(), *get_mcp_tools()]
 
 
@@ -88,19 +89,21 @@ def _normalize_status(value: str | None) -> str:
 
 
 class AuditorGraph:
-    """Compile and run the PostgreSQL checklist audit StateGraph."""
+    """Compile and run the fixed-format PostgreSQL audit StateGraph."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         """Initialize models, tools, and compile the graph."""
         self.settings = settings or get_settings()
         self.tools = _all_tools()
         self.tools_by_name = {t.name: t for t in self.tools}
-        self.model = build_chat_model(self.settings).bind_tools(self.tools)
-        self.plain_model = build_chat_model(self.settings)
+        # Tool-calling model: evidence only.
+        self.evidence_model = build_chat_model(self.settings).bind_tools(self.tools)
+        # No tools: fill report cells + finalize summary.
+        self.fill_model = build_chat_model(self.settings)
         self.graph = self._build()
 
     def _build(self):
-        """Wire nodes: load → parallel assess → finalize."""
+        """Wire nodes: load → parallel cell fill → finalize."""
         graph = StateGraph(AuditorState)
         graph.add_node("load_checklist", self.load_checklist)
         graph.add_node("assess_parallel", self.assess_parallel)
@@ -113,7 +116,7 @@ class AuditorGraph:
         return graph.compile()
 
     async def load_checklist(self, state: AuditorState) -> dict[str, Any]:
-        """Node: parse the Markdown checklist and initialize run state."""
+        """Node: parse checklist and seed the fixed report row list."""
         checklist = load_checklist(self.settings.checklist_path)
         req_map: dict[str, Requirement] = checklist.by_id()
         user_request = state.get("user_request") or ""
@@ -139,27 +142,16 @@ class AuditorGraph:
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
                 SystemMessage(
                     content=(
-                        f"{SYSTEM_PROMPT}\n\n"
-                        f"[Parallel audit: {len(checklist.ids())} requirements, "
-                        f"concurrency={self.settings.max_parallel_assessments}]"
+                        f"Fixed-format audit: {len(checklist.ids())} requirement rows. "
+                        f"Model fills Status/Observation/Recommendation only. "
+                        f"Parallelism={self.settings.max_parallel_assessments}."
                     )
                 ),
             ],
         }
 
     async def assess_parallel(self, state: AuditorState) -> dict[str, Any]:
-        """Node: assess all pending requirements concurrently.
-
-        Each worker runs an isolated ReAct loop (private message list). A
-        semaphore limits how many assessments run at once to protect LiteLLM
-        rate limits and keep MCP queue depth reasonable.
-
-        Args:
-            state: State after ``load_checklist``.
-
-        Returns:
-            Merged ``findings`` for every requirement id.
-        """
+        """Node: fill report cells for all requirements in parallel."""
         requirements = state.get("requirements") or {}
         pending = list(state.get("pending_ids") or requirements.keys())
         user_request = state.get("user_request") or "(none)"
@@ -169,97 +161,125 @@ class AuditorGraph:
         async def _worker(req_id: str) -> Finding:
             async with sem:
                 try:
-                    return await self._assess_one_isolated(
+                    return await self._fill_requirement_cells(
                         req_id=req_id,
                         requirement=requirements[req_id],
                         user_request=user_request,
                     )
                 except Exception as exc:  # noqa: BLE001
+                    req = requirements.get(req_id)
                     return Finding(
                         requirement_id=req_id,
-                        title=requirements[req_id].title
-                        if req_id in requirements
-                        else "",
+                        title=req.title if req else "",
                         status="error",
-                        severity=requirements[req_id].severity
-                        if req_id in requirements
-                        else "",
-                        category=requirements[req_id].category
-                        if req_id in requirements
-                        else "",
-                        evidence=f"Parallel assess failed: {type(exc).__name__}: {exc}",
+                        severity=req.severity if req else "",
+                        category=req.category if req else "",
+                        pass_criteria=req.pass_criteria if req else "",
+                        evidence=f"Cell fill failed: {type(exc).__name__}: {exc}",
+                        remediation="",
                     )
 
-        # Skip unknown ids defensively.
         work_ids = [rid for rid in pending if rid in requirements]
         findings_list = await asyncio.gather(*[_worker(rid) for rid in work_ids])
         findings = {f.requirement_id: f for f in findings_list}
 
-        summary_line = (
-            f"Parallel assessment complete: {len(findings)} requirements "
-            f"(concurrency={limit})."
-        )
         return {
             "findings": findings,
             "pending_ids": [],
             "current_id": None,
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                AIMessage(content=summary_line, name="auditor"),
+                AIMessage(
+                    content=(
+                        f"Filled {len(findings)} report rows "
+                        f"(concurrency={limit})."
+                    ),
+                    name="auditor",
+                ),
             ],
         }
 
-    async def _assess_one_isolated(
+    async def _fill_requirement_cells(
         self,
         req_id: str,
         requirement: Requirement,
         user_request: str,
     ) -> Finding:
-        """Run a full ReAct assess loop for one requirement in a private window.
+        """Gather evidence, then fill status/observation/recommendation cells.
 
-        Does not touch shared graph ``messages`` — safe under asyncio.gather.
+        The fill-phase prompt intentionally excludes the tool transcript — only
+        a truncated evidence blob is passed — to keep token usage low and the
+        context window safe.
         """
-        messages: list = [
-            SystemMessage(
-                content=(
-                    f"{SYSTEM_PROMPT}\n\n"
-                    f"[Isolated worker for {req_id}. Focus only on this requirement.]"
+        evidence = await self._gather_evidence(req_id, requirement, user_request)
+        evidence = truncate_text(
+            evidence,
+            self.settings.max_tool_output_chars,
+            "evidence",
+        )
+
+        fill_messages = [
+            SystemMessage(content=FILL_SYSTEM_PROMPT),
+            HumanMessage(
+                content=FILL_CELL_PROMPT.format(
+                    req_id=req_id,
+                    title=requirement.title,
+                    category=requirement.category,
+                    severity=requirement.severity,
+                    pass_criteria=requirement.pass_criteria,
+                    how_to_verify=requirement.how_to_verify,
+                    evidence=evidence or "(no evidence collected)",
                 )
             ),
+        ]
+        response = await self.fill_model.ainvoke(fill_messages)
+        return self._cells_to_finding(req_id, requirement, response, evidence)
+
+    async def _gather_evidence(
+        self,
+        req_id: str,
+        requirement: Requirement,
+        user_request: str,
+    ) -> str:
+        """Run a short tool loop and return compact evidence text only."""
+        messages: list = [
+            SystemMessage(content=EVIDENCE_SYSTEM_PROMPT),
             HumanMessage(
-                content=ASSESS_PROMPT.format(
+                content=EVIDENCE_PROMPT.format(
                     user_request=user_request,
                     requirement_block=requirement.to_prompt_block(),
                 )
             ),
         ]
-
+        chunks: list[str] = []
         max_rounds = self.settings.max_tool_rounds_per_item
+
         for _ in range(max_rounds + 1):
             rounds = count_tool_rounds(messages)
             if rounds >= max_rounds:
-                messages.append(HumanMessage(content=FORCE_DECIDE_PROMPT))
-                response = await self.plain_model.ainvoke(messages)
-                return self._finding_from_ai(req_id, requirement, response)
+                messages.append(HumanMessage(content=EVIDENCE_FORCE_PROMPT))
+                response = await self.fill_model.ainvoke(messages)
+                chunks.append(str(response.content or ""))
+                break
 
-            response = await self.model.ainvoke(messages)
+            response = await self.evidence_model.ainvoke(messages)
             messages.append(response)
-
             tool_calls = getattr(response, "tool_calls", None) or []
             if not tool_calls:
-                return self._finding_from_ai(req_id, requirement, response)
+                chunks.append(str(response.content or ""))
+                break
 
-            # Execute this turn's tools concurrently (MCP still serializes internally).
             tool_messages = await self._execute_tool_calls(tool_calls)
             messages.extend(tool_messages)
+            for tm in tool_messages:
+                chunks.append(f"[{tm.name}] {tm.content}")
 
-        # Exhausted loop without a clean JSON turn — force decide.
-        messages.append(HumanMessage(content=FORCE_DECIDE_PROMPT))
-        response = await self.plain_model.ainvoke(messages)
-        return self._finding_from_ai(req_id, requirement, response)
+        return "\n---\n".join(c.strip() for c in chunks if c and c.strip())
 
-    async def _execute_tool_calls(self, tool_calls: list[dict[str, Any]]) -> list[ToolMessage]:
-        """Run tool calls for one model turn, optionally in parallel."""
+    async def _execute_tool_calls(
+        self, tool_calls: list[dict[str, Any]]
+    ) -> list[ToolMessage]:
+        """Run tool calls for one evidence turn (parallel where safe)."""
 
         async def _one(tc: dict[str, Any]) -> ToolMessage:
             name = tc.get("name") or ""
@@ -282,35 +302,50 @@ class AuditorGraph:
 
         return list(await asyncio.gather(*[_one(tc) for tc in tool_calls]))
 
-    def _finding_from_ai(
-        self, req_id: str, req: Requirement, ai: AIMessage
+    def _cells_to_finding(
+        self,
+        req_id: str,
+        req: Requirement,
+        ai: AIMessage,
+        fallback_evidence: str,
     ) -> Finding:
-        """Convert an assistant JSON (or prose) reply into a Finding."""
+        """Map fill-phase JSON into a Finding; checklist fields stay fixed."""
         data = _extract_json(str(ai.content or "")) or {}
+        observation = str(
+            data.get("observation")
+            or data.get("evidence")
+            or fallback_evidence
+            or ai.content
+            or ""
+        )
+        recommendation = str(
+            data.get("recommendation") or data.get("remediation") or ""
+        )
         finding = Finding(
             requirement_id=req_id,
             title=req.title,
             status=_normalize_status(data.get("status")),  # type: ignore[arg-type]
             severity=req.severity,
             category=req.category,
-            evidence=str(data.get("evidence") or ai.content or ""),
-            remediation=str(data.get("remediation") or ""),
+            pass_criteria=req.pass_criteria,
+            evidence=observation,
+            remediation=recommendation,
             notes=str(data.get("notes") or ""),
         )
         finding.evidence = truncate_text(
             finding.evidence or "",
             self.settings.max_finding_evidence_chars,
-            "evidence",
+            "observation",
         )
         finding.remediation = truncate_text(
             finding.remediation or "",
             min(self.settings.max_finding_evidence_chars, 1200),
-            "remediation",
+            "recommendation",
         )
         return finding
 
     async def finalize(self, state: AuditorState) -> dict[str, Any]:
-        """Node: executive summary from a compact digest + full Markdown report."""
+        """Assemble fixed report; LLM writes a short executive summary only."""
         findings = state.get("findings") or {}
         requirements = state.get("requirements") or {}
         full_report = render_report(
@@ -322,13 +357,18 @@ class AuditorGraph:
             findings,
             evidence_chars=self.settings.max_finalize_evidence_chars,
         )
-        summary_prompt = FINALIZE_PROMPT.format(report=digest)
-        messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=summary_prompt),
-        ]
         try:
-            response = await self.plain_model.ainvoke(messages)
+            response = await self.fill_model.ainvoke(
+                [
+                    SystemMessage(
+                        content=(
+                            "You write short executive summaries for fixed-format "
+                            "PostgreSQL audit reports."
+                        )
+                    ),
+                    HumanMessage(content=FINALIZE_PROMPT.format(report=digest)),
+                ]
+            )
             summary = str(response.content or "").strip()
         except Exception as exc:  # noqa: BLE001
             summary = f"(Summary generation failed: {exc})"

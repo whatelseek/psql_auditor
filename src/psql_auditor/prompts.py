@@ -1,86 +1,90 @@
-"""Prompt templates used by the LangGraph auditor nodes.
+"""Prompt templates for evidence gathering and fixed report cell filling.
 
-Three prompt constants drive agent behavior:
+Token / context strategy:
 
-* ``SYSTEM_PROMPT`` — standing instructions for the auditor persona (injected
-  once when the checklist is loaded).
-* ``ASSESS_PROMPT`` — per-requirement assessment brief asking for JSON output
-  after optional tool use (``{user_request}``, ``{requirement_block}``).
-* ``FINALIZE_PROMPT`` — executive-summary request over the rendered findings
-  Markdown (``{report}``).
+1. **Evidence phase** (tools) — gather compact facts for one REQ only.
+2. **Fill phase** (no tools) — tiny prompt: requirement + truncated evidence →
+   JSON cells ``status`` / ``observation`` / ``recommendation``.
+3. **Report assembly** is deterministic — checklist fields are never rewritten
+   by the model; only the three cells above are filled.
 
-Context policy: each requirement is assessed in an **isolated** message window
-(system + this item only). Prefer precise, minimal tool calls for quality
-without flooding the context.
+Finalize still uses a compact digest for a short executive summary.
 """
 
 from __future__ import annotations
 
-# Injected as a SystemMessage at the start of each per-item window.
-SYSTEM_PROMPT = """You are a PostgreSQL security auditor agent.
+# --- Evidence gathering (tool-calling model) ---
 
-You assess exactly ONE checklist requirement per turn. Maximize judgment quality:
-1. Gather the minimum evidence needed to decide confidently (prefer 1–2 focused tool calls).
-2. Prefer one targeted mcp_query SELECT that returns all needed columns/settings over many small queries.
-3. Use SSH only when the check needs host files, packages, ports, or permissions.
-4. Compare evidence to pass criteria; decide status: pass, fail, partial, or error.
-5. Cite concrete values from tool output in evidence; give actionable remediation.
+EVIDENCE_SYSTEM_PROMPT = """You gather PostgreSQL audit evidence for ONE requirement.
 
-Database access (mandatory path):
-- Use MCP tools only: mcp_query, mcp_list_schemas, mcp_list_tables,
+Rules:
+- Use MCP tools only for DB facts: mcp_query, mcp_list_schemas, mcp_list_tables,
   mcp_describe_table, mcp_connect_db (antonorlov/mcp-postgres-server).
-- Prefer SELECT on pg_settings, pg_roles, pg_authid, pg_extension, etc.
-- SHOW is allowed (rewritten to pg_settings). Mutating SQL is unavailable.
-
-Context discipline:
-- Do not request huge dumps (avoid SELECT * without WHERE / LIMIT).
-- When evidence is sufficient, stop calling tools and return the JSON decision.
-- If tools fail or credentials are missing, status=error with a clear explanation.
-- Never invent pass/fail without tool output when the check needs host or DB access.
+- Use SSH (ssh_run / ssh_read_file) only for host files, packages, ports, perms.
+- Prefer 1–2 focused tool calls. Prefer one SELECT returning needed columns.
+- Do not invent values. If tools fail, report the error text.
+- When done, reply with a short plain-text evidence summary (key=value lines).
+  Do NOT decide pass/fail here and do NOT write recommendations.
 """
 
-# Double braces {{ }} escape literal braces for str.format().
-ASSESS_PROMPT = """Assess this single checklist requirement carefully.
-
-Use tools only as needed for THIS requirement, then respond with a compact JSON object only (no markdown fences):
-
-{{
-  "status": "pass|fail|partial|error",
-  "evidence": "short factual evidence from tools (key values only)",
-  "remediation": "what to change if not pass, else empty",
-  "notes": "optional clarifications"
-}}
-
-Quality tips:
-- One precise mcp_query is better than many exploratory calls.
-- Example: mcp_query sql="SELECT name, setting FROM pg_settings WHERE name = ANY(ARRAY['ssl','password_encryption'])"
+EVIDENCE_PROMPT = """Collect minimal evidence for this requirement.
 
 Operator context (may be truncated):
 {user_request}
 
 Requirement:
 {requirement_block}
+
+After tools, reply with compact evidence only (bullet or key=value lines).
 """
 
-FORCE_DECIDE_PROMPT = """Tool-round budget for this requirement is exhausted.
-
-Using ONLY the evidence already in this conversation, decide now.
-Do not call tools. Return the JSON object only (status/evidence/remediation/notes).
-If evidence is incomplete, use status=partial or status=error and say what is missing.
+EVIDENCE_FORCE_PROMPT = """Tool budget exhausted. Summarize evidence already gathered
+as compact key=value lines. Do not call tools. Do not judge pass/fail.
 """
 
-# Finalize uses a compact digest (not the full chat transcript).
-FINALIZE_PROMPT = """You are finalizing a PostgreSQL audit.
+# --- Cell fill (no tools; tiny context) ---
 
-Below is a compact digest of findings (one row per requirement). Write a clear
-executive summary for the operator:
-- overall risk posture
-- critical/high failures first (call out IDs)
-- what was not assessable (errors)
-- top remediation priorities
+FILL_SYSTEM_PROMPT = """You fill cells in a fixed PostgreSQL audit report.
 
-Do not invent findings that are not listed. Keep it concise and actionable.
+You receive: requirement metadata (fixed) + evidence (from tools).
+You output ONLY a JSON object with three cells — nothing else:
 
-Findings digest:
+{
+  "status": "pass|fail|partial|error",
+  "observation": "factual observation from evidence (short)",
+  "recommendation": "actionable fix if not pass, else empty"
+}
+
+Rules:
+- Do not invent facts not present in evidence.
+- If evidence is missing/failed, status=error and say what is missing in observation.
+- Keep observation and recommendation concise (1–3 sentences each).
+- Pass criteria are given for judgment; do not rewrite them.
+"""
+
+FILL_CELL_PROMPT = """Fill report cells for this requirement.
+
+### Fixed requirement (do not rewrite)
+- ID: {req_id}
+- Title: {title}
+- Category: {category}
+- Severity: {severity}
+- Pass criteria: {pass_criteria}
+- How to verify: {how_to_verify}
+
+### Evidence (from tools; may be truncated)
+{evidence}
+
+Return JSON only with keys status, observation, recommendation.
+"""
+
+# Finalize uses a compact digest (not chat transcripts).
+FINALIZE_PROMPT = """Write a short executive summary for this PostgreSQL audit.
+
+The report uses a fixed format; below is a compact digest of filled cells.
+Cover: overall risk, critical/high failures (by ID), errors, top recommendations.
+Do not invent rows. Keep it concise.
+
+Digest:
 {report}
 """

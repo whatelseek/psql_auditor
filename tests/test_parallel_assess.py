@@ -33,7 +33,7 @@ async def test_assess_parallel_runs_workers_and_merges_findings():
         "REQ-002": Requirement(id="REQ-002", title="B"),
         "REQ-003": Requirement(id="REQ-003", title="C"),
     }
-    with patch.object(graph, "_assess_one_isolated", side_effect=fake_assess):
+    with patch.object(graph, "_fill_requirement_cells", side_effect=fake_assess):
         result = await graph.assess_parallel(
             {
                 "requirements": reqs,
@@ -79,7 +79,7 @@ async def test_assess_parallel_respects_concurrency_limit():
         f"REQ-{i:03d}": Requirement(id=f"REQ-{i:03d}", title=str(i))
         for i in range(1, 6)
     }
-    with patch.object(graph, "_assess_one_isolated", side_effect=fake_assess):
+    with patch.object(graph, "_fill_requirement_cells", side_effect=fake_assess):
         await graph.assess_parallel(
             {
                 "requirements": reqs,

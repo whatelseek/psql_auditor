@@ -92,17 +92,23 @@ Requirements live in [`checklists/postgres_cis.md`](checklists/postgres_cis.md).
 **Pass criteria:** ...
 ```
 
-## Context window, quality & parallelism
+## Fixed report format (safe context / tokens)
 
-Default policy prioritizes **safe context** and **judgment quality**, with parallel speed:
+The checklist defines a **fixed report skeleton**. The model does **not** rewrite requirements — it only fills three cells per row:
 
-- **Parallel assessments** — up to `MAX_PARALLEL_ASSESSMENTS` (default 5) requirements run concurrently; each worker has an isolated message window.
-- **Truncated tool outputs** (`MAX_TOOL_OUTPUT_CHARS`) so large query dumps cannot blow the context.
-- **Capped ReAct depth** (`MAX_TOOL_ROUNDS_PER_ITEM`) then a forced JSON decision from evidence already gathered.
-- **Finalize uses a compact digest** — the summary model does not see chat transcripts; the operator still gets the full report.
-- **MCP stdio is serialized** (protocol-safe) while LLM calls overlap across workers.
+| Fixed (from checklist) | Filled by model |
+|------------------------|-----------------|
+| ID, Title, Category, Severity, Pass criteria, How to verify | **Status**, **Observation**, **Recommendation** |
 
-Tune via `.env` (see `.env.example`). Raise `MAX_PARALLEL_ASSESSMENTS` for speed if your LiteLLM provider allows; lower it if you hit rate limits.
+Per requirement (parallel workers):
+
+1. **Evidence phase** — short tool loop; keep a truncated evidence blob only
+2. **Fill phase** — tiny no-tool prompt → JSON `{status, observation, recommendation}`
+3. **Assembly** — deterministic Markdown table + detail blocks
+
+Also: `MAX_PARALLEL_ASSESSMENTS` (default 5), tool truncation / ReAct caps, compact finalize digest, MCP stdio serialized.
+
+Tune via `.env` (see `.env.example`).
 
 ## Configuration
 

@@ -98,14 +98,23 @@ def compact_findings_for_summary(
     Returns:
         Compact Markdown table-like bullet list.
     """
-    lines = ["| ID | Status | Severity | Title | Evidence |", "|---|---|---|---|---|"]
+    lines = [
+        "| ID | Status | Severity | Title | Observation | Recommendation |",
+        "|---|---|---|---|---|---|",
+    ]
     for req_id in sorted(findings.keys()):
         f = findings[req_id]
         if not isinstance(f, Finding):
             f = Finding.model_validate(f)
-        ev = truncate_text((f.evidence or "").replace("\n", " "), evidence_chars, "ev")
+        obs = truncate_text(
+            (f.evidence or "").replace("\n", " "), evidence_chars, "obs"
+        )
+        rec = truncate_text(
+            (f.remediation or "").replace("\n", " "), evidence_chars, "rec"
+        )
         lines.append(
             f"| {req_id} | {f.status} | {f.severity or '-'} | "
-            f"{(f.title or '').replace('|', '/')} | {ev.replace('|', '/')} |"
+            f"{(f.title or '').replace('|', '/')} | "
+            f"{obs.replace('|', '/')} | {rec.replace('|', '/')} |"
         )
     return "\n".join(lines)
