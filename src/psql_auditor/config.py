@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -38,12 +39,13 @@ class Settings(BaseSettings):
         ssh_private_key_path: Path to a private key file inside the container/host.
         ssh_password: Password auth fallback when no key path is set.
         ssh_connect_timeout: Seconds to wait for the SSH TCP/handshake.
-        database_url: Full PostgreSQL DSN for SQL tools (preferred).
-        pg_host / pg_port / pg_user / pg_password / pg_database: Discrete DSN
-            parts used when ``database_url`` is unset.
-        mcp_postgres_url: SSE/HTTP URL of a Postgres MCP server.
-        mcp_postgres_command: Executable for a stdio MCP server.
-        mcp_postgres_args: Space-separated args for the stdio MCP command.
+        database_url: Optional PostgreSQL DSN; parsed into PG_* for the MCP
+            subprocess when discrete fields are incomplete.
+        pg_host / pg_port / pg_user / pg_password / pg_database: Credentials
+            passed to antonorlov/mcp-postgres-server as ``PG_*`` env vars.
+        mcp_postgres_command: Stdio MCP executable (default ``npx``).
+        mcp_postgres_args: Args for the MCP command (default
+            ``-y mcp-postgres-server`` from antonorlov/mcp-postgres-server).
     """
 
     model_config = SettingsConfigDict(
@@ -74,7 +76,7 @@ class Settings(BaseSettings):
     ssh_password: str | None = None
     ssh_connect_timeout: int = 15
 
-    # --- Direct PostgreSQL connection for SQL tools ---
+    # --- PostgreSQL credentials for antonorlov/mcp-postgres-server ---
     database_url: str | None = None
     pg_host: str | None = None
     pg_port: int = 5432
@@ -82,33 +84,78 @@ class Settings(BaseSettings):
     pg_password: str | None = None
     pg_database: str = "postgres"
 
-    # --- Optional Postgres MCP server ---
-    mcp_postgres_url: str | None = None
-    mcp_postgres_command: str | None = None
-    mcp_postgres_args: str | None = None  # space-separated CLI args
+    # --- MCP stdio: https://github.com/antonorlov/mcp-postgres-server ---
+    mcp_postgres_command: str = "npx"
+    mcp_postgres_args: str = "-y mcp-postgres-server"
+
+    def resolve_pg_fields(self) -> dict[str, str | int]:
+        """Resolve discrete PG connection fields, parsing ``database_url`` if needed.
+
+        Returns:
+            Dict with keys host, port, user, password, database. Missing values
+            may be empty strings.
+        """
+        host = self.pg_host or ""
+        port = self.pg_port
+        user = self.pg_user
+        password = self.pg_password or ""
+        database = self.pg_database
+
+        if self.database_url and not host:
+            parsed = urlparse(self.database_url)
+            host = parsed.hostname or ""
+            port = parsed.port or 5432
+            user = unquote(parsed.username) if parsed.username else user
+            password = unquote(parsed.password) if parsed.password else password
+            database = (parsed.path or "/").lstrip("/") or database
+
+        return {
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password,
+            "database": database,
+        }
+
+    def pg_env_for_mcp(self) -> dict[str, str]:
+        """Environment variables expected by antonorlov/mcp-postgres-server.
+
+        The MCP server reads ``PG_HOST``, ``PG_PORT``, ``PG_USER``,
+        ``PG_PASSWORD``, ``PG_DATABASE`` and auto-connects when all are set.
+
+        Returns:
+            Mapping suitable for ``StdioServerParameters.env`` overlays.
+        """
+        fields = self.resolve_pg_fields()
+        env: dict[str, str] = {}
+        if fields["host"]:
+            env["PG_HOST"] = str(fields["host"])
+        env["PG_PORT"] = str(fields["port"])
+        if fields["user"]:
+            env["PG_USER"] = str(fields["user"])
+        if fields["password"]:
+            env["PG_PASSWORD"] = str(fields["password"])
+        if fields["database"]:
+            env["PG_DATABASE"] = str(fields["database"])
+        return env
 
     def resolve_database_url(self) -> str | None:
-        """Build a PostgreSQL DSN from settings.
-
-        Preference order:
-
-        1. ``database_url`` if set (used as-is).
-        2. Discrete ``pg_*`` fields when ``pg_host`` is set.
-        3. ``None`` when neither is configured (SQL tools return a clear error).
+        """Build a PostgreSQL DSN from settings (diagnostics / fallbacks).
 
         Returns:
             A ``postgresql://…`` connection string, or ``None`` if incomplete.
         """
         if self.database_url:
             return self.database_url
-        if self.pg_host:
-            password = self.pg_password or ""
-            # Include password in the userinfo section only when present.
-            auth = f"{self.pg_user}:{password}@" if password else f"{self.pg_user}@"
-            return (
-                f"postgresql://{auth}{self.pg_host}:{self.pg_port}/{self.pg_database}"
-            )
-        return None
+        fields = self.resolve_pg_fields()
+        if not fields["host"]:
+            return None
+        password = str(fields["password"] or "")
+        user = str(fields["user"])
+        auth = f"{user}:{password}@" if password else f"{user}@"
+        return (
+            f"postgresql://{auth}{fields['host']}:{fields['port']}/{fields['database']}"
+        )
 
 
 @lru_cache

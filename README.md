@@ -1,6 +1,6 @@
 # psql_auditor
 
-LangGraph PostgreSQL security auditor. The agent walks a Markdown checklist **one requirement at a time**, gathers evidence with **SSH** and **PostgreSQL/MCP** tools, calls models through **LiteLLM**, and exposes an **OpenAI-compatible API** for **Open WebUI**.
+LangGraph PostgreSQL security auditor. The agent walks a Markdown checklist **one requirement at a time**, gathers evidence with **SSH** and **PostgreSQL MCP** ([antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server)), calls models through **LiteLLM**, and exposes an **OpenAI-compatible API** for **Open WebUI**.
 
 ## Architecture
 
@@ -8,31 +8,37 @@ LangGraph PostgreSQL security auditor. The agent walks a Markdown checklist **on
 Open WebUI  →  Agent API (/v1/chat/completions)  →  LangGraph
                       │                                │
                       │                                ├─ SSH tools
-                      │                                ├─ SQL / MCP tools
+                      │                                ├─ MCP Postgres (npx mcp-postgres-server)
                       │                                └─ checklist MD
                       └─ LiteLLM (model gateway)
 ```
 
+**Database queries always go through MCP** (`mcp_query`, catalog helpers). Direct SQL is not bound into the agent.
+
 ## Quick start
 
-1. Copy env and set at least a model provider key:
+1. Copy env and set provider + Postgres credentials:
 
 ```bash
 cp .env.example .env
-# set OPENAI_API_KEY, and optionally SSH_* / DATABASE_URL
+# set OPENAI_API_KEY
+# set PG_HOST / PG_USER / PG_PASSWORD / PG_DATABASE  (or DATABASE_URL)
+# optional: SSH_* for host checks
 ```
 
-2. Start the stack:
+2. Start the stack (agent image includes Node.js for `npx`):
 
 ```bash
 docker compose up --build
 ```
 
-3. Open WebUI at [http://localhost:3000](http://localhost:3000). Select model **`psql-auditor`** (or add connection `http://agent:8000/v1` with API key `sk-auditor-local` if not pre-wired).
+3. Open WebUI at [http://localhost:3000](http://localhost:3000). Select model **`psql-auditor`**.
 
 4. Ask: `Run a full PostgreSQL security audit against the configured host.`
 
 ### Local API (without Compose UI)
+
+Requires Node.js so `npx -y mcp-postgres-server` can run.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -40,17 +46,39 @@ pip install -e ".[dev]"
 uvicorn psql_auditor.api.app:app --host 0.0.0.0 --port 8000
 ```
 
-LiteLLM should be reachable at `LITELLM_BASE_URL` (default `http://localhost:4000`).
+## Postgres MCP ([antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server))
+
+Defaults in `.env` / Compose:
 
 ```bash
-curl -s http://localhost:8000/v1/models \
-  -H "Authorization: Bearer sk-auditor-local"
-
-curl -s http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer sk-auditor-local" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"psql-auditor","messages":[{"role":"user","content":"Audit PostgreSQL now"}],"stream":false}'
+MCP_POSTGRES_COMMAND=npx
+MCP_POSTGRES_ARGS=-y mcp-postgres-server
+PG_HOST=...
+PG_PORT=5432
+PG_USER=...
+PG_PASSWORD=...
+PG_DATABASE=...
 ```
+
+The agent keeps a persistent stdio MCP session and passes `PG_*` into the subprocess. Agent tools:
+
+| Tool | MCP tool | Purpose |
+|------|----------|---------|
+| `mcp_query` | `query` | SELECT evidence (`SHOW` auto-rewritten to `pg_settings`) |
+| `mcp_list_schemas` | `list_schemas` | List schemas |
+| `mcp_list_tables` | `list_tables` | List tables |
+| `mcp_describe_table` | `describe_table` | Table structure |
+| `mcp_connect_db` | `connect_db` | Explicit connect (usually unused if `PG_*` set) |
+
+Mutating MCP `execute` is **not** exposed.
+
+## Tools (host)
+
+| Tool | Purpose |
+|------|---------|
+| `ssh_run` / `ssh_read_file` | Host config, packages, ports, file perms |
+
+For SSH keys in Compose, place the key under `./.keys` and set `SSH_PRIVATE_KEY_PATH=/keys/id_rsa`.
 
 ## Checklist
 
@@ -64,28 +92,15 @@ Requirements live in [`checklists/postgres_cis.md`](checklists/postgres_cis.md).
 **Pass criteria:** ...
 ```
 
-Replace or extend the file; the agent reloads it on each audit run (`CHECKLIST_PATH`).
-
-## Tools
-
-| Tool | Purpose |
-|------|---------|
-| `ssh_run` / `ssh_read_file` | Host config, packages, ports, file perms |
-| `run_sql` | Read-only `SHOW` / `SELECT` against `DATABASE_URL` |
-| `mcp_call_tool` / `mcp_list_tools` | Optional Postgres MCP server |
-
-Configure via `.env` (`SSH_*`, `DATABASE_URL` or `PG_*`, `MCP_POSTGRES_URL` or `MCP_POSTGRES_COMMAND`).
-
-For SSH keys in Compose, place the key under `./.keys` (or set `SSH_KEY_HOST_PATH`) and set `SSH_PRIVATE_KEY_PATH=/keys/id_rsa`.
-
 ## Configuration
 
-See [`.env.example`](.env.example). Important knobs:
+See [`.env.example`](.env.example):
 
-- `LITELLM_BASE_URL` / `LITELLM_MODEL` / `LITELLM_API_KEY` — model gateway
+- `LITELLM_*` — model gateway
 - `API_KEY` — optional Bearer gate for `/v1`
-- `CHECKLIST_PATH` — Markdown checklist
-- Target access: `SSH_*`, `DATABASE_URL`, `MCP_*`
+- `PG_*` / `DATABASE_URL` — credentials for MCP Postgres
+- `MCP_POSTGRES_COMMAND` / `MCP_POSTGRES_ARGS` — MCP launcher
+- `SSH_*` — host checks
 
 ## Development
 

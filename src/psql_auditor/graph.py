@@ -29,18 +29,19 @@ from psql_auditor.llm import build_chat_model
 from psql_auditor.prompts import ASSESS_PROMPT, FINALIZE_PROMPT, SYSTEM_PROMPT
 from psql_auditor.state import AuditorState, Finding, render_report
 from psql_auditor.tools.mcp_client import get_mcp_tools
-from psql_auditor.tools.postgres import get_postgres_tools
 from psql_auditor.tools.ssh import get_ssh_tools
 
 
 def _all_tools() -> list:
     """Collect every LangChain tool bound into the assess-loop model.
 
+    Database access is MCP-only (antonorlov/mcp-postgres-server via
+    ``mcp_query`` and related helpers). Direct ``run_sql`` is not bound.
+
     Returns:
-        Flat list of SSH + SQL + MCP tool callables for ``bind_tools`` /
-        ``ToolNode``.
+        Flat list of SSH + MCP tool callables for ``bind_tools`` / ``ToolNode``.
     """
-    return [*get_ssh_tools(), *get_postgres_tools(), *get_mcp_tools()]
+    return [*get_ssh_tools(), *get_mcp_tools()]
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
