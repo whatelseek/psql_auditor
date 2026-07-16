@@ -1,0 +1,64 @@
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-sk-litellm-local}
+    command: ["--config", "/app/config.yaml", "--host", "0.0.0.0", "--port", "4000"]
+    restart: unless-stopped
+
+  agent:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-sk-litellm-local}
+      LITELLM_MODEL: ${LITELLM_MODEL:-gpt-4o-mini}
+      CHECKLIST_PATH: /app/checklists/postgres_cis.md
+      API_KEY: ${API_KEY:-sk-auditor-local}
+      # Mount or inject SSH key path inside the container as needed:
+      SSH_HOST: ${SSH_HOST:-}
+      SSH_PORT: ${SSH_PORT:-22}
+      SSH_USER: ${SSH_USER:-postgres}
+      SSH_PRIVATE_KEY_PATH: ${SSH_PRIVATE_KEY_PATH:-}
+      SSH_PASSWORD: ${SSH_PASSWORD:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+      MCP_POSTGRES_URL: ${MCP_POSTGRES_URL:-}
+      MCP_POSTGRES_COMMAND: ${MCP_POSTGRES_COMMAND:-}
+      MCP_POSTGRES_ARGS: ${MCP_POSTGRES_ARGS:-}
+    volumes:
+      - ./checklists:/app/checklists:ro
+      # Optional: mount SSH private key, e.g. ./secrets/id_rsa:/keys/id_rsa:ro
+      - ${SSH_KEY_HOST_PATH:-./.keys}:/keys:ro
+    depends_on:
+      - litellm
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "3000:8080"
+    environment:
+      # Pre-wire Open WebUI to the auditor OpenAI-compatible API
+      ENABLE_OPENAI_API: "true"
+      ENABLE_OLLAMA_API: "false"
+      OPENAI_API_BASE_URL: http://agent:8000/v1
+      OPENAI_API_BASE_URLS: http://agent:8000/v1
+      OPENAI_API_KEY: ${API_KEY:-sk-auditor-local}
+      OPENAI_API_KEYS: ${API_KEY:-sk-auditor-local}
+      WEBUI_AUTH: ${WEBUI_AUTH:-false}
+    volumes:
+      - open-webui-data:/app/backend/data
+    depends_on:
+      - agent
+    restart: unless-stopped
+
+volumes:
+  open-webui-data:
