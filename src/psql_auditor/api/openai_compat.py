@@ -281,9 +281,11 @@ async def _stream_audit(
     Yields:
         SSE frame strings ready to write to the HTTP response body.
     """
+    settings = get_settings()
     yield _sse_chunk(None, model, completion_id)
     yield _sse_chunk(
-        "Starting PostgreSQL checklist audit…\n\n",
+        "Starting PostgreSQL checklist audit "
+        f"(parallel workers={settings.max_parallel_assessments})…\n\n",
         model,
         completion_id,
     )

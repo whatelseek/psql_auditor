@@ -92,16 +92,17 @@ Requirements live in [`checklists/postgres_cis.md`](checklists/postgres_cis.md).
 **Pass criteria:** ...
 ```
 
-## Context window & quality
+## Context window, quality & parallelism
 
-Default policy prioritizes **safe context** and **judgment quality**:
+Default policy prioritizes **safe context** and **judgment quality**, with parallel speed:
 
-- **One requirement per LLM window** — message history is cleared between `REQ-*` items (findings are kept separately).
+- **Parallel assessments** — up to `MAX_PARALLEL_ASSESSMENTS` (default 5) requirements run concurrently; each worker has an isolated message window.
 - **Truncated tool outputs** (`MAX_TOOL_OUTPUT_CHARS`) so large query dumps cannot blow the context.
 - **Capped ReAct depth** (`MAX_TOOL_ROUNDS_PER_ITEM`) then a forced JSON decision from evidence already gathered.
-- **Finalize uses a compact digest** — the summary model does not see the full chat transcript; the operator still gets the full report.
+- **Finalize uses a compact digest** — the summary model does not see chat transcripts; the operator still gets the full report.
+- **MCP stdio is serialized** (protocol-safe) while LLM calls overlap across workers.
 
-Tune via `.env` (see `.env.example`). Prefer a stronger `LITELLM_MODEL` for quality; context guards keep windows bounded either way.
+Tune via `.env` (see `.env.example`). Raise `MAX_PARALLEL_ASSESSMENTS` for speed if your LiteLLM provider allows; lower it if you hit rate limits.
 
 ## Configuration
 
@@ -112,7 +113,7 @@ See [`.env.example`](.env.example):
 - `PG_*` / `DATABASE_URL` — credentials for MCP Postgres
 - `MCP_POSTGRES_COMMAND` / `MCP_POSTGRES_ARGS` — MCP launcher
 - `SSH_*` — host checks
-- `MAX_TOOL_*` / `MAX_*_CHARS` — context guards
+- `MAX_TOOL_*` / `MAX_*_CHARS` / `MAX_PARALLEL_ASSESSMENTS` — context & concurrency
 
 ## Development
 

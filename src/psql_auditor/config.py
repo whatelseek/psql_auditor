@@ -53,6 +53,8 @@ class Settings(BaseSettings):
         max_finding_evidence_chars: Cap stored finding evidence length.
         max_user_request_chars: Cap operator prompt injected into assess prompts.
         max_finalize_evidence_chars: Evidence snippet size in the finalize digest.
+        max_parallel_assessments: Max concurrent requirement workers (LLM/tool
+            fan-out). MCP stdio calls remain serialized for protocol safety.
     """
 
     model_config = SettingsConfigDict(
@@ -95,13 +97,15 @@ class Settings(BaseSettings):
     mcp_postgres_command: str = "npx"
     mcp_postgres_args: str = "-y mcp-postgres-server"
 
-    # --- Context window / quality guards ---
+    # --- Context window / quality / parallelism guards ---
     # One requirement per LLM window; truncate tools; cap ReAct depth.
     max_tool_rounds_per_item: int = 4
     max_tool_output_chars: int = 6000
     max_finding_evidence_chars: int = 2500
     max_user_request_chars: int = 1500
     max_finalize_evidence_chars: int = 240
+    # Concurrent REQ-* workers (LLM overlap). MCP stdio is still single-flight.
+    max_parallel_assessments: int = 5
 
     def resolve_pg_fields(self) -> dict[str, str | int]:
         """Resolve discrete PG connection fields, parsing ``database_url`` if needed.
