@@ -46,6 +46,13 @@ class Settings(BaseSettings):
         mcp_postgres_command: Stdio MCP executable (default ``npx``).
         mcp_postgres_args: Args for the MCP command (default
             ``-y mcp-postgres-server`` from antonorlov/mcp-postgres-server).
+        max_tool_rounds_per_item: Cap ReAct tool loops per requirement (context
+            safety). After the cap, the model must judge from gathered evidence.
+        max_tool_output_chars: Truncate each tool result before it enters the
+            LLM context.
+        max_finding_evidence_chars: Cap stored finding evidence length.
+        max_user_request_chars: Cap operator prompt injected into assess prompts.
+        max_finalize_evidence_chars: Evidence snippet size in the finalize digest.
     """
 
     model_config = SettingsConfigDict(
@@ -87,6 +94,14 @@ class Settings(BaseSettings):
     # --- MCP stdio: https://github.com/antonorlov/mcp-postgres-server ---
     mcp_postgres_command: str = "npx"
     mcp_postgres_args: str = "-y mcp-postgres-server"
+
+    # --- Context window / quality guards ---
+    # One requirement per LLM window; truncate tools; cap ReAct depth.
+    max_tool_rounds_per_item: int = 4
+    max_tool_output_chars: int = 6000
+    max_finding_evidence_chars: int = 2500
+    max_user_request_chars: int = 1500
+    max_finalize_evidence_chars: int = 240
 
     def resolve_pg_fields(self) -> dict[str, str | int]:
         """Resolve discrete PG connection fields, parsing ``database_url`` if needed.
