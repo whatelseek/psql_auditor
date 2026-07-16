@@ -1,4 +1,15 @@
-"""FastAPI application entrypoint."""
+"""FastAPI application entrypoint.
+
+Creates the ASGI app that Open WebUI (or curl / the OpenAI SDK) talks to.
+The OpenAI-compatible routes live under ``/v1``; ``/healthz`` is a simple
+liveness probe for Compose / orchestrators.
+
+Run via::
+
+    uvicorn psql_auditor.api.app:app --host 0.0.0.0 --port 8000
+
+or the console script ``psql-auditor`` which calls ``main()``.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +22,15 @@ from psql_auditor.config import get_settings
 
 
 def create_app() -> FastAPI:
+    """Build and configure the FastAPI application.
+
+    Mounts the OpenAI-compatible router and registers a health endpoint.
+    Kept as a factory (rather than only a module-level ``app``) so tests can
+    create isolated instances if needed.
+
+    Returns:
+        Configured ``FastAPI`` instance.
+    """
     app = FastAPI(
         title="PostgreSQL LangGraph Auditor",
         version=__version__,
@@ -23,15 +43,25 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
+        """Liveness probe used by Docker / load balancers.
+
+        Returns:
+            JSON ``{"status": "ok", "version": "<pkg version>"}``.
+        """
         return {"status": "ok", "version": __version__}
 
     return app
 
 
+# Module-level app for ``uvicorn psql_auditor.api.app:app``.
 app = create_app()
 
 
 def main() -> None:
+    """CLI entrypoint: start uvicorn with host/port from settings.
+
+    Invoked by the ``psql-auditor`` console script defined in ``pyproject.toml``.
+    """
     settings = get_settings()
     uvicorn.run(
         "psql_auditor.api.app:app",

@@ -1,7 +1,21 @@
-"""System and assessment prompts for the PostgreSQL auditor."""
+"""Prompt templates used by the LangGraph auditor nodes.
+
+Three prompt constants drive agent behavior:
+
+* ``SYSTEM_PROMPT`` — standing instructions for the auditor persona (injected
+  once when the checklist is loaded).
+* ``ASSESS_PROMPT`` — per-requirement assessment brief asking for JSON output
+  after optional tool use (``{user_request}``, ``{requirement_block}``).
+* ``FINALIZE_PROMPT`` — executive-summary request over the rendered findings
+  Markdown (``{report}``).
+
+Keep JSON schema instructions in ``ASSESS_PROMPT`` stable; ``graph._extract_json``
+and ``_finding_from_ai`` depend on those keys.
+"""
 
 from __future__ import annotations
 
+# Injected as a SystemMessage at the start of each audit run.
 SYSTEM_PROMPT = """You are a PostgreSQL security auditor agent.
 
 You revise a fixed checklist of requirements one item at a time. For each item you MUST:
@@ -17,6 +31,7 @@ Rules:
 - Be precise and cite concrete settings/values from tool results.
 """
 
+# Double braces {{ }} escape literal braces for str.format().
 ASSESS_PROMPT = """Assess this single checklist requirement. Use tools as needed, then respond with a compact JSON object only (no markdown fences):
 
 {{
@@ -33,6 +48,7 @@ Requirement:
 {requirement_block}
 """
 
+# Used by the finalize node after all requirements have findings.
 FINALIZE_PROMPT = """You are finalizing a PostgreSQL audit.
 
 Given the structured findings below, write a clear executive summary for the operator:

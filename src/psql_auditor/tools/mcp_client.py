@@ -1,4 +1,15 @@
-"""Optional MCP client for PostgreSQL MCP servers."""
+"""Optional MCP client for PostgreSQL MCP servers.
+
+Model Context Protocol (MCP) servers can expose database tools (query, list
+schemas, etc.). This module lets the auditor call those tools when configured:
+
+* **stdio** — ``MCP_POSTGRES_COMMAND`` (+ optional ``MCP_POSTGRES_ARGS``)
+* **SSE/HTTP** — ``MCP_POSTGRES_URL``
+
+If neither is set, tools return a clear error string and the agent should fall
+back to ``run_sql`` / SSH. Failures never raise into the graph; they are
+returned as text evidence.
+"""
 
 from __future__ import annotations
 
@@ -17,9 +28,15 @@ async def _call_mcp(
 ) -> str:
     """Invoke a tool on the configured Postgres MCP server.
 
-    Supports:
-    - MCP_POSTGRES_URL: SSE/HTTP MCP endpoint
-    - MCP_POSTGRES_COMMAND (+ optional MCP_POSTGRES_ARGS): stdio MCP server
+    Opens a short-lived MCP session (stdio or SSE), initializes the protocol,
+    calls ``tool_name`` with ``arguments``, and formats the content blocks.
+
+    Args:
+        tool_name: Name of the remote MCP tool (server-specific).
+        arguments: JSON-serializable argument object for the tool.
+
+    Returns:
+        Human-readable tool output, or an ``MCP error: …`` string.
     """
     settings = get_settings()
     arguments = arguments or {}
@@ -37,6 +54,7 @@ async def _call_mcp(
         return f"MCP error: mcp package unavailable: {exc}"
 
     try:
+        # Prefer stdio when a command is configured (common for local MCP servers).
         if settings.mcp_postgres_command:
             args = shlex.split(settings.mcp_postgres_args or "")
             server = StdioServerParameters(
@@ -49,7 +67,7 @@ async def _call_mcp(
                     result = await session.call_tool(tool_name, arguments=arguments)
                     return _format_mcp_result(result)
 
-        # HTTP/SSE transport when URL is provided
+        # Otherwise use SSE/HTTP transport against MCP_POSTGRES_URL.
         try:
             from mcp.client.sse import sse_client
         except ImportError:
@@ -68,6 +86,15 @@ async def _call_mcp(
 
 
 def _format_mcp_result(result: Any) -> str:
+    """Flatten MCP ``CallToolResult`` content blocks into plain text.
+
+    Args:
+        result: Object returned by ``ClientSession.call_tool``.
+
+    Returns:
+        Joined text from content blocks, JSON dumps for structured blocks,
+        or ``str(result)`` as a last resort.
+    """
     content = getattr(result, "content", None)
     if content is None:
         return str(result)
@@ -91,6 +118,10 @@ async def mcp_call_tool(tool_name: str, arguments_json: str = "{}") -> str:
     Args:
         tool_name: MCP tool name (e.g. query, list_tables — depends on the server).
         arguments_json: JSON object string of tool arguments.
+
+    Returns:
+        MCP tool output text, or an error describing invalid JSON / transport
+        problems.
     """
     try:
         arguments = json.loads(arguments_json) if arguments_json else {}
@@ -103,7 +134,14 @@ async def mcp_call_tool(tool_name: str, arguments_json: str = "{}") -> str:
 
 @tool
 async def mcp_list_tools() -> str:
-    """List tools exposed by the configured PostgreSQL MCP server."""
+    """List tools exposed by the configured PostgreSQL MCP server.
+
+    Useful as a discovery step before ``mcp_call_tool`` when the operator is
+    unsure which MCP tools the server provides.
+
+    Returns:
+        Bullet list of ``name: description`` lines, or an MCP error string.
+    """
     settings = get_settings()
     if not settings.mcp_postgres_url and not settings.mcp_postgres_command:
         return (
@@ -140,6 +178,14 @@ async def mcp_list_tools() -> str:
 
 
 def _format_tool_list(tools_result: Any) -> str:
+    """Format ``list_tools`` results as a readable bullet list.
+
+    Args:
+        tools_result: MCP list-tools response (object with ``.tools`` or a list).
+
+    Returns:
+        Newline-separated ``- name: description`` entries.
+    """
     tools = getattr(tools_result, "tools", tools_result)
     lines = []
     for t in tools:
@@ -150,4 +196,9 @@ def _format_tool_list(tools_result: Any) -> str:
 
 
 def get_mcp_tools() -> list:
+    """Return LangChain tools for MCP PostgreSQL access.
+
+    Returns:
+        ``[mcp_call_tool, mcp_list_tools]`` for binding into the assess model.
+    """
     return [mcp_call_tool, mcp_list_tools]
