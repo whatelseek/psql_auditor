@@ -1,22 +1,21 @@
-"""LangGraph workflow: load checklist → parallel fill report cells → finalize.
+"""LangGraph cyclic auditor: route framework → assess → reconnect → finalize.
 
-Control flow::
+Drop-in frameworks live in ``agents/*.md``. The operator request selects one.
+
+Control flow (cyclic for dead-session recovery)::
 
     START
-      → load_checklist
-      → assess_parallel   # per REQ: gather evidence → fill 3 cells
-      → finalize → END
+      → route_framework      # pick agents/<framework>.md from user text
+      → load_framework       # parse REQ-* skeleton
+      → assess_parallel      # fill cells (parallel workers)
+      → route_after_assess
+           ├─ recoverable errors & retries left → reconnect_session ─┐
+           │                                                         │
+           │◄────────────────────────────────────────────────────────┘
+           └─ else → finalize → END
 
-Fixed report format:
-
-* Checklist supplies immutable cells: ID, title, category, severity, pass criteria.
-* Model fills only: **status**, **observation**, **recommendation**.
-
-Token strategy:
-
-1. Evidence phase — short tool loop; keep only truncated evidence text.
-2. Fill phase — tiny no-tool prompt (requirement + evidence → JSON cells).
-3. Assembly — deterministic Markdown template (no LLM rewriting of checklist).
+``reconnect_session`` recycles the MCP stdio session and re-queues only
+failed/recoverable requirement ids so a dead session does not abort the run.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.messages import (
     AIMessage,
@@ -36,12 +35,17 @@ from langchain_core.messages import (
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from psql_auditor.checklist import Requirement, load_checklist
+from psql_auditor.checklist import Requirement
 from psql_auditor.config import Settings, get_settings
 from psql_auditor.context import (
     compact_findings_for_summary,
     count_tool_rounds,
     truncate_text,
+)
+from psql_auditor.frameworks import (
+    frameworks_catalog_text,
+    load_framework_checklist,
+    route_framework,
 )
 from psql_auditor.llm import build_chat_model
 from psql_auditor.prompts import (
@@ -53,17 +57,29 @@ from psql_auditor.prompts import (
     FINALIZE_PROMPT,
 )
 from psql_auditor.state import AuditorState, Finding, render_report
-from psql_auditor.tools.mcp_client import get_mcp_tools
+from psql_auditor.tools.mcp_client import get_mcp_tools, reconnect_mcp_session
 from psql_auditor.tools.ssh import get_ssh_tools
+
+_RECOVERABLE_MARKERS = (
+    "mcp error",
+    "mcp reconnect failed",
+    "ssh error",
+    "session",
+    "connection refused",
+    "connection reset",
+    "broken pipe",
+    "eof",
+    "not connected",
+    "timeout",
+)
 
 
 def _all_tools() -> list:
-    """Collect LangChain tools for the evidence-gathering phase."""
+    """SSH + MCP tools available to every framework worker."""
     return [*get_ssh_tools(), *get_mcp_tools()]
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
-    """Best-effort parse of a JSON object from model output."""
     text = text.strip()
     try:
         data = json.loads(text)
@@ -82,43 +98,56 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 
 def _normalize_status(value: str | None) -> str:
-    """Clamp a free-form status string to the allowed FindingStatus set."""
     allowed = {"pass", "fail", "partial", "error", "skipped"}
     status = (value or "error").strip().lower()
     return status if status in allowed else "error"
 
 
+def _is_recoverable_finding(finding: Finding) -> bool:
+    """True when a finding looks like a dead session / transport failure."""
+    if finding.status != "error":
+        return False
+    blob = f"{finding.evidence} {finding.notes}".lower()
+    return any(marker in blob for marker in _RECOVERABLE_MARKERS)
+
+
 class AuditorGraph:
-    """Compile and run the fixed-format PostgreSQL audit StateGraph."""
+    """Compile and run the cyclic multi-framework audit StateGraph."""
 
     def __init__(self, settings: Settings | None = None) -> None:
-        """Initialize models, tools, and compile the graph."""
         self.settings = settings or get_settings()
         self.tools = _all_tools()
         self.tools_by_name = {t.name: t for t in self.tools}
-        # Tool-calling model: evidence only.
         self.evidence_model = build_chat_model(self.settings).bind_tools(self.tools)
-        # No tools: fill report cells + finalize summary.
         self.fill_model = build_chat_model(self.settings)
         self.graph = self._build()
 
     def _build(self):
-        """Wire nodes: load → parallel cell fill → finalize."""
         graph = StateGraph(AuditorState)
-        graph.add_node("load_checklist", self.load_checklist)
+        graph.add_node("route_framework", self.route_framework_node)
+        graph.add_node("load_framework", self.load_framework)
         graph.add_node("assess_parallel", self.assess_parallel)
+        graph.add_node("reconnect_session", self.reconnect_session)
         graph.add_node("finalize", self.finalize)
 
-        graph.add_edge(START, "load_checklist")
-        graph.add_edge("load_checklist", "assess_parallel")
-        graph.add_edge("assess_parallel", "finalize")
+        graph.add_edge(START, "route_framework")
+        graph.add_edge("route_framework", "load_framework")
+        graph.add_edge("load_framework", "assess_parallel")
+        graph.add_conditional_edges(
+            "assess_parallel",
+            self.route_after_assess,
+            {
+                "reconnect_session": "reconnect_session",
+                "finalize": "finalize",
+            },
+        )
+        # Cycle: after reconnect, re-run assess on remaining pending_ids only.
+        graph.add_edge("reconnect_session", "assess_parallel")
         graph.add_edge("finalize", END)
         return graph.compile()
 
-    async def load_checklist(self, state: AuditorState) -> dict[str, Any]:
-        """Node: parse checklist and seed the fixed report row list."""
-        checklist = load_checklist(self.settings.checklist_path)
-        req_map: dict[str, Requirement] = checklist.by_id()
+    async def route_framework_node(self, state: AuditorState) -> dict[str, Any]:
+        """Node: choose ``agents/<framework>.md`` from the user request."""
         user_request = state.get("user_request") or ""
         if not user_request:
             for msg in reversed(state.get("messages") or []):
@@ -130,31 +159,92 @@ class AuditorGraph:
             self.settings.max_user_request_chars,
             "user_request",
         )
+        try:
+            fw = route_framework(user_request, self.settings.agents_dir)
+        except FileNotFoundError as exc:
+            return {
+                "user_request": user_request,
+                "error": str(exc),
+                "framework_id": "",
+                "framework_title": "",
+                "pending_ids": [],
+                "requirements": {},
+                "messages": [
+                    RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                    AIMessage(content=str(exc)),
+                ],
+            }
+
+        catalog = frameworks_catalog_text(self.settings.agents_dir)
         return {
-            "checklist_title": checklist.title,
-            "requirements": req_map,
-            "pending_ids": checklist.ids(),
-            "findings": {},
-            "current_id": None,
-            "report": "",
             "user_request": user_request,
+            "framework_id": fw.id,
+            "framework_title": fw.title,
+            "retry_count": 0,
+            "error": None,
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
                 SystemMessage(
                     content=(
-                        f"Fixed-format audit: {len(checklist.ids())} requirement rows. "
-                        f"Model fills Status/Observation/Recommendation only. "
-                        f"Parallelism={self.settings.max_parallel_assessments}."
+                        f"Selected framework `{fw.id}` ({fw.title}) from agents/.\n"
+                        f"{catalog}"
                     )
                 ),
             ],
         }
 
+    async def load_framework(self, state: AuditorState) -> dict[str, Any]:
+        """Node: load the drop-in Markdown checklist for the selected framework."""
+        if state.get("error") and not state.get("framework_id"):
+            return {"pending_ids": [], "requirements": {}}
+
+        from psql_auditor.frameworks import get_framework
+
+        selected = get_framework(
+            state.get("framework_id") or "",
+            self.settings.agents_dir,
+        )
+        if selected is None:
+            # Fallback: route again from user text.
+            selected = route_framework(
+                state.get("user_request") or "",
+                self.settings.agents_dir,
+            )
+        checklist = load_framework_checklist(selected)
+        req_map = checklist.by_id()
+        return {
+            "framework_id": selected.id,
+            "framework_title": selected.title,
+            "checklist_title": checklist.title,
+            "requirements": req_map,
+            "pending_ids": checklist.ids(),
+            "findings": {},
+            "report": "",
+            "messages": [
+                AIMessage(
+                    content=(
+                        f"Loaded {len(req_map)} requirements from "
+                        f"{selected.path}"
+                    ),
+                    name="auditor",
+                )
+            ],
+        }
+
     async def assess_parallel(self, state: AuditorState) -> dict[str, Any]:
-        """Node: fill report cells for all requirements in parallel."""
+        """Node: fill report cells for pending requirements (parallel)."""
         requirements = state.get("requirements") or {}
-        pending = list(state.get("pending_ids") or requirements.keys())
+        pending = list(state.get("pending_ids") or [])
+        if not pending:
+            return {
+                "pending_ids": [],
+                "messages": [
+                    AIMessage(content="No pending requirements to assess.", name="auditor")
+                ],
+            }
+
         user_request = state.get("user_request") or "(none)"
+        framework_id = state.get("framework_id") or ""
         limit = max(1, self.settings.max_parallel_assessments)
         sem = asyncio.Semaphore(limit)
 
@@ -165,6 +255,7 @@ class AuditorGraph:
                         req_id=req_id,
                         requirement=requirements[req_id],
                         user_request=user_request,
+                        framework_id=framework_id,
                     )
                 except Exception as exc:  # noqa: BLE001
                     req = requirements.get(req_id)
@@ -176,26 +267,58 @@ class AuditorGraph:
                         category=req.category if req else "",
                         pass_criteria=req.pass_criteria if req else "",
                         evidence=f"Cell fill failed: {type(exc).__name__}: {exc}",
-                        remediation="",
+                        remediation="Retry after restoring SSH/MCP session",
                     )
 
         work_ids = [rid for rid in pending if rid in requirements]
         findings_list = await asyncio.gather(*[_worker(rid) for rid in work_ids])
-        findings = {f.requirement_id: f for f in findings_list}
+        new_findings = {f.requirement_id: f for f in findings_list}
 
+        # Keep recoverable failures in pending_ids for the reconnect cycle.
+        retryable = [f.requirement_id for f in findings_list if _is_recoverable_finding(f)]
         return {
-            "findings": findings,
-            "pending_ids": [],
+            "findings": new_findings,
+            "pending_ids": retryable,
             "current_id": None,
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
                 AIMessage(
                     content=(
-                        f"Filled {len(findings)} report rows "
-                        f"(concurrency={limit})."
+                        f"Assessed {len(new_findings)} rows for `{framework_id}` "
+                        f"(concurrency={limit}); "
+                        f"recoverable failures queued={len(retryable)}."
                     ),
                     name="auditor",
                 ),
+            ],
+        }
+
+    def route_after_assess(
+        self, state: AuditorState
+    ) -> Literal["reconnect_session", "finalize"]:
+        """Cycle to reconnect when session-like errors remain and retries left."""
+        pending = state.get("pending_ids") or []
+        retry_count = int(state.get("retry_count") or 0)
+        max_retries = self.settings.max_session_retries
+        if pending and retry_count < max_retries:
+            return "reconnect_session"
+        return "finalize"
+
+    async def reconnect_session(self, state: AuditorState) -> dict[str, Any]:
+        """Node: restore MCP session and bump retry counter (graph cycle)."""
+        status = await reconnect_mcp_session()
+        retry_count = int(state.get("retry_count") or 0) + 1
+        pending = state.get("pending_ids") or []
+        return {
+            "retry_count": retry_count,
+            "messages": [
+                AIMessage(
+                    content=(
+                        f"Reconnect attempt #{retry_count}: {status}. "
+                        f"Re-queueing {len(pending)} requirements."
+                    ),
+                    name="auditor",
+                )
             ],
         }
 
@@ -204,20 +327,16 @@ class AuditorGraph:
         req_id: str,
         requirement: Requirement,
         user_request: str,
+        framework_id: str,
     ) -> Finding:
-        """Gather evidence, then fill status/observation/recommendation cells.
-
-        The fill-phase prompt intentionally excludes the tool transcript — only
-        a truncated evidence blob is passed — to keep token usage low and the
-        context window safe.
-        """
-        evidence = await self._gather_evidence(req_id, requirement, user_request)
+        evidence = await self._gather_evidence(
+            req_id, requirement, user_request, framework_id
+        )
         evidence = truncate_text(
             evidence,
             self.settings.max_tool_output_chars,
             "evidence",
         )
-
         fill_messages = [
             SystemMessage(content=FILL_SYSTEM_PROMPT),
             HumanMessage(
@@ -240,10 +359,16 @@ class AuditorGraph:
         req_id: str,
         requirement: Requirement,
         user_request: str,
+        framework_id: str,
     ) -> str:
-        """Run a short tool loop and return compact evidence text only."""
         messages: list = [
-            SystemMessage(content=EVIDENCE_SYSTEM_PROMPT),
+            SystemMessage(
+                content=(
+                    f"{EVIDENCE_SYSTEM_PROMPT}\n\n"
+                    f"Active framework: `{framework_id}`. "
+                    "Use SSH and/or MCP tools appropriate for this framework."
+                )
+            ),
             HumanMessage(
                 content=EVIDENCE_PROMPT.format(
                     user_request=user_request,
@@ -279,8 +404,6 @@ class AuditorGraph:
     async def _execute_tool_calls(
         self, tool_calls: list[dict[str, Any]]
     ) -> list[ToolMessage]:
-        """Run tool calls for one evidence turn (parallel where safe)."""
-
         async def _one(tc: dict[str, Any]) -> ToolMessage:
             name = tc.get("name") or ""
             args = tc.get("args") or {}
@@ -309,7 +432,6 @@ class AuditorGraph:
         ai: AIMessage,
         fallback_evidence: str,
     ) -> Finding:
-        """Map fill-phase JSON into a Finding; checklist fields stay fixed."""
         data = _extract_json(str(ai.content or "")) or {}
         observation = str(
             data.get("observation")
@@ -321,10 +443,13 @@ class AuditorGraph:
         recommendation = str(
             data.get("recommendation") or data.get("remediation") or ""
         )
-        finding = Finding(
+        # If observation still looks like a transport failure, force error status
+        # so the cyclic reconnect path can pick it up.
+        status = _normalize_status(data.get("status"))
+        tmp = Finding(
             requirement_id=req_id,
             title=req.title,
-            status=_normalize_status(data.get("status")),  # type: ignore[arg-type]
+            status=status,  # type: ignore[arg-type]
             severity=req.severity,
             category=req.category,
             pass_criteria=req.pass_criteria,
@@ -332,27 +457,46 @@ class AuditorGraph:
             remediation=recommendation,
             notes=str(data.get("notes") or ""),
         )
-        finding.evidence = truncate_text(
-            finding.evidence or "",
+        if _is_recoverable_finding(
+            Finding(
+                requirement_id=req_id,
+                status="error",
+                evidence=observation,
+            )
+        ) and status == "pass":
+            tmp.status = "error"
+        tmp.evidence = truncate_text(
+            tmp.evidence or "",
             self.settings.max_finding_evidence_chars,
             "observation",
         )
-        finding.remediation = truncate_text(
-            finding.remediation or "",
+        tmp.remediation = truncate_text(
+            tmp.remediation or "",
             min(self.settings.max_finding_evidence_chars, 1200),
             "recommendation",
         )
-        return finding
+        return tmp
 
     async def finalize(self, state: AuditorState) -> dict[str, Any]:
-        """Assemble fixed report; LLM writes a short executive summary only."""
+        """Assemble fixed report + short executive summary."""
+        if state.get("error") and not (state.get("requirements") or {}):
+            msg = state.get("error") or "No framework available."
+            return {
+                "report": msg,
+                "messages": [
+                    RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                    AIMessage(content=msg),
+                ],
+            }
+
         findings = state.get("findings") or {}
         requirements = state.get("requirements") or {}
-        full_report = render_report(
-            state.get("checklist_title") or "PostgreSQL Checklist",
-            findings,
-            requirements,
+        title = (
+            state.get("checklist_title")
+            or state.get("framework_title")
+            or "Security Audit"
         )
+        full_report = render_report(title, findings, requirements)
         digest = compact_findings_for_summary(
             findings,
             evidence_chars=self.settings.max_finalize_evidence_chars,
@@ -363,7 +507,7 @@ class AuditorGraph:
                     SystemMessage(
                         content=(
                             "You write short executive summaries for fixed-format "
-                            "PostgreSQL audit reports."
+                            "security audit reports across OS/DB frameworks."
                         )
                     ),
                     HumanMessage(content=FINALIZE_PROMPT.format(report=digest)),
@@ -373,9 +517,13 @@ class AuditorGraph:
         except Exception as exc:  # noqa: BLE001
             summary = f"(Summary generation failed: {exc})"
 
-        final_text = f"{summary}\n\n---\n\n{full_report}"
+        fw = state.get("framework_id") or ""
+        retries = int(state.get("retry_count") or 0)
+        header = f"Framework: `{fw}` | session reconnects: {retries}\n\n"
+        final_text = f"{header}{summary}\n\n---\n\n{full_report}"
         return {
             "report": final_text,
+            "pending_ids": [],
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
                 AIMessage(content=final_text),
@@ -383,7 +531,6 @@ class AuditorGraph:
         }
 
     async def arun(self, user_text: str) -> dict[str, Any]:
-        """Convenience wrapper: run a full audit for a single user prompt."""
         initial: AuditorState = {
             "messages": [HumanMessage(content=user_text)],
             "user_request": truncate_text(
@@ -391,6 +538,7 @@ class AuditorGraph:
                 self.settings.max_user_request_chars,
                 "user_request",
             ),
+            "retry_count": 0,
         }
         return await self.graph.ainvoke(initial)
 
@@ -399,7 +547,6 @@ _graph: AuditorGraph | None = None
 
 
 def get_auditor_graph() -> AuditorGraph:
-    """Return a lazily constructed process-wide AuditorGraph."""
     global _graph
     if _graph is None:
         _graph = AuditorGraph()

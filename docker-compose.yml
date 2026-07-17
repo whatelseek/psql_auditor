@@ -21,7 +21,8 @@ services:
       LITELLM_BASE_URL: http://litellm:4000
       LITELLM_API_KEY: ${LITELLM_API_KEY:-sk-litellm-local}
       LITELLM_MODEL: ${LITELLM_MODEL:-gpt-4o-mini}
-      CHECKLIST_PATH: /app/checklists/postgres_cis.md
+      AGENTS_DIR: /app/agents
+      MAX_SESSION_RETRIES: ${MAX_SESSION_RETRIES:-2}
       API_KEY: ${API_KEY:-sk-auditor-local}
       # Mount or inject SSH key path inside the container as needed:
       SSH_HOST: ${SSH_HOST:-}
@@ -39,7 +40,7 @@ services:
       MCP_POSTGRES_COMMAND: ${MCP_POSTGRES_COMMAND:-npx}
       MCP_POSTGRES_ARGS: ${MCP_POSTGRES_ARGS:-"-y mcp-postgres-server"}
     volumes:
-      - ./checklists:/app/checklists:ro
+      - ./agents:/app/agents:ro
       # Optional: mount SSH private key, e.g. ./secrets/id_rsa:/keys/id_rsa:ro
       - ${SSH_KEY_HOST_PATH:-./.keys}:/keys:ro
     depends_on:

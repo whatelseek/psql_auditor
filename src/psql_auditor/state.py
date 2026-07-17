@@ -58,6 +58,8 @@ class AuditorState(TypedDict, total=False):
 
     messages: Annotated[list[BaseMessage], add_messages]
     user_request: str
+    framework_id: str
+    framework_title: str
     checklist_title: str
     requirements: dict[str, Requirement]
     pending_ids: list[str]
@@ -66,6 +68,8 @@ class AuditorState(TypedDict, total=False):
     report: str
     error: str | None
     target_hints: dict[str, Any]
+    # Cyclic reconnect loop: how many session restores have been attempted.
+    retry_count: int
 
 
 def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:

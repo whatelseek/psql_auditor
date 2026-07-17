@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml README.md ./
 COPY src ./src
-COPY checklists ./checklists
+COPY agents ./agents
 
 RUN pip install --no-cache-dir .
 
@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir .
 RUN npx -y mcp-postgres-server --help >/dev/null 2>&1 || true
 
 ENV PYTHONUNBUFFERED=1 \
-    CHECKLIST_PATH=/app/checklists/postgres_cis.md \
+    AGENTS_DIR=/app/agents \
     HOST=0.0.0.0 \
     PORT=8000 \
     MCP_POSTGRES_COMMAND=npx \

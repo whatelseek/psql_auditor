@@ -1,11 +1,12 @@
 import asyncio
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from psql_auditor.checklist import Requirement
 from psql_auditor.config import Settings
-from psql_auditor.graph import AuditorGraph
+from psql_auditor.graph import AuditorGraph, _is_recoverable_finding
 from psql_auditor.state import Finding
 
 
@@ -15,11 +16,11 @@ async def test_assess_parallel_runs_workers_and_merges_findings():
         _env_file=None,
         max_parallel_assessments=3,
         max_tool_rounds_per_item=1,
-        checklist_path="checklists/postgres_cis.md",
+        agents_dir=Path("agents"),
     )
     graph = AuditorGraph(settings=settings)
 
-    async def fake_assess(req_id, requirement, user_request):
+    async def fake_assess(req_id, requirement, user_request, framework_id=""):
         await asyncio.sleep(0)  # yield to event loop
         return Finding(
             requirement_id=req_id,
@@ -52,7 +53,7 @@ async def test_assess_parallel_respects_concurrency_limit():
     settings = Settings(
         _env_file=None,
         max_parallel_assessments=2,
-        checklist_path="checklists/postgres_cis.md",
+        agents_dir=Path("agents"),
     )
     graph = AuditorGraph(settings=settings)
 
@@ -60,7 +61,7 @@ async def test_assess_parallel_respects_concurrency_limit():
     peak = 0
     lock = asyncio.Lock()
 
-    async def fake_assess(req_id, requirement, user_request):
+    async def fake_assess(req_id, requirement, user_request, framework_id=""):
         nonlocal current, peak
         async with lock:
             current += 1
@@ -90,3 +91,18 @@ async def test_assess_parallel_respects_concurrency_limit():
 
     assert peak <= 2
     assert peak >= 1
+
+
+def test_recoverable_finding_detects_mcp_errors():
+    f = Finding(
+        requirement_id="REQ-001",
+        status="error",
+        evidence="MCP error: ConnectionError: session closed",
+    )
+    assert _is_recoverable_finding(f)
+    f2 = Finding(
+        requirement_id="REQ-002",
+        status="fail",
+        evidence="ssl=off",
+    )
+    assert not _is_recoverable_finding(f2)

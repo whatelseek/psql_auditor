@@ -15,14 +15,17 @@ from __future__ import annotations
 
 # --- Evidence gathering (tool-calling model) ---
 
-EVIDENCE_SYSTEM_PROMPT = """You gather PostgreSQL audit evidence for ONE requirement.
+EVIDENCE_SYSTEM_PROMPT = """You gather audit evidence for ONE requirement from the active framework.
 
 Rules:
-- Use MCP tools only for DB facts: mcp_query, mcp_list_schemas, mcp_list_tables,
-  mcp_describe_table, mcp_connect_db (antonorlov/mcp-postgres-server).
-- Use SSH (ssh_run / ssh_read_file) only for host files, packages, ports, perms.
-- Prefer 1–2 focused tool calls. Prefer one SELECT returning needed columns.
-- Do not invent values. If tools fail, report the error text.
+- Use whatever tools fit the framework:
+  - Linux/Ubuntu/Windows host checks → ssh_run / ssh_read_file
+    (on Windows targets prefer powershell/pwsh commands over SSH).
+  - PostgreSQL / DB checks → mcp_query and related MCP tools
+    (antonorlov/mcp-postgres-server).
+- Prefer 1–2 focused tool calls. Avoid huge dumps.
+- Do not invent values. If tools/session fail, report the error text clearly
+  (include words like "MCP error" or "SSH error" so the run can reconnect).
 - When done, reply with a short plain-text evidence summary (key=value lines).
   Do NOT decide pass/fail here and do NOT write recommendations.
 """

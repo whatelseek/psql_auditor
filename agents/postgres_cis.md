@@ -1,3 +1,8 @@
+---
+id: postgres_cis
+aliases: [postgres, postgresql, psql, database, pg]
+description: PostgreSQL CIS / hardening checklist
+---
 # PostgreSQL Security Audit Checklist
 
 Scaffold CIS-style hardening checklist. Replace or extend this file as needed.

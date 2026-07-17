@@ -32,7 +32,8 @@ class Settings(BaseSettings):
         port: Bind port for the FastAPI/uvicorn server.
         model_id: Model id advertised on ``GET /v1/models`` and used as default
             in chat completions (Open WebUI selects this name).
-        checklist_path: Filesystem path to the Markdown checklist.
+        agents_dir: Directory of drop-in framework Markdown files (``agents/*.md``).
+        max_session_retries: Max cyclic MCP/session reconnect attempts.
         ssh_host: Target host for SSH tools; ``None`` disables SSH until set.
         ssh_port: SSH port (default 22).
         ssh_user: SSH username.
@@ -74,8 +75,9 @@ class Settings(BaseSettings):
     port: int = 8000
     model_id: str = "psql-auditor"
 
-    # --- Checklist source of truth ---
-    checklist_path: Path = Field(default=Path("checklists/postgres_cis.md"))
+    # --- Drop-in frameworks (you create these) ---
+    agents_dir: Path = Field(default=Path("agents"))
+    max_session_retries: int = 2
 
     # --- SSH target (PostgreSQL host) ---
     ssh_host: str | None = None
