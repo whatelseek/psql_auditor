@@ -64,12 +64,30 @@ When the audit finishes, the agent:
 
 Configure `PUBLIC_BASE_URL` (browser → agent) and `OPEN_WEBUI_URL` (agent → Open WebUI).
 
-## Chat examples (Open WebUI)
+## Starting an audit (Open WebUI)
+
+Operators start audits by **attaching a target file** (hostname/IP, SSH & Postgres credentials, host description) and asking the agent to run one or more frameworks.
+
+Full procedure, YAML/JSON schema, Open WebUI file-context settings, and security notes:
+
+→ **[`docs/starting-an-audit.md`](docs/starting-an-audit.md)**  
+→ Example file: [`docs/examples/target.example.yaml`](docs/examples/target.example.yaml)
+
+Short version:
+
+1. Open WebUI → model `psql-auditor`
+2. Attach target YAML/JSON (see example above)
+3. Chat: `Start PostgreSQL and Ubuntu CIS audit`
+4. Agent confirms target (secrets redacted) → assesses → HITL if needed → **Download ZIP** in chat
+
+Without a file, the agent falls back to `SSH_*` / `PG_*` from `.env`.
+
+### Chat examples
 
 - `Run a PostgreSQL CIS audit`
 - `Audit this Ubuntu host against CIS`
 - `Windows Server CIS hardening check`
-- `Conduct PostgreSQL and Ubuntu audit` → **two separate graphs in parallel**, merged report
+- `Conduct PostgreSQL and Ubuntu audit` → **two separate graphs**, merged report + ZIP
 
 ## Stack
 
