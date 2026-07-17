@@ -1,6 +1,6 @@
 # psql_auditor
 
-LangGraph security auditor. **You create frameworks** by dropping Markdown files into [`agents/`](agents/). The agent routes your chat request to a framework, fills a fixed report (Status / Observation / Recommendation), **writes command results under a folder per requirement**, and can **cycle to reconnect** if the MCP/SSH session dies.
+LangGraph security auditor. **You create frameworks** by dropping Markdown files into [`agents/`](agents/). The agent routes your chat request to a framework, fills a fixed report (Status / Observation / Recommendation), **writes command results under a folder per requirement**, **pauses for human-in-the-loop** when a check cannot be audited, and can **cycle to reconnect** if the MCP/SSH session dies.
 
 ## Create a framework
 
@@ -25,15 +25,33 @@ No code changes required — new files are discovered from `AGENTS_DIR`.
 
 Bundled examples: `postgres_cis`, `ubuntu_cis`, `windows_cis`.
 
-## Graph (cyclic)
+## Graph (cyclic + HITL)
 
 ```
 START → route_framework → load_framework → assess_parallel
                               ↑                    │
-                              └── reconnect_session ┘  (session errors & retries left)
-                                                   ↓
-                                              finalize → END
+                              │                    ├─ session errors → reconnect_session ─┐
+                              │                    │                                       │
+                              │◄───────────────────┴───────────────────────────────────────┘
+                              │                    │
+                              │                    └─ failed REQs → human_gate (interrupt)
+                              │                              │ skip / retry (chat reply)
+                              │◄──── retry ──────────────────┤
+                              │                              └─ no more failures → finalize → END
 ```
+
+### Human-in-the-loop (Open WebUI)
+
+Inspired by [Open WebUI ↔ LangGraph HITL pipes](https://pessini.medium.com/from-open-webui-to-langgraph-building-a-human-in-the-loop-pipe-for-real-time-ai-control-26561cca9f9c): the graph uses LangGraph ``interrupt()``; Open WebUI resumes on the next chat message.
+
+When a requirement fails after automatic session retries, the agent replies with:
+
+- which `REQ-*` could not be audited
+- **why** (SSH/MCP/tool error)
+- **recommendations**
+- ask: **skip** / **retry** (or **skip all** / **retry all**)
+
+Reply in the same chat. A marker `[AUDIT_HITL:<thread>]` ties the resume to the paused run. Set `HITL_ENABLED=false` to auto-finalize with `error` statuses instead.
 
 ## Chat examples (Open WebUI)
 
@@ -86,7 +104,7 @@ Multi-framework runs (e.g. PostgreSQL + Ubuntu) share one `<run_id>` with a subf
 
 ## Config
 
-See [`.env.example`](.env.example): `AGENTS_DIR`, `EVIDENCE_DIR`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
+See [`.env.example`](.env.example): `AGENTS_DIR`, `EVIDENCE_DIR`, `HITL_ENABLED`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
 
 ## Development
 

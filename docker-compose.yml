@@ -23,6 +23,7 @@ services:
       LITELLM_MODEL: ${LITELLM_MODEL:-gpt-4o-mini}
       AGENTS_DIR: /app/agents
       EVIDENCE_DIR: /app/artifacts
+      HITL_ENABLED: ${HITL_ENABLED:-true}
       MAX_SESSION_RETRIES: ${MAX_SESSION_RETRIES:-2}
       API_KEY: ${API_KEY:-sk-auditor-local}
       # Mount or inject SSH key path inside the container as needed:

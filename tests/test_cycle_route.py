@@ -20,11 +20,14 @@ def test_route_after_assess_cycles_when_retries_remain():
     )
     assert (
         graph.route_after_assess(
-            {"pending_ids": ["REQ-001"], "retry_count": 2}
+            {"pending_ids": ["REQ-001"], "retry_count": 2, "findings": {}}
         )
         == "finalize"
     )
-    assert graph.route_after_assess({"pending_ids": [], "retry_count": 0}) == "finalize"
+    assert (
+        graph.route_after_assess({"pending_ids": [], "retry_count": 0, "findings": {}})
+        == "finalize"
+    )
 
 
 def test_assess_queues_recoverable_failures():

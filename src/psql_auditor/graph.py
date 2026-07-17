@@ -1,21 +1,22 @@
-"""LangGraph cyclic auditor: route framework → assess → reconnect → finalize.
+"""LangGraph cyclic auditor: route → assess → reconnect / HITL → finalize.
 
 Drop-in frameworks live in ``agents/*.md``. The operator request selects one.
 
-Control flow (cyclic for dead-session recovery)::
+Control flow::
 
     START
-      → route_framework      # pick agents/<framework>.md from user text
-      → load_framework       # parse REQ-* skeleton
-      → assess_parallel      # fill cells (parallel workers)
+      → route_framework → load_framework → assess_parallel
       → route_after_assess
            ├─ recoverable errors & retries left → reconnect_session ─┐
            │                                                         │
            │◄────────────────────────────────────────────────────────┘
+           ├─ failed REQs (HITL) → human_gate  (LangGraph interrupt)
+           │         ├─ retry → assess_parallel
+           │         ├─ more failures → human_gate
+           │         └─ done → finalize → END
            └─ else → finalize → END
 
-``reconnect_session`` recycles the MCP stdio session and re-queues only
-failed/recoverable requirement ids so a dead session does not abort the run.
+``human_gate`` asks the operator to **skip** or **retry** via Open WebUI chat.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Literal
 
@@ -33,8 +35,10 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.types import Command, interrupt
 
 from psql_auditor.checklist import Requirement
 from psql_auditor.config import Settings, get_settings
@@ -50,6 +54,12 @@ from psql_auditor.frameworks import (
     load_framework_checklist,
     route_framework,
     route_frameworks,
+)
+from psql_auditor.hitl import (
+    build_hitl_prompt,
+    format_hitl_assistant_message,
+    interrupt_payload_to_prompt,
+    parse_hitl_decision,
 )
 from psql_auditor.llm import build_chat_model
 from psql_auditor.prompts import (
@@ -115,6 +125,22 @@ def _is_recoverable_finding(finding: Finding) -> bool:
     return any(marker in blob for marker in _RECOVERABLE_MARKERS)
 
 
+def _as_finding(value: Finding | dict[str, Any]) -> Finding:
+    return value if isinstance(value, Finding) else Finding.model_validate(value)
+
+
+def _hitl_candidates(state: AuditorState) -> list[str]:
+    """Requirement ids with ``status=error`` not yet skipped by the operator."""
+    findings = state.get("findings") or {}
+    skipped = set(state.get("hitl_skipped") or [])
+    out: list[str] = []
+    for req_id, raw in findings.items():
+        finding = _as_finding(raw)
+        if finding.status == "error" and req_id not in skipped:
+            out.append(req_id)
+    return sorted(out)
+
+
 class AuditorGraph:
     """Compile and run the cyclic multi-framework audit StateGraph."""
 
@@ -124,6 +150,9 @@ class AuditorGraph:
         self.tools_by_name = {t.name: t for t in self.tools}
         # Evidence stores keyed by run_id (safe for parallel multi-framework).
         self._evidence_by_run: dict[str, EvidenceStore] = {}
+        # Multi-framework orchestration while a HITL pause is active.
+        self._multi_sessions: dict[str, dict[str, Any]] = {}
+        self._checkpointer = MemorySaver()
         self.evidence_model = build_chat_model(self.settings).bind_tools(self.tools)
         self.fill_model = build_chat_model(self.settings)
         self.graph = self._build()
@@ -134,6 +163,7 @@ class AuditorGraph:
         graph.add_node("load_framework", self.load_framework)
         graph.add_node("assess_parallel", self.assess_parallel)
         graph.add_node("reconnect_session", self.reconnect_session)
+        graph.add_node("human_gate", self.human_gate)
         graph.add_node("finalize", self.finalize)
 
         graph.add_edge(START, "route_framework")
@@ -144,13 +174,23 @@ class AuditorGraph:
             self.route_after_assess,
             {
                 "reconnect_session": "reconnect_session",
+                "human_gate": "human_gate",
                 "finalize": "finalize",
             },
         )
         # Cycle: after reconnect, re-run assess on remaining pending_ids only.
         graph.add_edge("reconnect_session", "assess_parallel")
+        graph.add_conditional_edges(
+            "human_gate",
+            self.route_after_hitl,
+            {
+                "assess_parallel": "assess_parallel",
+                "human_gate": "human_gate",
+                "finalize": "finalize",
+            },
+        )
         graph.add_edge("finalize", END)
-        return graph.compile()
+        return graph.compile(checkpointer=self._checkpointer)
 
     async def route_framework_node(self, state: AuditorState) -> dict[str, Any]:
         """Node: choose ``agents/<framework>.md`` (honors pinned ``framework_id``)."""
@@ -317,13 +357,26 @@ class AuditorGraph:
 
     def route_after_assess(
         self, state: AuditorState
-    ) -> Literal["reconnect_session", "finalize"]:
-        """Cycle to reconnect when session-like errors remain and retries left."""
+    ) -> Literal["reconnect_session", "human_gate", "finalize"]:
+        """Reconnect on transport errors; otherwise ask the human about failures."""
         pending = state.get("pending_ids") or []
         retry_count = int(state.get("retry_count") or 0)
         max_retries = self.settings.max_session_retries
         if pending and retry_count < max_retries:
             return "reconnect_session"
+        if self.settings.hitl_enabled and _hitl_candidates(state):
+            return "human_gate"
+        return "finalize"
+
+    def route_after_hitl(
+        self, state: AuditorState
+    ) -> Literal["assess_parallel", "human_gate", "finalize"]:
+        """After skip/retry: reassess, ask about the next failure, or finalize."""
+        pending = state.get("pending_ids") or []
+        if pending:
+            return "assess_parallel"
+        if self.settings.hitl_enabled and _hitl_candidates(state):
+            return "human_gate"
         return "finalize"
 
     async def reconnect_session(self, state: AuditorState) -> dict[str, Any]:
@@ -343,6 +396,148 @@ class AuditorGraph:
                 )
             ],
         }
+
+    async def human_gate(self, state: AuditorState) -> dict[str, Any]:
+        """Pause for the operator when a requirement could not be audited.
+
+        Uses LangGraph ``interrupt()``. The OpenAI-compatible API resumes with
+        ``Command(resume=user_text)`` when the user replies skip/retry.
+        """
+        candidates = _hitl_candidates(state)
+        if not candidates:
+            return {"awaiting_hitl": False, "pending_ids": []}
+
+        requirements = state.get("requirements") or {}
+        findings = state.get("findings") or {}
+        framework_id = state.get("framework_id") or ""
+        store = self._store_from_state(state)
+
+        req_id = candidates[0]
+        finding = _as_finding(findings[req_id])
+        requirement = requirements.get(req_id) or Requirement(
+            id=req_id,
+            title=finding.title,
+            category=finding.category,
+            severity=finding.severity,
+            pass_criteria=finding.pass_criteria,
+        )
+        evidence_dir = None
+        if store is not None:
+            evidence_dir = str(store.requirement_dir(framework_id, req_id))
+
+        prompt = build_hitl_prompt(
+            framework_id=framework_id,
+            requirement=requirement,
+            finding=finding,
+            evidence_dir=evidence_dir,
+        )
+        payload: dict[str, Any] = {
+            "type": "skip_or_retry",
+            "requirement_id": req_id,
+            "framework_id": framework_id,
+            "candidates": candidates,
+            "prompt": prompt,
+        }
+
+        decision = parse_hitl_decision(interrupt(payload))
+        while decision.action == "unknown":
+            retry_prompt = (
+                "I didn't understand that reply.\n\n"
+                "Please answer with **skip**, **retry**, **skip all**, or **retry all**.\n\n"
+                f"{prompt}"
+            )
+            decision = parse_hitl_decision(
+                interrupt({**payload, "prompt": retry_prompt})
+            )
+
+        skipped = list(state.get("hitl_skipped") or [])
+
+        if decision.action == "skip_all":
+            updates: dict[str, Finding] = {}
+            for rid in candidates:
+                updates[rid] = self._skipped_finding(
+                    _as_finding(findings[rid]),
+                    reason="Skipped by operator (skip all).",
+                )
+                if rid not in skipped:
+                    skipped.append(rid)
+            return {
+                "findings": updates,
+                "hitl_skipped": skipped,
+                "pending_ids": [],
+                "awaiting_hitl": False,
+                "messages": [
+                    AIMessage(
+                        content=(
+                            f"Operator skipped {len(candidates)} failed requirement(s)."
+                        ),
+                        name="auditor",
+                    )
+                ],
+            }
+
+        if decision.action == "retry_all":
+            return {
+                "pending_ids": list(candidates),
+                "awaiting_hitl": False,
+                "messages": [
+                    AIMessage(
+                        content=(
+                            f"Operator requested retry for {len(candidates)} "
+                            "failed requirement(s)."
+                        ),
+                        name="auditor",
+                    )
+                ],
+            }
+
+        if decision.action == "skip":
+            if req_id not in skipped:
+                skipped.append(req_id)
+            return {
+                "findings": {
+                    req_id: self._skipped_finding(
+                        finding,
+                        reason="Skipped by operator after failed assessment.",
+                    )
+                },
+                "hitl_skipped": skipped,
+                "pending_ids": [],
+                "awaiting_hitl": False,
+                "messages": [
+                    AIMessage(
+                        content=f"Operator skipped `{req_id}`.",
+                        name="auditor",
+                    )
+                ],
+            }
+
+        # retry single
+        return {
+            "pending_ids": [req_id],
+            "awaiting_hitl": False,
+            "messages": [
+                AIMessage(
+                    content=f"Operator requested retry for `{req_id}`.",
+                    name="auditor",
+                )
+            ],
+        }
+
+    @staticmethod
+    def _skipped_finding(finding: Finding, *, reason: str) -> Finding:
+        """Mark a failed finding as skipped while preserving the failure why."""
+        notes = finding.notes or ""
+        if reason not in notes:
+            notes = f"{notes}\n{reason}".strip()
+        return finding.model_copy(
+            update={
+                "status": "skipped",
+                "notes": notes,
+                "remediation": finding.remediation
+                or "Operator skipped this check; re-run later if needed.",
+            }
+        )
 
     def _store_from_state(self, state: AuditorState) -> EvidenceStore | None:
         """Resolve the evidence store for this graph run (if configured)."""
@@ -626,15 +821,44 @@ class AuditorGraph:
             ],
         }
 
+    def _decorate_result(
+        self,
+        result: dict[str, Any],
+        *,
+        thread_id: str,
+        store: EvidenceStore | None,
+    ) -> dict[str, Any]:
+        """Attach HITL pause messaging when the graph returned ``__interrupt__``."""
+        result = dict(result)
+        result.setdefault("evidence_run_id", store.run_id if store else "")
+        result.setdefault("evidence_run_dir", str(store.root) if store else "")
+        result["thread_id"] = thread_id
+
+        interrupts = result.get("__interrupt__") or []
+        if not interrupts:
+            result["awaiting_hitl"] = False
+            return result
+
+        first = interrupts[0]
+        value = getattr(first, "value", first)
+        prompt = interrupt_payload_to_prompt(value)
+        msg = format_hitl_assistant_message(prompt, thread_id)
+        result["report"] = msg
+        result["awaiting_hitl"] = True
+        result["messages"] = [AIMessage(content=msg)]
+        return result
+
     async def arun_one(
         self,
         user_text: str,
         *,
         framework_id: str | None = None,
         run_id: str | None = None,
+        thread_id: str | None = None,
     ) -> dict[str, Any]:
         """Run a single-framework audit graph (optionally pinned)."""
         rid = run_id or new_run_id()
+        tid = thread_id or f"audit-{uuid.uuid4().hex[:12]}"
         store = self._evidence_by_run.get(rid)
         if store is None:
             store = EvidenceStore(self.settings.evidence_dir, run_id=rid)
@@ -645,6 +869,7 @@ class AuditorGraph:
                 self.settings.max_user_request_chars,
                 "user_request",
             ),
+            "thread_id": tid,
         }
         if framework_id:
             meta["framework_id"] = framework_id
@@ -659,21 +884,153 @@ class AuditorGraph:
             "retry_count": 0,
             "evidence_run_id": store.run_id,
             "evidence_run_dir": str(store.root),
+            "hitl_skipped": [],
+            "awaiting_hitl": False,
         }
         if framework_id:
             initial["framework_id"] = framework_id
-        result = await self.graph.ainvoke(initial)
-        result.setdefault("evidence_run_id", store.run_id)
-        result.setdefault("evidence_run_dir", str(store.root))
-        return result
+        config = {"configurable": {"thread_id": tid}}
+        result = await self.graph.ainvoke(initial, config)
+        return self._decorate_result(result, thread_id=tid, store=store)
 
-    async def arun(self, user_text: str) -> dict[str, Any]:
+    async def aresume(self, thread_id: str, user_text: str) -> dict[str, Any]:
+        """Resume a graph paused on ``human_gate`` with the operator's reply."""
+        config = {"configurable": {"thread_id": thread_id}}
+        result = await self.graph.ainvoke(Command(resume=user_text), config)
+        snap = await self.graph.aget_state(config)
+        values = snap.values or {}
+        run_id = values.get("evidence_run_id") or ""
+        store = self._evidence_by_run.get(run_id)
+        if store is None and values.get("evidence_run_dir"):
+            store = EvidenceStore(
+                self.settings.evidence_dir,
+                run_id=run_id or Path(str(values["evidence_run_dir"])).name,
+            )
+            self._evidence_by_run[store.run_id] = store
+        decorated = self._decorate_result(result, thread_id=thread_id, store=store)
+        if decorated.get("awaiting_hitl"):
+            return decorated
+        # If this thread was part of a multi-framework run, continue the queue.
+        return await self._continue_multi_after_resume(thread_id, decorated)
+
+    async def _continue_multi_after_resume(
+        self,
+        thread_id: str,
+        finished: dict[str, Any],
+    ) -> dict[str, Any]:
+        session = self._multi_sessions.pop(thread_id, None)
+        if not session:
+            return finished
+
+        completed: list[tuple[str, str, str]] = list(session.get("completed") or [])
+        fw_id = session.get("framework_id") or finished.get("framework_id") or ""
+        fw_title = session.get("framework_title") or fw_id
+        completed.append((fw_id, fw_title, finished.get("report") or ""))
+
+        remaining: list[str] = list(session.get("remaining") or [])
+        user_text = session.get("user_text") or ""
+        run_id = session.get("run_id") or finished.get("evidence_run_id")
+        base_thread = session.get("base_thread") or thread_id.split(":")[0]
+
+        if not remaining:
+            return self._merge_multi_reports(
+                completed,
+                run_id=str(run_id or ""),
+                base_thread=base_thread,
+            )
+
+        next_id = remaining[0]
+        next_fw = get_framework(next_id, self.settings.agents_dir)
+        title = next_fw.title if next_fw else next_id
+        next_tid = f"{base_thread}:{next_id}"
+        self._multi_sessions[next_tid] = {
+            "base_thread": base_thread,
+            "run_id": run_id,
+            "user_text": user_text,
+            "framework_id": next_id,
+            "framework_title": title,
+            "remaining": remaining[1:],
+            "completed": completed,
+        }
+        nxt = await self.arun_one(
+            user_text,
+            framework_id=next_id,
+            run_id=run_id,
+            thread_id=next_tid,
+        )
+        if nxt.get("awaiting_hitl"):
+            prefix = self._multi_progress_preamble(completed, next_id)
+            nxt["report"] = f"{prefix}{nxt.get('report') or ''}"
+            return nxt
+        # Finished next without pause — keep draining.
+        return await self._continue_multi_after_resume(next_tid, nxt)
+
+    def _multi_progress_preamble(
+        self,
+        completed: list[tuple[str, str, str]],
+        current_id: str,
+    ) -> str:
+        if not completed:
+            return ""
+        lines = [
+            "# Multi-framework audit (in progress)",
+            "",
+            f"Completed before pause: {', '.join(f'`{c[0]}`' for c in completed)}",
+            f"Now waiting on: `{current_id}`",
+            "",
+            "---",
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _merge_multi_reports(
+        self,
+        completed: list[tuple[str, str, str]],
+        *,
+        run_id: str,
+        base_thread: str,
+    ) -> dict[str, Any]:
+        store = self._evidence_by_run.get(run_id)
+        sections = [
+            "# Multi-framework audit",
+            "",
+            "Frameworks: " + ", ".join(f"`{c[0]}`" for c in completed),
+            "",
+        ]
+        if store is not None:
+            sections.extend([f"Evidence directory: `{store.root}`", ""])
+        for fw_id, title, report in completed:
+            sections.append(f"## Framework: `{fw_id}` — {title}")
+            sections.append("")
+            sections.append((report or "(empty report)").strip())
+            sections.append("")
+            sections.append("---")
+            sections.append("")
+        combined = "\n".join(sections).strip() + "\n"
+        if store is not None:
+            (store.root / "report.md").write_text(combined, encoding="utf-8")
+        return {
+            "report": combined,
+            "messages": [AIMessage(content=combined)],
+            "framework_id": ",".join(c[0] for c in completed),
+            "evidence_run_id": run_id,
+            "evidence_run_dir": str(store.root) if store else "",
+            "thread_id": base_thread,
+            "awaiting_hitl": False,
+            "findings": {},
+        }
+
+    async def arun(
+        self,
+        user_text: str,
+        *,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
         """Run audit(s) for the request.
 
-        If the request names **multiple** frameworks (e.g. \"PostgreSQL and
-        Ubuntu\"), each framework runs as a **separate graph in parallel**,
-        then reports are concatenated. All frameworks share one evidence run
-        directory with a subfolder per framework and per requirement.
+        Multiple frameworks run as **separate graphs**. When HITL is enabled they
+        run **sequentially** so skip/retry prompts stay clear in Open WebUI.
+        Without HITL (or a single framework) parallel gather is used when safe.
         """
         try:
             selected = route_frameworks(user_text, self.settings.agents_dir)
@@ -685,7 +1042,7 @@ class AuditorGraph:
             }
 
         run_id = new_run_id()
-        # Seed shared run meta before parallel framework graphs fan out.
+        base_thread = thread_id or f"audit-{uuid.uuid4().hex[:12]}"
         shared = EvidenceStore(self.settings.evidence_dir, run_id=run_id)
         self._evidence_by_run[run_id] = shared
         shared.write_run_meta(
@@ -695,6 +1052,7 @@ class AuditorGraph:
                 "user_request",
             ),
             frameworks=[fw.id for fw in selected],
+            thread_id=base_thread,
         )
 
         if len(selected) == 1:
@@ -702,43 +1060,62 @@ class AuditorGraph:
                 user_text,
                 framework_id=selected[0].id,
                 run_id=run_id,
+                thread_id=f"{base_thread}:{selected[0].id}",
             )
 
-        # Separate graph invocation per framework, in parallel.
+        # HITL-friendly sequential graphs (parallel would tangle chat interrupts).
+        if self.settings.hitl_enabled:
+            completed: list[tuple[str, str, str]] = []
+            for index, fw in enumerate(selected):
+                fw_tid = f"{base_thread}:{fw.id}"
+                remaining = [f.id for f in selected[index + 1 :]]
+                self._multi_sessions[fw_tid] = {
+                    "base_thread": base_thread,
+                    "run_id": run_id,
+                    "user_text": user_text,
+                    "framework_id": fw.id,
+                    "framework_title": fw.title,
+                    "remaining": remaining,
+                    "completed": list(completed),
+                }
+                result = await self.arun_one(
+                    user_text,
+                    framework_id=fw.id,
+                    run_id=run_id,
+                    thread_id=fw_tid,
+                )
+                if result.get("awaiting_hitl"):
+                    prefix = self._multi_progress_preamble(completed, fw.id)
+                    result["report"] = f"{prefix}{result.get('report') or ''}"
+                    return result
+                self._multi_sessions.pop(fw_tid, None)
+                completed.append((fw.id, fw.title, result.get("report") or ""))
+            return self._merge_multi_reports(
+                completed,
+                run_id=run_id,
+                base_thread=base_thread,
+            )
+
         results = await asyncio.gather(
             *[
-                self.arun_one(user_text, framework_id=fw.id, run_id=run_id)
+                self.arun_one(
+                    user_text,
+                    framework_id=fw.id,
+                    run_id=run_id,
+                    thread_id=f"{base_thread}:{fw.id}",
+                )
                 for fw in selected
             ]
         )
-        sections: list[str] = [
-            "# Multi-framework audit",
-            "",
-            "Frameworks (parallel separate graphs): "
-            + ", ".join(f"`{fw.id}`" for fw in selected),
-            "",
-            f"Evidence directory: `{shared.root}`",
-            "",
+        completed = [
+            (fw.id, fw.title, result.get("report") or "")
+            for fw, result in zip(selected, results, strict=True)
         ]
-        for fw, result in zip(selected, results, strict=True):
-            report = result.get("report") or "(empty report)"
-            sections.append(f"## Framework: `{fw.id}` — {fw.title}")
-            sections.append("")
-            sections.append(report.strip())
-            sections.append("")
-            sections.append("---")
-            sections.append("")
-
-        combined = "\n".join(sections).strip() + "\n"
-        (shared.root / "report.md").write_text(combined, encoding="utf-8")
-        return {
-            "report": combined,
-            "messages": [AIMessage(content=combined)],
-            "framework_id": ",".join(fw.id for fw in selected),
-            "evidence_run_id": run_id,
-            "evidence_run_dir": str(shared.root),
-            "findings": {},  # per-framework findings live inside each sub-report
-        }
+        return self._merge_multi_reports(
+            completed,
+            run_id=run_id,
+            base_thread=base_thread,
+        )
 
 
 _graph: AuditorGraph | None = None

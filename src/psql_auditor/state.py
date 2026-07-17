@@ -73,6 +73,10 @@ class AuditorState(TypedDict, total=False):
     # Disk artifacts: <evidence_dir>/<run_id>/<framework>/REQ-NNN/
     evidence_run_id: str
     evidence_run_dir: str
+    # Human-in-the-loop: requirement ids the operator chose to skip.
+    hitl_skipped: list[str]
+    # True when the graph is paused waiting for skip/retry.
+    awaiting_hitl: bool
 
 
 def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:

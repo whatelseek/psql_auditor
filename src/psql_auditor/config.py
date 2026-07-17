@@ -35,6 +35,8 @@ class Settings(BaseSettings):
         agents_dir: Directory of drop-in framework Markdown files (``agents/*.md``).
         evidence_dir: Root directory for per-run / per-requirement command
             artifacts (``<evidence_dir>/<run_id>/<framework>/<REQ-NNN>/``).
+        hitl_enabled: When true, pause on failed requirements and ask the
+            operator to skip or retry (LangGraph interrupt + chat resume).
         max_session_retries: Max cyclic MCP/session reconnect attempts.
         ssh_host: Target host for SSH tools; ``None`` disables SSH until set.
         ssh_port: SSH port (default 22).
@@ -81,6 +83,8 @@ class Settings(BaseSettings):
     agents_dir: Path = Field(default=Path("agents"))
     # Per-requirement command execution artifacts
     evidence_dir: Path = Field(default=Path("artifacts"))
+    # Human-in-the-loop pause on failed REQs (skip / retry)
+    hitl_enabled: bool = True
     max_session_retries: int = 2
 
     # --- SSH target (PostgreSQL host) ---
