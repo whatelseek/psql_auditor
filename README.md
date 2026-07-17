@@ -82,6 +82,10 @@ Short version:
 
 Without a file, the agent falls back to `SSH_*` / `PG_*` from `.env`.
 
+### Response language
+
+Operator-facing replies (summary, HITL, archive text, observations) use the **language the user asks for**. **Russian is the default** (`DEFAULT_RESPONSE_LANGUAGE=ru`). Examples: `respond in English`, `на русском`.
+
 ### Long-term memory (command playbooks)
 
 Procedural memory remembers **how to verify** each REQ (SSH/SQL recipes) per framework — [LangChain long-term memory](https://docs.langchain.com/oss/python/concepts/memory) style, not chat history.

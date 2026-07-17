@@ -136,6 +136,18 @@ Optional advanced path: the agent may also fetch file bytes from Open WebUI’s 
 
 If no target file is attached, the agent can still run using environment defaults (`SSH_*`, `PG_*` / `DATABASE_URL` in `.env`). That mode is suited to a single lab host wired in Compose, not multi-tenant targeting.
 
+## Response language
+
+The agent answers in the language you request. **Russian is the default.**
+
+Examples:
+
+- `Проведи аудит PostgreSQL` → ответ на русском
+- `Start Ubuntu CIS audit. Respond in English.` → English
+- `DEFAULT_RESPONSE_LANGUAGE=en` in `.env` changes the default
+
+Machine fields stay English (`pass` / `fail` / tool names / SQL).
+
 ## Chat message examples
 
 | User message | Expected routing |

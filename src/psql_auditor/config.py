@@ -38,6 +38,8 @@ class Settings(BaseSettings):
         memory_dir: Persisted learned playbook overlay (LangGraph-style store).
         memory_enabled: Inject playbook memory into evidence prompts.
         memory_learn: When true, remember successful tool recipes (hot-path).
+        default_response_language: Operator-facing language when the user does
+            not request another (default ``ru`` = Russian).
         evidence_dir: Root directory for per-run / per-requirement command
             artifacts (``<evidence_dir>/<run_id>/<framework>/<REQ-NNN>/``).
         hitl_enabled: When true, pause on failed requirements and ask the
@@ -101,6 +103,8 @@ class Settings(BaseSettings):
     memory_dir: Path = Field(default=Path("memory"))
     memory_enabled: bool = True
     memory_learn: bool = True
+    # Operator-facing language (user can override in chat; default Russian)
+    default_response_language: str = "ru"
     # Per-requirement command execution artifacts
     evidence_dir: Path = Field(default=Path("artifacts"))
     # Human-in-the-loop pause on failed REQs (skip / retry)

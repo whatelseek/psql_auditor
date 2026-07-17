@@ -13,6 +13,7 @@ from psql_auditor.hitl import (
     format_hitl_assistant_message,
     parse_hitl_decision,
 )
+from psql_auditor.language import ResponseLanguage
 from psql_auditor.state import Finding
 
 
@@ -21,6 +22,8 @@ def test_parse_hitl_decision_variants():
     assert parse_hitl_decision("Please retry").action == "retry"
     assert parse_hitl_decision("skip all").action == "skip_all"
     assert parse_hitl_decision("retry all failed checks").action == "retry_all"
+    assert parse_hitl_decision("пропустить").action == "skip"
+    assert parse_hitl_decision("повторить все").action == "retry_all"
     assert parse_hitl_decision("maybe later").action == "unknown"
 
 
@@ -54,11 +57,12 @@ def test_build_hitl_prompt_includes_why_and_options():
         framework_id="ubuntu_cis",
         requirement=req,
         finding=finding,
+        language=ResponseLanguage(code="ru", name="Russian"),
     )
-    assert "Could not audit" in text
+    assert "Не удалось проверить" in text
     assert "Connection refused" in text
-    assert "skip" in text.lower()
-    assert "retry" in text.lower()
+    assert "пропустить" in text.lower()
+    assert "повторить" in text.lower()
 
 
 def test_hitl_candidates_excludes_skipped():
@@ -142,11 +146,12 @@ async def test_hitl_skip_then_finalize(tmp_path: Path):
         )
 
         assert paused.get("awaiting_hitl") is True
-        assert "Could not audit" in (paused.get("report") or "")
-        assert "[AUDIT_HITL:test-hitl-ubuntu]" in (paused.get("report") or "")
+        report = paused.get("report") or ""
+        assert "Не удалось проверить" in report or "Could not audit" in report
+        assert "[AUDIT_HITL:test-hitl-ubuntu]" in report
 
         # Skip all remaining failures in one HITL reply.
-        resumed = await graph.aresume("test-hitl-ubuntu", "skip all")
+        resumed = await graph.aresume("test-hitl-ubuntu", "пропустить все")
 
     assert resumed.get("awaiting_hitl") is False
     report = resumed.get("report") or ""

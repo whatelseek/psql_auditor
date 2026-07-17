@@ -9,6 +9,8 @@ Token / context strategy:
    by the model; only the three cells above are filled.
 
 Finalize still uses a compact digest for a short executive summary.
+
+Operator-facing prose follows ``{language_instruction}`` (Russian by default).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ Rules:
   (include words like "MCP error" or "SSH error" so the run can reconnect).
 - When done, reply with a short plain-text evidence summary (key=value lines).
   Do NOT decide pass/fail here and do NOT write recommendations.
+- {language_instruction}
 """
 
 EVIDENCE_PROMPT = """Collect minimal evidence for this requirement.
@@ -43,30 +46,33 @@ Requirement:
 {playbook_block}
 
 After tools, reply with compact evidence only (bullet or key=value lines).
+{language_instruction}
 """
 
 EVIDENCE_FORCE_PROMPT = """Tool budget exhausted. Summarize evidence already gathered
 as compact key=value lines. Do not call tools. Do not judge pass/fail.
+{language_instruction}
 """
 
 # --- Cell fill (no tools; tiny context) ---
 
-FILL_SYSTEM_PROMPT = """You fill cells in a fixed PostgreSQL audit report.
+FILL_SYSTEM_PROMPT = """You fill cells in a fixed security audit report.
 
 You receive: requirement metadata (fixed) + evidence (from tools).
 You output ONLY a JSON object with three cells — nothing else:
 
-{
+{{
   "status": "pass|fail|partial|error",
   "observation": "factual observation from evidence (short)",
   "recommendation": "actionable fix if not pass, else empty"
-}
+}}
 
 Rules:
 - Do not invent facts not present in evidence.
 - If evidence is missing/failed, status=error and say what is missing in observation.
 - Keep observation and recommendation concise (1–3 sentences each).
 - Pass criteria are given for judgment; do not rewrite them.
+- {language_instruction}
 """
 
 FILL_CELL_PROMPT = """Fill report cells for this requirement.
@@ -83,14 +89,16 @@ FILL_CELL_PROMPT = """Fill report cells for this requirement.
 {evidence}
 
 Return JSON only with keys status, observation, recommendation.
+{language_instruction}
 """
 
 # Finalize uses a compact digest (not chat transcripts).
-FINALIZE_PROMPT = """Write a short executive summary for this PostgreSQL audit.
+FINALIZE_PROMPT = """Write a short executive summary for this security audit.
 
 The report uses a fixed format; below is a compact digest of filled cells.
 Cover: overall risk, critical/high failures (by ID), errors, top recommendations.
 Do not invent rows. Keep it concise.
+{language_instruction}
 
 Digest:
 {report}

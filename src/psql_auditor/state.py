@@ -80,6 +80,8 @@ class AuditorState(TypedDict, total=False):
     # Zip archive of report + evidence for chat download.
     archive_path: str
     archive_url: str
+    # Operator-facing response language code (default ru).
+    response_language: str
 
 
 def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:

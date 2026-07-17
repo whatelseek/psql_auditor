@@ -61,6 +61,12 @@ from psql_auditor.hitl import (
     interrupt_payload_to_prompt,
     parse_hitl_decision,
 )
+from psql_auditor.language import (
+    ResponseLanguage,
+    detect_response_language,
+    language_from_code,
+    ui,
+)
 from psql_auditor.memory.playbook_store import PlaybookMemory
 from psql_auditor.report_archive import package_and_publish_archive
 from psql_auditor.llm import build_chat_model
@@ -156,6 +162,19 @@ def _tool_result_looks_failed(text: str) -> bool:
             "permission denied",
         )
     )
+
+
+def _response_language(
+    state: AuditorState | dict[str, Any] | None = None,
+    *,
+    user_text: str = "",
+    default: str = "ru",
+) -> ResponseLanguage:
+    """Resolve operator language from state or user text (default Russian)."""
+    code = str((state or {}).get("response_language") or "")
+    if code:
+        return language_from_code(code, default=default)
+    return detect_response_language(user_text, default=default)
 
 
 class AuditorGraph:
@@ -452,11 +471,17 @@ class AuditorGraph:
         if store is not None:
             evidence_dir = str(store.requirement_dir(framework_id, req_id))
 
+        lang = _response_language(
+            state,
+            user_text=state.get("user_request") or "",
+            default=self.settings.default_response_language,
+        )
         prompt = build_hitl_prompt(
             framework_id=framework_id,
             requirement=requirement,
             finding=finding,
             evidence_dir=evidence_dir,
+            language=lang,
         )
         payload: dict[str, Any] = {
             "type": "skip_or_retry",
@@ -464,15 +489,12 @@ class AuditorGraph:
             "framework_id": framework_id,
             "candidates": candidates,
             "prompt": prompt,
+            "language": lang.code,
         }
 
         decision = parse_hitl_decision(interrupt(payload))
         while decision.action == "unknown":
-            retry_prompt = (
-                "I didn't understand that reply.\n\n"
-                "Please answer with **skip**, **retry**, **skip all**, or **retry all**.\n\n"
-                f"{prompt}"
-            )
+            retry_prompt = ui(lang, "hitl_unknown") + prompt
             decision = parse_hitl_decision(
                 interrupt({**payload, "prompt": retry_prompt})
             )
@@ -606,16 +628,28 @@ class AuditorGraph:
                     "pass_criteria": requirement.pass_criteria,
                 },
             )
+        lang = detect_response_language(
+            user_request,
+            default=self.settings.default_response_language,
+        )
         evidence = await self._gather_evidence(
-            req_id, requirement, user_request, framework_id, store=store
+            req_id,
+            requirement,
+            user_request,
+            framework_id,
+            store=store,
+            language=lang,
         )
         evidence = truncate_text(
             evidence,
             self.settings.max_tool_output_chars,
             "evidence",
         )
+        lang_i = lang.llm_instruction
         fill_messages = [
-            SystemMessage(content=FILL_SYSTEM_PROMPT),
+            SystemMessage(
+                content=FILL_SYSTEM_PROMPT.format(language_instruction=lang_i)
+            ),
             HumanMessage(
                 content=FILL_CELL_PROMPT.format(
                     req_id=req_id,
@@ -624,7 +658,8 @@ class AuditorGraph:
                     severity=requirement.severity,
                     pass_criteria=requirement.pass_criteria,
                     how_to_verify=requirement.how_to_verify,
-                    evidence=evidence or "(no evidence collected)",
+                    evidence=evidence or ui(lang, "no_evidence"),
+                    language_instruction=lang_i,
                 )
             ),
         ]
@@ -641,14 +676,20 @@ class AuditorGraph:
         user_request: str,
         framework_id: str,
         store: EvidenceStore | None = None,
+        language: ResponseLanguage | None = None,
     ) -> str:
+        lang = language or detect_response_language(
+            user_request,
+            default=self.settings.default_response_language,
+        )
+        lang_i = lang.llm_instruction
         playbook_block = ""
         if self.playbooks is not None and self.settings.memory_enabled:
             playbook_block = self.playbooks.format_prompt_block(framework_id, req_id)
         messages: list = [
             SystemMessage(
                 content=(
-                    f"{EVIDENCE_SYSTEM_PROMPT}\n\n"
+                    f"{EVIDENCE_SYSTEM_PROMPT.format(language_instruction=lang_i)}\n\n"
                     f"Active framework: `{framework_id}`. "
                     "Use SSH and/or MCP tools appropriate for this framework."
                 )
@@ -659,6 +700,7 @@ class AuditorGraph:
                     requirement_block=requirement.to_prompt_block(),
                     playbook_block=playbook_block
                     or "(no playbook memory for this requirement)",
+                    language_instruction=lang_i,
                 )
             ),
         ]
@@ -668,7 +710,13 @@ class AuditorGraph:
         for _ in range(max_rounds + 1):
             rounds = count_tool_rounds(messages)
             if rounds >= max_rounds:
-                messages.append(HumanMessage(content=EVIDENCE_FORCE_PROMPT))
+                messages.append(
+                    HumanMessage(
+                        content=EVIDENCE_FORCE_PROMPT.format(
+                            language_instruction=lang_i
+                        )
+                    )
+                )
                 response = await self.fill_model.ainvoke(messages)
                 chunks.append(str(response.content or ""))
                 break
@@ -828,21 +876,26 @@ class AuditorGraph:
             findings,
             evidence_chars=self.settings.max_finalize_evidence_chars,
         )
+        lang = _response_language(
+            state,
+            user_text=state.get("user_request") or "",
+            default=self.settings.default_response_language,
+        )
         try:
             response = await self.fill_model.ainvoke(
                 [
-                    SystemMessage(
-                        content=(
-                            "You write short executive summaries for fixed-format "
-                            "security audit reports across OS/DB frameworks."
+                    SystemMessage(content=ui(lang, "finalize_system")),
+                    HumanMessage(
+                        content=FINALIZE_PROMPT.format(
+                            report=digest,
+                            language_instruction=lang.llm_instruction,
                         )
                     ),
-                    HumanMessage(content=FINALIZE_PROMPT.format(report=digest)),
                 ]
             )
             summary = str(response.content or "").strip()
         except Exception as exc:  # noqa: BLE001
-            summary = f"(Summary generation failed: {exc})"
+            summary = ui(lang, "summary_failed", exc=exc)
 
         fw = state.get("framework_id") or ""
         retries = int(state.get("retry_count") or 0)
@@ -861,7 +914,9 @@ class AuditorGraph:
         if store is not None and self.settings.archive_enabled:
             try:
                 packaged = await package_and_publish_archive(
-                    store.root, self.settings
+                    store.root,
+                    self.settings,
+                    language=lang,
                 )
                 archive_path = str(packaged.get("zip_path") or "")
                 archive_url = str(packaged.get("download_url") or "")
@@ -894,12 +949,18 @@ class AuditorGraph:
         *,
         thread_id: str,
         store: EvidenceStore | None,
+        language: ResponseLanguage | None = None,
     ) -> dict[str, Any]:
         """Attach HITL pause messaging when the graph returned ``__interrupt__``."""
         result = dict(result)
         result.setdefault("evidence_run_id", store.run_id if store else "")
         result.setdefault("evidence_run_dir", str(store.root) if store else "")
         result["thread_id"] = thread_id
+        lang = language or language_from_code(
+            result.get("response_language"),
+            default=self.settings.default_response_language,
+        )
+        result["response_language"] = lang.code
 
         interrupts = result.get("__interrupt__") or []
         if not interrupts:
@@ -909,9 +970,15 @@ class AuditorGraph:
         first = interrupts[0]
         value = getattr(first, "value", first)
         prompt = interrupt_payload_to_prompt(value)
-        msg = format_hitl_assistant_message(prompt, thread_id)
+        if isinstance(value, dict) and value.get("language"):
+            lang = language_from_code(
+                str(value.get("language")),
+                default=self.settings.default_response_language,
+            )
+        msg = format_hitl_assistant_message(prompt, thread_id, language=lang)
         result["report"] = msg
         result["awaiting_hitl"] = True
+        result["response_language"] = lang.code
         result["messages"] = [AIMessage(content=msg)]
         return result
 
@@ -941,6 +1008,10 @@ class AuditorGraph:
         if framework_id:
             meta["framework_id"] = framework_id
         store.write_run_meta(**meta)
+        lang = detect_response_language(
+            user_text,
+            default=self.settings.default_response_language,
+        )
         initial: AuditorState = {
             "messages": [HumanMessage(content=user_text)],
             "user_request": truncate_text(
@@ -953,12 +1024,15 @@ class AuditorGraph:
             "evidence_run_dir": str(store.root),
             "hitl_skipped": [],
             "awaiting_hitl": False,
+            "response_language": lang.code,
         }
         if framework_id:
             initial["framework_id"] = framework_id
         config = {"configurable": {"thread_id": tid}}
         result = await self.graph.ainvoke(initial, config)
-        return self._decorate_result(result, thread_id=tid, store=store)
+        return self._decorate_result(
+            result, thread_id=tid, store=store, language=lang
+        )
 
     async def aresume(self, thread_id: str, user_text: str) -> dict[str, Any]:
         """Resume a graph paused on ``human_gate`` with the operator's reply."""
@@ -974,7 +1048,14 @@ class AuditorGraph:
                 run_id=run_id or Path(str(values["evidence_run_dir"])).name,
             )
             self._evidence_by_run[store.run_id] = store
-        decorated = self._decorate_result(result, thread_id=thread_id, store=store)
+        lang = _response_language(
+            values,
+            user_text=user_text,
+            default=self.settings.default_response_language,
+        )
+        decorated = self._decorate_result(
+            result, thread_id=thread_id, store=store, language=lang
+        )
         if decorated.get("awaiting_hitl"):
             return decorated
         # If this thread was part of a multi-framework run, continue the queue.
@@ -1004,6 +1085,7 @@ class AuditorGraph:
                 completed,
                 run_id=str(run_id or ""),
                 base_thread=base_thread,
+                user_text=user_text,
             )
 
         next_id = remaining[0]
@@ -1026,7 +1108,13 @@ class AuditorGraph:
             thread_id=next_tid,
         )
         if nxt.get("awaiting_hitl"):
-            prefix = self._multi_progress_preamble(completed, next_id)
+            lang = language_from_code(
+                nxt.get("response_language")
+                or self.settings.default_response_language
+            )
+            prefix = self._multi_progress_preamble(
+                completed, next_id, language=lang
+            )
             nxt["report"] = f"{prefix}{nxt.get('report') or ''}"
             return nxt
         # Finished next without pause — keep draining.
@@ -1036,14 +1124,20 @@ class AuditorGraph:
         self,
         completed: list[tuple[str, str, str]],
         current_id: str,
+        *,
+        language: ResponseLanguage | None = None,
     ) -> str:
         if not completed:
             return ""
+        lang = language or language_from_code(
+            self.settings.default_response_language
+        )
+        ids = ", ".join(f"`{c[0]}`" for c in completed)
         lines = [
-            "# Multi-framework audit (in progress)",
+            ui(lang, "multi_progress_title"),
             "",
-            f"Completed before pause: {', '.join(f'`{c[0]}`' for c in completed)}",
-            f"Now waiting on: `{current_id}`",
+            ui(lang, "multi_completed", ids=ids),
+            ui(lang, "multi_waiting", current_id=current_id),
             "",
             "---",
             "",
@@ -1056,8 +1150,13 @@ class AuditorGraph:
         *,
         run_id: str,
         base_thread: str,
+        user_text: str = "",
     ) -> dict[str, Any]:
         store = self._evidence_by_run.get(run_id)
+        lang = detect_response_language(
+            user_text,
+            default=self.settings.default_response_language,
+        )
         sections = [
             "# Multi-framework audit",
             "",
@@ -1071,8 +1170,9 @@ class AuditorGraph:
             sections.append("")
             # Drop nested per-framework archive blocks; one zip at the end.
             body = (report or "(empty report)").strip()
-            if "## Audit archive" in body:
-                body = body.split("## Audit archive", 1)[0].rstrip()
+            for marker in ("## Audit archive", "## Архив аудита"):
+                if marker in body:
+                    body = body.split(marker, 1)[0].rstrip()
             sections.append(body)
             sections.append("")
             sections.append("---")
@@ -1085,7 +1185,9 @@ class AuditorGraph:
             if self.settings.archive_enabled:
                 try:
                     packaged = await package_and_publish_archive(
-                        store.root, self.settings
+                        store.root,
+                        self.settings,
+                        language=lang,
                     )
                     archive_path = str(packaged.get("zip_path") or "")
                     archive_url = str(packaged.get("download_url") or "")
@@ -1175,7 +1277,13 @@ class AuditorGraph:
                     thread_id=fw_tid,
                 )
                 if result.get("awaiting_hitl"):
-                    prefix = self._multi_progress_preamble(completed, fw.id)
+                    lang = language_from_code(
+                        result.get("response_language")
+                        or self.settings.default_response_language
+                    )
+                    prefix = self._multi_progress_preamble(
+                        completed, fw.id, language=lang
+                    )
                     result["report"] = f"{prefix}{result.get('report') or ''}"
                     return result
                 self._multi_sessions.pop(fw_tid, None)
@@ -1184,6 +1292,7 @@ class AuditorGraph:
                 completed,
                 run_id=run_id,
                 base_thread=base_thread,
+                user_text=user_text,
             )
 
         results = await asyncio.gather(
@@ -1205,6 +1314,7 @@ class AuditorGraph:
             completed,
             run_id=run_id,
             base_thread=base_thread,
+            user_text=user_text,
         )
 
 

@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from psql_auditor.config import get_settings
 from psql_auditor.graph import get_auditor_graph
 from psql_auditor.hitl import extract_hitl_thread_id
+from psql_auditor.language import detect_response_language, ui
 from psql_auditor.report_archive import archive_filename, verify_download_token
 
 router = APIRouter(prefix="/v1")
@@ -239,11 +240,15 @@ async def _stream_audit(
     settings = get_settings()
     user_text = _latest_user_text(body.messages)
     hitl_thread = extract_hitl_thread_id(body.messages)
+    lang = detect_response_language(
+        user_text,
+        default=settings.default_response_language,
+    )
 
     yield _sse_chunk(None, model, completion_id)
     if hitl_thread:
         yield _sse_chunk(
-            f"Resuming paused audit (`{hitl_thread}`)…\n\n",
+            ui(lang, "stream_resume", thread=hitl_thread),
             model,
             completion_id,
         )
@@ -252,14 +257,23 @@ async def _stream_audit(
             selected = route_frameworks(user_text, settings.agents_dir)
             names = ", ".join(f"`{fw.id}`" for fw in selected)
             yield _sse_chunk(
-                f"Starting audit for {len(selected)} framework(s): {names} "
-                f"(REQ workers={settings.max_parallel_assessments}; "
-                f"HITL={'on' if settings.hitl_enabled else 'off'})…\n\n",
+                ui(
+                    lang,
+                    "stream_start",
+                    count=len(selected),
+                    names=names,
+                    workers=settings.max_parallel_assessments,
+                    hitl="on" if settings.hitl_enabled else "off",
+                ),
                 model,
                 completion_id,
             )
         except Exception as exc:  # noqa: BLE001
-            yield _sse_chunk(f"Routing error: {exc}\n", model, completion_id)
+            yield _sse_chunk(
+                ui(lang, "stream_route_err", exc=exc),
+                model,
+                completion_id,
+            )
             yield _sse_chunk(None, model, completion_id, finish="stop")
             yield "data: [DONE]\n\n"
             return
@@ -267,20 +281,23 @@ async def _stream_audit(
     try:
         result = await _run_or_resume(auditor, body)
         final_report = result.get("report") or ""
+        if result.get("response_language"):
+            from psql_auditor.language import language_from_code
+
+            lang = language_from_code(
+                str(result.get("response_language")),
+                default=settings.default_response_language,
+            )
         if result.get("awaiting_hitl"):
-            yield _sse_chunk(
-                "Paused for your decision (skip / retry).\n\n",
-                model,
-                completion_id,
-            )
+            yield _sse_chunk(ui(lang, "stream_hitl"), model, completion_id)
         elif result.get("archive_url"):
-            yield _sse_chunk(
-                "Packaging audit ZIP for download…\n\n",
-                model,
-                completion_id,
-            )
+            yield _sse_chunk(ui(lang, "stream_zip"), model, completion_id)
     except Exception as exc:  # noqa: BLE001
-        yield _sse_chunk(f"\n\nAudit error: {exc}\n", model, completion_id)
+        yield _sse_chunk(
+            ui(lang, "stream_audit_err", exc=exc),
+            model,
+            completion_id,
+        )
         yield _sse_chunk(None, model, completion_id, finish="stop")
         yield "data: [DONE]\n\n"
         return

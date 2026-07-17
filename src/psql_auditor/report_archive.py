@@ -15,6 +15,7 @@ from urllib.parse import quote
 import httpx
 
 from psql_auditor.config import Settings
+from psql_auditor.language import ResponseLanguage, ui
 
 logger = logging.getLogger(__name__)
 
@@ -83,38 +84,35 @@ def format_archive_chat_section(
     download_url: str,
     open_webui_url: str | None = None,
     open_webui_file_id: str | None = None,
+    language: ResponseLanguage | None = None,
 ) -> str:
     """Markdown block appended to the chat report with download links."""
+    lang = language or ResponseLanguage(code="ru", name="Russian")
     size_kb = max(1, zip_path.stat().st_size // 1024)
     lines = [
         "",
         "---",
         "",
-        "## Audit archive",
+        ui(lang, "archive_title"),
         "",
-        f"📦 Report + evidence packaged as **`{zip_path.name}`** ({size_kb} KB).",
+        ui(lang, "archive_body", name=zip_path.name, size_kb=size_kb),
         "",
-        f"**[Download ZIP]({download_url})**",
+        ui(lang, "archive_download", download_url=download_url),
         "",
     ]
     if open_webui_file_id:
-        # Relative URL works inside the Open WebUI browser origin.
         owui_path = f"/api/v1/files/{open_webui_file_id}/content"
         lines.extend(
             [
-                f"Also attached in Open WebUI files: **[Open archive]({owui_path})**",
+                ui(lang, "archive_owui", owui_path=owui_path),
                 "",
             ]
         )
         if open_webui_url:
             abs_owui = f"{open_webui_url.rstrip('/')}{owui_path}"
-            lines.append(f"(Absolute Open WebUI URL: {abs_owui})")
+            lines.append(f"({abs_owui})")
             lines.append("")
-    lines.append(
-        "<a href=\"{}\" download>Click here if the markdown link does not download</a>".format(
-            download_url
-        )
-    )
+    lines.append(ui(lang, "archive_click", download_url=download_url))
     lines.append("")
     return "\n".join(lines)
 
@@ -173,6 +171,8 @@ async def upload_zip_to_open_webui(
 async def package_and_publish_archive(
     run_dir: Path | str,
     settings: Settings,
+    *,
+    language: ResponseLanguage | None = None,
 ) -> dict[str, Any]:
     """Create zip, optionally upload to Open WebUI, return metadata for chat.
 
@@ -214,6 +214,7 @@ async def package_and_publish_archive(
         download_url=download_url,
         open_webui_url=settings.open_webui_public_url or settings.open_webui_url,
         open_webui_file_id=file_id,
+        language=language,
     )
     return {
         "zip_path": str(zip_path),

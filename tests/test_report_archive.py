@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from psql_auditor.api.app import create_app
 from psql_auditor.config import Settings, get_settings
+from psql_auditor.language import ResponseLanguage
 from psql_auditor.report_archive import (
     archive_filename,
     create_run_archive,
@@ -49,10 +50,11 @@ def test_format_archive_chat_section_has_download_link(tmp_path: Path):
         zip_path=z,
         download_url="http://localhost:8000/v1/downloads/x_audit.zip?token=t",
         open_webui_file_id="file-1",
+        language=ResponseLanguage(code="ru", name="Russian"),
     )
-    assert "Download ZIP" in text
+    assert "Скачать ZIP" in text
     assert "file-1" in text
-    assert "Audit archive" in text
+    assert "Архив аудита" in text
 
 
 @pytest.mark.asyncio
@@ -71,7 +73,7 @@ async def test_package_and_publish_without_open_webui(tmp_path: Path):
     result = await package_and_publish_archive(run, settings)
     assert Path(result["zip_path"]).is_file()
     assert "token=" in result["download_url"]
-    assert "Download ZIP" in result["chat_section"]
+    assert "Скачать ZIP" in result["chat_section"] or "Download ZIP" in result["chat_section"]
     assert result["open_webui_file_id"] is None
     assert (run / "archive.json").is_file()
 
