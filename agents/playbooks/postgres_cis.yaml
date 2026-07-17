@@ -1,0 +1,82 @@
+framework_id: postgres_cis
+framework_tips:
+  - Prefer mcp_query with SELECT from pg_settings / catalogs over SHOW when possible.
+  - Use ssh_read_file / ssh_run for postgresql.conf, pg_hba.conf, data_directory permissions.
+  - Keep SQL read-only; never run DDL/DML for evidence.
+requirements:
+  REQ-001:
+    notes: password_encryption should be scram-sha-256
+    tools:
+      - name: mcp_query
+        arguments:
+          sql: "SELECT name, setting FROM pg_settings WHERE name = 'password_encryption'"
+  REQ-002:
+    notes: Inspect remote hba rules; resolve hba_file path first if needed
+    tools:
+      - name: mcp_query
+        arguments:
+          sql: "SELECT name, setting FROM pg_settings WHERE name = 'hba_file'"
+      - name: ssh_run
+        arguments:
+          command: "sudo -n grep -vE '^\\s*#' \"$(psql -Atqc \\\"SHOW hba_file\\\" 2>/dev/null || echo /etc/postgresql/*/main/pg_hba.conf)\" 2>/dev/null | head -n 80 || sudo -n head -n 80 /etc/postgresql/*/main/pg_hba.conf"
+  REQ-004:
+    tools:
+      - name: mcp_query
+        arguments:
+          sql: "SELECT name, setting FROM pg_settings WHERE name IN ('ssl','ssl_min_protocol_version') ORDER BY name"
+  REQ-006:
+    tools:
+      - name: mcp_query
+        arguments:
+          sql: "SELECT name, setting FROM pg_settings WHERE name = 'listen_addresses'"
+  REQ-007:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "ss -lntp | grep -E '(:5432\\b|postgres)' || netstat -lntp 2>/dev/null | grep 5432 || true"
+  REQ-008:
+    tools:
+      - name: mcp_query
+        arguments:
+          sql: "SELECT rolname, rolsuper FROM pg_roles WHERE rolsuper ORDER BY rolname"
+  REQ-011:
+    tools:
+      - name: mcp_query
+        arguments:
+          sql: "SELECT nspname, pg_catalog.has_schema_privilege('public', nspname, 'CREATE') AS public_create FROM pg_namespace WHERE nspname = 'public'"
+  REQ-012:
+    tools:
+      - name: mcp_query
+        arguments:
+          sql: "SELECT extname, extversion FROM pg_extension ORDER BY extname"
+  REQ-013:
+    tools:
+      - name: mcp_query
+        arguments:
+          sql: "SELECT name, setting FROM pg_settings WHERE name IN ('log_connections','log_disconnections','log_statement','logging_collector') ORDER BY name"
+  REQ-015:
+    tools:
+      - name: mcp_query
+        arguments:
+          sql: "SELECT version()"
+      - name: ssh_run
+        arguments:
+          command: "psql --version; (dpkg -l postgresql* 2>/dev/null || rpm -q postgresql 2>/dev/null || true) | head -n 20"
+  REQ-016:
+    tools:
+      - name: mcp_query
+        arguments:
+          sql: "SELECT name, setting FROM pg_settings WHERE name = 'data_directory'"
+      - name: ssh_run
+        arguments:
+          command: "ls -ld /var/lib/postgresql/*/*/ 2>/dev/null; ls -ld /var/lib/pgsql/*/data 2>/dev/null; true"
+  REQ-018:
+    tools:
+      - name: mcp_query
+        arguments:
+          sql: "SELECT name, setting FROM pg_settings WHERE name = 'max_connections'"
+  REQ-019:
+    tools:
+      - name: mcp_query
+        arguments:
+          sql: "SELECT name, setting FROM pg_settings WHERE name IN ('idle_in_transaction_session_timeout','statement_timeout') ORDER BY name"

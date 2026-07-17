@@ -61,6 +61,7 @@ from psql_auditor.hitl import (
     interrupt_payload_to_prompt,
     parse_hitl_decision,
 )
+from psql_auditor.memory.playbook_store import PlaybookMemory
 from psql_auditor.report_archive import package_and_publish_archive
 from psql_auditor.llm import build_chat_model
 from psql_auditor.prompts import (
@@ -142,6 +143,21 @@ def _hitl_candidates(state: AuditorState) -> list[str]:
     return sorted(out)
 
 
+def _tool_result_looks_failed(text: str) -> bool:
+    """True when a tool result string indicates transport/auth failure."""
+    lower = (text or "").lower()
+    return any(
+        marker in lower
+        for marker in (
+            "ssh error",
+            "mcp error",
+            "tool error",
+            "connection refused",
+            "permission denied",
+        )
+    )
+
+
 class AuditorGraph:
     """Compile and run the cyclic multi-framework audit StateGraph."""
 
@@ -154,6 +170,16 @@ class AuditorGraph:
         # Multi-framework orchestration while a HITL pause is active.
         self._multi_sessions: dict[str, dict[str, Any]] = {}
         self._checkpointer = MemorySaver()
+        # Long-term procedural memory (framework command playbooks).
+        self.playbooks = (
+            PlaybookMemory(
+                playbooks_dir=self.settings.playbooks_dir,
+                memory_dir=self.settings.memory_dir,
+                learn=self.settings.memory_learn,
+            )
+            if self.settings.memory_enabled
+            else None
+        )
         self.evidence_model = build_chat_model(self.settings).bind_tools(self.tools)
         self.fill_model = build_chat_model(self.settings)
         self.graph = self._build()
@@ -616,6 +642,9 @@ class AuditorGraph:
         framework_id: str,
         store: EvidenceStore | None = None,
     ) -> str:
+        playbook_block = ""
+        if self.playbooks is not None and self.settings.memory_enabled:
+            playbook_block = self.playbooks.format_prompt_block(framework_id, req_id)
         messages: list = [
             SystemMessage(
                 content=(
@@ -628,6 +657,8 @@ class AuditorGraph:
                 content=EVIDENCE_PROMPT.format(
                     user_request=user_request,
                     requirement_block=requirement.to_prompt_block(),
+                    playbook_block=playbook_block
+                    or "(no playbook memory for this requirement)",
                 )
             ),
         ]
@@ -701,6 +732,21 @@ class AuditorGraph:
                     args if isinstance(args, dict) else {"value": args},
                     full_result,
                     error=error,
+                )
+            # Long-term memory: remember successful recipes (hot path).
+            if (
+                self.playbooks is not None
+                and self.settings.memory_learn
+                and req_id
+                and not error
+                and not _tool_result_looks_failed(full_result)
+            ):
+                self.playbooks.remember_tool(
+                    framework_id,
+                    req_id,
+                    name,
+                    args if isinstance(args, dict) else {"value": args},
+                    success=True,
                 )
             return ToolMessage(content=content, tool_call_id=call_id, name=name)
 

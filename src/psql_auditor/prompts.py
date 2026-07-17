@@ -23,6 +23,8 @@ Rules:
     (on Windows targets prefer powershell/pwsh commands over SSH).
   - PostgreSQL / DB checks → mcp_query and related MCP tools
     (antonorlov/mcp-postgres-server).
+- When a **long-term playbook memory** block is provided, run those preferred
+  tool calls FIRST before inventing new ones.
 - Prefer 1–2 focused tool calls. Avoid huge dumps.
 - Do not invent values. If tools/session fail, report the error text clearly
   (include words like "MCP error" or "SSH error" so the run can reconnect).
@@ -37,6 +39,8 @@ Operator context (may be truncated):
 
 Requirement:
 {requirement_block}
+
+{playbook_block}
 
 After tools, reply with compact evidence only (bullet or key=value lines).
 """

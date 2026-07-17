@@ -33,6 +33,11 @@ class Settings(BaseSettings):
         model_id: Model id advertised on ``GET /v1/models`` and used as default
             in chat completions (Open WebUI selects this name).
         agents_dir: Directory of drop-in framework Markdown files (``agents/*.md``).
+        playbooks_dir: Seed YAML playbooks for long-term procedural memory
+            (default ``agents/playbooks``).
+        memory_dir: Persisted learned playbook overlay (LangGraph-style store).
+        memory_enabled: Inject playbook memory into evidence prompts.
+        memory_learn: When true, remember successful tool recipes (hot-path).
         evidence_dir: Root directory for per-run / per-requirement command
             artifacts (``<evidence_dir>/<run_id>/<framework>/<REQ-NNN>/``).
         hitl_enabled: When true, pause on failed requirements and ask the
@@ -91,6 +96,11 @@ class Settings(BaseSettings):
 
     # --- Drop-in frameworks (you create these) ---
     agents_dir: Path = Field(default=Path("agents"))
+    # Long-term procedural memory (framework command playbooks)
+    playbooks_dir: Path = Field(default=Path("agents/playbooks"))
+    memory_dir: Path = Field(default=Path("memory"))
+    memory_enabled: bool = True
+    memory_learn: bool = True
     # Per-requirement command execution artifacts
     evidence_dir: Path = Field(default=Path("artifacts"))
     # Human-in-the-loop pause on failed REQs (skip / retry)

@@ -22,6 +22,10 @@ services:
       LITELLM_API_KEY: ${LITELLM_API_KEY:-sk-litellm-local}
       LITELLM_MODEL: ${LITELLM_MODEL:-gpt-4o-mini}
       AGENTS_DIR: /app/agents
+      PLAYBOOKS_DIR: /app/agents/playbooks
+      MEMORY_DIR: /app/memory
+      MEMORY_ENABLED: ${MEMORY_ENABLED:-true}
+      MEMORY_LEARN: ${MEMORY_LEARN:-true}
       EVIDENCE_DIR: /app/artifacts
       HITL_ENABLED: ${HITL_ENABLED:-true}
       ARCHIVE_ENABLED: ${ARCHIVE_ENABLED:-true}
@@ -48,6 +52,7 @@ services:
       MCP_POSTGRES_ARGS: ${MCP_POSTGRES_ARGS:-"-y mcp-postgres-server"}
     volumes:
       - ./agents:/app/agents:ro
+      - ./memory:/app/memory
       - ./artifacts:/app/artifacts
       # Optional: mount SSH private key, e.g. ./secrets/id_rsa:/keys/id_rsa:ro
       - ${SSH_KEY_HOST_PATH:-./.keys}:/keys:ro

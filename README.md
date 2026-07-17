@@ -82,6 +82,14 @@ Short version:
 
 Without a file, the agent falls back to `SSH_*` / `PG_*` from `.env`.
 
+### Long-term memory (command playbooks)
+
+Procedural memory remembers **how to verify** each REQ (SSH/SQL recipes) per framework — [LangChain long-term memory](https://docs.langchain.com/oss/python/concepts/memory) style, not chat history.
+
+- Seeds: [`agents/playbooks/*.yaml`](agents/playbooks/)
+- Learned successes: `memory/learned_playbooks.json`
+- Docs: [`docs/long-term-memory.md`](docs/long-term-memory.md)
+
 ### Chat examples
 
 - `Run a PostgreSQL CIS audit`
@@ -133,7 +141,7 @@ Multi-framework runs (e.g. PostgreSQL + Ubuntu) share one `<run_id>` with a subf
 
 ## Config
 
-See [`.env.example`](.env.example): `AGENTS_DIR`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
+See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
 
 ## Development
 
