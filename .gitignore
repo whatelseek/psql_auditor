@@ -1,6 +1,8 @@
 .env
 .venv/
 venv/
+artifacts/
+memory/learned_playbooks.json
 __pycache__/
 *.py[cod]
 *.egg-info/

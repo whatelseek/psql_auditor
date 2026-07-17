@@ -135,6 +135,25 @@ class PostgresMcpSession:
         async with self._lock:
             await self._reset_unlocked()
 
+    async def reconnect(self, settings: Settings | None = None) -> str:
+        """Force-close a dead MCP session and open a fresh stdio connection.
+
+        Used by the LangGraph ``reconnect_session`` node when the cyclic audit
+        loop detects recoverable MCP/session failures.
+
+        Returns:
+            Status string for the audit log / messages.
+        """
+        settings = settings or get_settings()
+        async with self._lock:
+            await self._reset_unlocked()
+            try:
+                await self._ensure_session(settings)
+                return "MCP session reconnected successfully"
+            except Exception as exc:  # noqa: BLE001
+                await self._reset_unlocked()
+                return f"MCP reconnect failed: {type(exc).__name__}: {exc}"
+
 
 _SESSION = PostgresMcpSession()
 
@@ -142,6 +161,11 @@ _SESSION = PostgresMcpSession()
 def get_mcp_session() -> PostgresMcpSession:
     """Return the process-wide Postgres MCP session singleton."""
     return _SESSION
+
+
+async def reconnect_mcp_session() -> str:
+    """Public helper to recycle the process-wide MCP session."""
+    return await _SESSION.reconnect()
 
 
 def _format_mcp_result(result: Any) -> str:

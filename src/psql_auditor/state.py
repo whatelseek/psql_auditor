@@ -58,6 +58,8 @@ class AuditorState(TypedDict, total=False):
 
     messages: Annotated[list[BaseMessage], add_messages]
     user_request: str
+    framework_id: str
+    framework_title: str
     checklist_title: str
     requirements: dict[str, Requirement]
     pending_ids: list[str]
@@ -66,6 +68,18 @@ class AuditorState(TypedDict, total=False):
     report: str
     error: str | None
     target_hints: dict[str, Any]
+    # Cyclic reconnect loop: how many session restores have been attempted.
+    retry_count: int
+    # Disk artifacts: <evidence_dir>/<run_id>/<framework>/REQ-NNN/
+    evidence_run_id: str
+    evidence_run_dir: str
+    # Human-in-the-loop: requirement ids the operator chose to skip.
+    hitl_skipped: list[str]
+    # True when the graph is paused waiting for skip/retry.
+    awaiting_hitl: bool
+    # Zip archive of report + evidence for chat download.
+    archive_path: str
+    archive_url: str
 
 
 def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:

@@ -1,0 +1,56 @@
+framework_id: ubuntu_cis
+framework_tips:
+  - Prefer ssh_read_file for config files; ssh_run for status commands.
+  - Keep commands non-interactive (no editors, no apt upgrade).
+  - Capture exit_code and relevant stdout only.
+requirements:
+  REQ-001:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "grep -E '^ENCRYPT_METHOD' /etc/login.defs 2>/dev/null; ls /etc/pam.d/common-password 2>/dev/null; grep -E 'pam_unix|yescrypt|sha512' /etc/pam.d/common-password 2>/dev/null | head -n 20"
+  REQ-002:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "grep -Ei '^\\s*PermitRootLogin' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/* 2>/dev/null | head -n 20"
+  REQ-003:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "grep -Ei '^\\s*PasswordAuthentication' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/* 2>/dev/null | head -n 20"
+  REQ-004:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "dpkg -l unattended-upgrades 2>/dev/null | tail -n 1; systemctl is-enabled unattended-upgrades 2>/dev/null; apt list --upgradable 2>/dev/null | head -n 15"
+  REQ-005:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "ufw status verbose 2>/dev/null || (command -v nft >/dev/null && nft list ruleset 2>/dev/null | head -n 40) || iptables -L -n 2>/dev/null | head -n 40"
+  REQ-006:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "aa-status 2>/dev/null | head -n 30; systemctl is-active apparmor 2>/dev/null; ls /sys/module/apparmor 2>/dev/null"
+  REQ-007:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "find / -xdev -type d -perm -0002 ! -path '/tmp*' ! -path '/var/tmp*' 2>/dev/null | head -n 30"
+  REQ-008:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "systemctl is-active auditd 2>/dev/null; systemctl is-enabled auditd 2>/dev/null; head -n 40 /etc/audit/auditd.conf 2>/dev/null"
+  REQ-009:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "timedatectl status 2>/dev/null | head -n 20; systemctl is-active systemd-timesyncd chrony 2>/dev/null"
+  REQ-010:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "grep -RnsE 'Defaults|logfile|use_pty' /etc/sudoers /etc/sudoers.d 2>/dev/null | head -n 40"

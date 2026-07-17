@@ -1,0 +1,28 @@
+# Example audit target for Open WebUI.
+# Attach this file (or a copy with real values) and ask:
+#   "Start PostgreSQL and Ubuntu CIS audit"
+#
+# See docs/starting-an-audit.md for the full field reference.
+
+host:
+  hostname: db-01.example.com
+  description: "Prod Postgres 16 on Ubuntu 22.04 (DC1)"
+  os: ubuntu
+
+ssh:
+  user: auditor
+  port: 22
+  # Prefer a key over a password when possible:
+  password: "changeme"
+  # private_key_path: /keys/id_ed25519
+
+postgres:
+  host: db-01.example.com
+  port: 5432
+  user: postgres
+  password: "changeme"
+  database: postgres
+
+frameworks:
+  - postgres_cis
+  - ubuntu_cis

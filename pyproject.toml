@@ -24,6 +24,7 @@ dependencies = [
   "httpx>=0.27.0",
   "python-dotenv>=1.0.0",
   "sse-starlette>=2.1.0",
+  "pyyaml>=6.0.0",
 ]
 
 [project.optional-dependencies]
@@ -39,7 +40,7 @@ psql-auditor = "psql_auditor.api.app:main"
 packages = ["src/psql_auditor"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/psql_auditor", "checklists", "README.md"]
+include = ["src/psql_auditor", "agents", "README.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
