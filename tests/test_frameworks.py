@@ -7,6 +7,7 @@ from psql_auditor.frameworks import (
     list_frameworks,
     load_framework_checklist,
     route_framework,
+    route_frameworks,
 )
 
 
@@ -53,3 +54,17 @@ def test_catalog_lists_drop_ins():
 def test_empty_agents_dir_raises():
     with pytest.raises(FileNotFoundError):
         route_framework("anything", Path("/tmp/no-agents-here-psql-auditor"))
+
+
+def test_route_frameworks_multi_postgres_and_ubuntu():
+    selected = route_frameworks(
+        "Conduct PostgreSQL and Ubuntu CIS audit",
+        "agents",
+    )
+    ids = {fw.id for fw in selected}
+    assert ids == {"postgres_cis", "ubuntu_cis"}
+
+
+def test_route_frameworks_single_when_one_named():
+    selected = route_frameworks("Windows Server CIS hardening only", "agents")
+    assert [fw.id for fw in selected] == ["windows_cis"]

@@ -263,71 +263,38 @@ async def _stream_audit(
 ) -> AsyncIterator[str]:
     """Stream an audit run as OpenAI-compatible SSE chunks.
 
-    Uses LangGraph ``astream_events(version="v2")`` to observe tool starts and
-    capture the finalize node's ``report``. Emits:
-
-    1. Role-open chunk
-    2. Status line ("Starting…")
-    3. Tool narration lines as tools begin
-    4. Final report in ~400-character chunks
-    5. ``finish_reason=stop`` chunk and ``[DONE]``
-
-    Args:
-        auditor: ``AuditorGraph`` instance whose compiled ``graph`` is streamed.
-        user_text: Operator prompt seeding the run.
-        model: Model id echoed in each chunk.
-        completion_id: Shared completion id for this stream.
-
-    Yields:
-        SSE frame strings ready to write to the HTTP response body.
+    Multi-framework requests run as separate parallel graphs via ``arun``;
+    the combined report is streamed in chunks afterward.
     """
+    from psql_auditor.frameworks import route_frameworks
+
     settings = get_settings()
     yield _sse_chunk(None, model, completion_id)
-    yield _sse_chunk(
-        "Starting PostgreSQL checklist audit "
-        f"(parallel workers={settings.max_parallel_assessments})…\n\n",
-        model,
-        completion_id,
-    )
-
-    initial: dict[str, Any] = {
-        "messages": [HumanMessage(content=user_text)],
-        "user_request": user_text,
-    }
-
-    final_report = ""
     try:
-        async for event in auditor.graph.astream_events(initial, version="v2"):
-            kind = event.get("event")
-            name = event.get("name") or ""
-            data = event.get("data") or {}
+        selected = route_frameworks(user_text, settings.agents_dir)
+        names = ", ".join(f"`{fw.id}`" for fw in selected)
+        yield _sse_chunk(
+            f"Starting audit for {len(selected)} framework(s): {names} "
+            f"(REQ workers={settings.max_parallel_assessments})…\n\n",
+            model,
+            completion_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        yield _sse_chunk(f"Routing error: {exc}\n", model, completion_id)
+        yield _sse_chunk(None, model, completion_id, finish="stop")
+        yield "data: [DONE]\n\n"
+        return
 
-            if kind == "on_tool_start":
-                # Narrate tool use so Open WebUI shows progress during long audits.
-                tool_input = data.get("input")
-                preview = json.dumps(tool_input, default=str)[:120]
-                yield _sse_chunk(
-                    f"Tool `{name}`… {preview}\n",
-                    model,
-                    completion_id,
-                )
-            elif kind == "on_chain_end" and name == "finalize":
-                output = data.get("output") or {}
-                if isinstance(output, dict) and output.get("report"):
-                    final_report = output["report"]
-            elif kind == "on_chain_end" and name == "LangGraph":
-                # Fallback: some LangGraph versions only emit the outer end event.
-                output = data.get("output") or {}
-                if isinstance(output, dict) and output.get("report"):
-                    final_report = output["report"]
-    except Exception as exc:  # noqa: BLE001 — surface failure in the stream
+    try:
+        result = await auditor.arun(user_text)
+        final_report = result.get("report") or ""
+    except Exception as exc:  # noqa: BLE001
         yield _sse_chunk(f"\n\nAudit error: {exc}\n", model, completion_id)
         yield _sse_chunk(None, model, completion_id, finish="stop")
         yield "data: [DONE]\n\n"
         return
 
     if final_report:
-        # Chunk the report for smoother UI rendering on long outputs.
         chunk_size = 400
         for i in range(0, len(final_report), chunk_size):
             yield _sse_chunk(final_report[i : i + chunk_size], model, completion_id)

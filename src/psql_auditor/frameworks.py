@@ -113,15 +113,11 @@ def get_framework(
     return None
 
 
-def route_framework(
+def _score_frameworks(
     user_request: str,
     agents_dir: Path | str | None = None,
-) -> Framework:
-    """Pick the best framework for a natural-language audit request.
-
-    Raises:
-        FileNotFoundError: If ``agents/`` has no ``*.md`` frameworks.
-    """
+) -> list[tuple[int, Framework]]:
+    """Score every discovered framework against the request text."""
     frameworks = list_frameworks(agents_dir)
     if not frameworks:
         raise FileNotFoundError(
@@ -138,20 +134,52 @@ def route_framework(
         for alias in fw.aliases:
             alias_l = alias.lower()
             if alias_l and alias_l in text:
+                # Short aliases (pg, os, win) score lower to avoid false multi-hits.
                 score += 3 if len(alias_l) > 4 else 1
         if fw.title.lower() in text:
             score += 4
         scored.append((score, fw))
 
     scored.sort(key=lambda x: (-x[0], x[1].id))
+    return scored
+
+
+def route_framework(
+    user_request: str,
+    agents_dir: Path | str | None = None,
+) -> Framework:
+    """Pick the single best framework for a natural-language audit request."""
+    scored = _score_frameworks(user_request, agents_dir)
     best_score, best = scored[0]
     if best_score == 0:
-        # Vague request: prefer a name containing 'postgres' if present, else first.
-        for fw in frameworks:
+        for _score, fw in scored:
             if "postgres" in fw.id.lower():
                 return fw
-        return frameworks[0]
+        return scored[0][1]
     return best
+
+
+def route_frameworks(
+    user_request: str,
+    agents_dir: Path | str | None = None,
+    *,
+    min_score: int = 3,
+) -> list[Framework]:
+    """Return all frameworks clearly referenced in the request.
+
+    Used for multi-standard audits, e.g. \"PostgreSQL and Ubuntu CIS\":
+    each match runs as its own graph in parallel.
+
+    A framework is included when its score is ``>= min_score`` (default 3 ≈
+    one solid alias / title hit). If nothing clears the threshold, falls back
+    to a single ``route_framework`` result.
+    """
+    scored = _score_frameworks(user_request, agents_dir)
+    matched = [fw for score, fw in scored if score >= min_score]
+    if not matched:
+        return [route_framework(user_request, agents_dir)]
+    # Preserve score order (already sorted).
+    return matched
 
 
 def load_framework_checklist(framework: Framework) -> Checklist:

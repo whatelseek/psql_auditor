@@ -44,8 +44,10 @@ from psql_auditor.context import (
 )
 from psql_auditor.frameworks import (
     frameworks_catalog_text,
+    get_framework,
     load_framework_checklist,
     route_framework,
+    route_frameworks,
 )
 from psql_auditor.llm import build_chat_model
 from psql_auditor.prompts import (
@@ -147,7 +149,7 @@ class AuditorGraph:
         return graph.compile()
 
     async def route_framework_node(self, state: AuditorState) -> dict[str, Any]:
-        """Node: choose ``agents/<framework>.md`` from the user request."""
+        """Node: choose ``agents/<framework>.md`` (honors pinned ``framework_id``)."""
         user_request = state.get("user_request") or ""
         if not user_request:
             for msg in reversed(state.get("messages") or []):
@@ -159,8 +161,17 @@ class AuditorGraph:
             self.settings.max_user_request_chars,
             "user_request",
         )
+
+        pinned = state.get("framework_id") or ""
         try:
-            fw = route_framework(user_request, self.settings.agents_dir)
+            if pinned:
+                fw = get_framework(pinned, self.settings.agents_dir)
+                if fw is None:
+                    raise FileNotFoundError(
+                        f"Pinned framework `{pinned}` not found in agents/"
+                    )
+            else:
+                fw = route_framework(user_request, self.settings.agents_dir)
         except FileNotFoundError as exc:
             return {
                 "user_request": user_request,
@@ -197,8 +208,6 @@ class AuditorGraph:
         """Node: load the drop-in Markdown checklist for the selected framework."""
         if state.get("error") and not state.get("framework_id"):
             return {"pending_ids": [], "requirements": {}}
-
-        from psql_auditor.frameworks import get_framework
 
         selected = get_framework(
             state.get("framework_id") or "",
@@ -530,7 +539,13 @@ class AuditorGraph:
             ],
         }
 
-    async def arun(self, user_text: str) -> dict[str, Any]:
+    async def arun_one(
+        self,
+        user_text: str,
+        *,
+        framework_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Run a single-framework audit graph (optionally pinned)."""
         initial: AuditorState = {
             "messages": [HumanMessage(content=user_text)],
             "user_request": truncate_text(
@@ -540,7 +555,59 @@ class AuditorGraph:
             ),
             "retry_count": 0,
         }
+        if framework_id:
+            initial["framework_id"] = framework_id
         return await self.graph.ainvoke(initial)
+
+    async def arun(self, user_text: str) -> dict[str, Any]:
+        """Run audit(s) for the request.
+
+        If the request names **multiple** frameworks (e.g. \"PostgreSQL and
+        Ubuntu\"), each framework runs as a **separate graph in parallel**,
+        then reports are concatenated.
+        """
+        try:
+            selected = route_frameworks(user_text, self.settings.agents_dir)
+        except FileNotFoundError as exc:
+            return {
+                "report": str(exc),
+                "messages": [AIMessage(content=str(exc))],
+                "error": str(exc),
+            }
+
+        if len(selected) == 1:
+            return await self.arun_one(user_text, framework_id=selected[0].id)
+
+        # Separate graph invocation per framework, in parallel.
+        results = await asyncio.gather(
+            *[
+                self.arun_one(user_text, framework_id=fw.id)
+                for fw in selected
+            ]
+        )
+        sections: list[str] = [
+            "# Multi-framework audit",
+            "",
+            "Frameworks (parallel separate graphs): "
+            + ", ".join(f"`{fw.id}`" for fw in selected),
+            "",
+        ]
+        for fw, result in zip(selected, results, strict=True):
+            report = result.get("report") or "(empty report)"
+            sections.append(f"## Framework: `{fw.id}` — {fw.title}")
+            sections.append("")
+            sections.append(report.strip())
+            sections.append("")
+            sections.append("---")
+            sections.append("")
+
+        combined = "\n".join(sections).strip() + "\n"
+        return {
+            "report": combined,
+            "messages": [AIMessage(content=combined)],
+            "framework_id": ",".join(fw.id for fw in selected),
+            "findings": {},  # per-framework findings live inside each sub-report
+        }
 
 
 _graph: AuditorGraph | None = None

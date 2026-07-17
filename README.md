@@ -40,6 +40,7 @@ START → route_framework → load_framework → assess_parallel
 - `Run a PostgreSQL CIS audit`
 - `Audit this Ubuntu host against CIS`
 - `Windows Server CIS hardening check`
+- `Conduct PostgreSQL and Ubuntu audit` → **two separate graphs in parallel**, merged report
 
 ## Stack
 
