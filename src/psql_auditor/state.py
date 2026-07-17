@@ -70,6 +70,9 @@ class AuditorState(TypedDict, total=False):
     target_hints: dict[str, Any]
     # Cyclic reconnect loop: how many session restores have been attempted.
     retry_count: int
+    # Disk artifacts: <evidence_dir>/<run_id>/<framework>/REQ-NNN/
+    evidence_run_id: str
+    evidence_run_dir: str
 
 
 def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:

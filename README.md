@@ -1,6 +1,6 @@
 # psql_auditor
 
-LangGraph security auditor. **You create frameworks** by dropping Markdown files into [`agents/`](agents/). The agent routes your chat request to a framework, fills a fixed report (Status / Observation / Recommendation), and can **cycle to reconnect** if the MCP/SSH session dies.
+LangGraph security auditor. **You create frameworks** by dropping Markdown files into [`agents/`](agents/). The agent routes your chat request to a framework, fills a fixed report (Status / Observation / Recommendation), **writes command results under a folder per requirement**, and can **cycle to reconnect** if the MCP/SSH session dies.
 
 ## Create a framework
 
@@ -63,9 +63,30 @@ docker compose up --build
 |-------------------------|---------------------|
 | ID, Title, Category, Severity, Pass criteria | Status, Observation, Recommendation |
 
+## Evidence on disk
+
+Each audit creates:
+
+```text
+artifacts/<run_id>/
+  meta.json
+  report.md
+  <framework_id>/
+    REQ-001/
+      requirement.json
+      001_ssh_run.txt      # full command + stdout/stderr
+      001_ssh_run.json
+      002_mcp_query.txt
+      finding.json
+    REQ-002/
+      ...
+```
+
+Multi-framework runs (e.g. PostgreSQL + Ubuntu) share one `<run_id>` with a subfolder per framework. Configure root with `EVIDENCE_DIR` (default `artifacts`; Docker mounts `./artifacts`).
+
 ## Config
 
-See [`.env.example`](.env.example): `AGENTS_DIR`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
+See [`.env.example`](.env.example): `AGENTS_DIR`, `EVIDENCE_DIR`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
 
 ## Development
 

@@ -33,6 +33,8 @@ class Settings(BaseSettings):
         model_id: Model id advertised on ``GET /v1/models`` and used as default
             in chat completions (Open WebUI selects this name).
         agents_dir: Directory of drop-in framework Markdown files (``agents/*.md``).
+        evidence_dir: Root directory for per-run / per-requirement command
+            artifacts (``<evidence_dir>/<run_id>/<framework>/<REQ-NNN>/``).
         max_session_retries: Max cyclic MCP/session reconnect attempts.
         ssh_host: Target host for SSH tools; ``None`` disables SSH until set.
         ssh_port: SSH port (default 22).
@@ -77,6 +79,8 @@ class Settings(BaseSettings):
 
     # --- Drop-in frameworks (you create these) ---
     agents_dir: Path = Field(default=Path("agents"))
+    # Per-requirement command execution artifacts
+    evidence_dir: Path = Field(default=Path("artifacts"))
     max_session_retries: int = 2
 
     # --- SSH target (PostgreSQL host) ---

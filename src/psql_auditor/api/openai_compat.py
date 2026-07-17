@@ -20,7 +20,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 
 from psql_auditor.config import get_settings

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from pathlib import Path
 from typing import Any, Literal
 
 from langchain_core.messages import (
@@ -42,6 +43,7 @@ from psql_auditor.context import (
     count_tool_rounds,
     truncate_text,
 )
+from psql_auditor.evidence_store import EvidenceStore, new_run_id
 from psql_auditor.frameworks import (
     frameworks_catalog_text,
     get_framework,
@@ -120,6 +122,8 @@ class AuditorGraph:
         self.settings = settings or get_settings()
         self.tools = _all_tools()
         self.tools_by_name = {t.name: t for t in self.tools}
+        # Evidence stores keyed by run_id (safe for parallel multi-framework).
+        self._evidence_by_run: dict[str, EvidenceStore] = {}
         self.evidence_model = build_chat_model(self.settings).bind_tools(self.tools)
         self.fill_model = build_chat_model(self.settings)
         self.graph = self._build()
@@ -254,6 +258,7 @@ class AuditorGraph:
 
         user_request = state.get("user_request") or "(none)"
         framework_id = state.get("framework_id") or ""
+        store = self._store_from_state(state)
         limit = max(1, self.settings.max_parallel_assessments)
         sem = asyncio.Semaphore(limit)
 
@@ -265,10 +270,11 @@ class AuditorGraph:
                         requirement=requirements[req_id],
                         user_request=user_request,
                         framework_id=framework_id,
+                        store=store,
                     )
                 except Exception as exc:  # noqa: BLE001
                     req = requirements.get(req_id)
-                    return Finding(
+                    finding = Finding(
                         requirement_id=req_id,
                         title=req.title if req else "",
                         status="error",
@@ -278,6 +284,13 @@ class AuditorGraph:
                         evidence=f"Cell fill failed: {type(exc).__name__}: {exc}",
                         remediation="Retry after restoring SSH/MCP session",
                     )
+                    if store is not None:
+                        store.write_finding(
+                            framework_id,
+                            req_id,
+                            finding.model_dump(),
+                        )
+                    return finding
 
         work_ids = [rid for rid in pending if rid in requirements]
         findings_list = await asyncio.gather(*[_worker(rid) for rid in work_ids])
@@ -331,15 +344,48 @@ class AuditorGraph:
             ],
         }
 
+    def _store_from_state(self, state: AuditorState) -> EvidenceStore | None:
+        """Resolve the evidence store for this graph run (if configured)."""
+        run_id = state.get("evidence_run_id") or ""
+        run_dir = state.get("evidence_run_dir") or ""
+        if not run_id and not run_dir:
+            return None
+        if not run_id and run_dir:
+            run_id = Path(run_dir).name
+        if run_id in self._evidence_by_run:
+            return self._evidence_by_run[run_id]
+        store = EvidenceStore(self.settings.evidence_dir, run_id=run_id)
+        if run_dir:
+            path = Path(run_dir)
+            if path.is_dir():
+                store.root = path
+                store.run_id = path.name
+        self._evidence_by_run[store.run_id] = store
+        return store
+
     async def _fill_requirement_cells(
         self,
         req_id: str,
         requirement: Requirement,
         user_request: str,
         framework_id: str,
+        store: EvidenceStore | None = None,
     ) -> Finding:
+        if store is not None:
+            store.write_requirement(
+                framework_id,
+                req_id,
+                {
+                    "id": requirement.id,
+                    "title": requirement.title,
+                    "category": requirement.category,
+                    "severity": requirement.severity,
+                    "how_to_verify": requirement.how_to_verify,
+                    "pass_criteria": requirement.pass_criteria,
+                },
+            )
         evidence = await self._gather_evidence(
-            req_id, requirement, user_request, framework_id
+            req_id, requirement, user_request, framework_id, store=store
         )
         evidence = truncate_text(
             evidence,
@@ -361,7 +407,10 @@ class AuditorGraph:
             ),
         ]
         response = await self.fill_model.ainvoke(fill_messages)
-        return self._cells_to_finding(req_id, requirement, response, evidence)
+        finding = self._cells_to_finding(req_id, requirement, response, evidence)
+        if store is not None:
+            store.write_finding(framework_id, req_id, finding.model_dump())
+        return finding
 
     async def _gather_evidence(
         self,
@@ -369,6 +418,7 @@ class AuditorGraph:
         requirement: Requirement,
         user_request: str,
         framework_id: str,
+        store: EvidenceStore | None = None,
     ) -> str:
         messages: list = [
             SystemMessage(
@@ -403,7 +453,12 @@ class AuditorGraph:
                 chunks.append(str(response.content or ""))
                 break
 
-            tool_messages = await self._execute_tool_calls(tool_calls)
+            tool_messages = await self._execute_tool_calls(
+                tool_calls,
+                framework_id=framework_id,
+                req_id=req_id,
+                store=store,
+            )
             messages.extend(tool_messages)
             for tm in tool_messages:
                 chunks.append(f"[{tm.name}] {tm.content}")
@@ -411,25 +466,46 @@ class AuditorGraph:
         return "\n---\n".join(c.strip() for c in chunks if c and c.strip())
 
     async def _execute_tool_calls(
-        self, tool_calls: list[dict[str, Any]]
+        self,
+        tool_calls: list[dict[str, Any]],
+        *,
+        framework_id: str = "",
+        req_id: str = "",
+        store: EvidenceStore | None = None,
     ) -> list[ToolMessage]:
         async def _one(tc: dict[str, Any]) -> ToolMessage:
             name = tc.get("name") or ""
             args = tc.get("args") or {}
             call_id = tc.get("id") or name
             tool = self.tools_by_name.get(name)
+            error: str | None = None
+            full_result = ""
             if tool is None:
-                content = f"Tool error: unknown tool '{name}'"
+                full_result = f"Tool error: unknown tool '{name}'"
+                error = full_result
+                content = full_result
             else:
                 try:
                     raw = await tool.ainvoke(args)
+                    full_result = str(raw)
                     content = truncate_text(
-                        str(raw),
+                        full_result,
                         self.settings.max_tool_output_chars,
                         "tool",
                     )
                 except Exception as exc:  # noqa: BLE001
-                    content = f"Tool error: {type(exc).__name__}: {exc}"
+                    full_result = f"Tool error: {type(exc).__name__}: {exc}"
+                    error = full_result
+                    content = full_result
+            if store is not None and req_id:
+                store.write_tool_result(
+                    framework_id,
+                    req_id,
+                    name,
+                    args if isinstance(args, dict) else {"value": args},
+                    full_result,
+                    error=error,
+                )
             return ToolMessage(content=content, tool_call_id=call_id, name=name)
 
         return list(await asyncio.gather(*[_one(tc) for tc in tool_calls]))
@@ -528,10 +604,21 @@ class AuditorGraph:
 
         fw = state.get("framework_id") or ""
         retries = int(state.get("retry_count") or 0)
-        header = f"Framework: `{fw}` | session reconnects: {retries}\n\n"
+        store = self._store_from_state(state)
+        evidence_note = ""
+        if store is not None:
+            store.write_report(fw or "framework", f"{summary}\n\n---\n\n{full_report}")
+            evidence_note = f" | evidence: `{store.root}`"
+        header = (
+            f"Framework: `{fw}` | session reconnects: {retries}{evidence_note}\n\n"
+        )
         final_text = f"{header}{summary}\n\n---\n\n{full_report}"
         return {
             "report": final_text,
+            "evidence_run_id": state.get("evidence_run_id") or "",
+            "evidence_run_dir": state.get("evidence_run_dir") or (
+                str(store.root) if store else ""
+            ),
             "pending_ids": [],
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
@@ -544,8 +631,24 @@ class AuditorGraph:
         user_text: str,
         *,
         framework_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         """Run a single-framework audit graph (optionally pinned)."""
+        rid = run_id or new_run_id()
+        store = self._evidence_by_run.get(rid)
+        if store is None:
+            store = EvidenceStore(self.settings.evidence_dir, run_id=rid)
+            self._evidence_by_run[store.run_id] = store
+        meta: dict[str, Any] = {
+            "user_request": truncate_text(
+                user_text,
+                self.settings.max_user_request_chars,
+                "user_request",
+            ),
+        }
+        if framework_id:
+            meta["framework_id"] = framework_id
+        store.write_run_meta(**meta)
         initial: AuditorState = {
             "messages": [HumanMessage(content=user_text)],
             "user_request": truncate_text(
@@ -554,17 +657,23 @@ class AuditorGraph:
                 "user_request",
             ),
             "retry_count": 0,
+            "evidence_run_id": store.run_id,
+            "evidence_run_dir": str(store.root),
         }
         if framework_id:
             initial["framework_id"] = framework_id
-        return await self.graph.ainvoke(initial)
+        result = await self.graph.ainvoke(initial)
+        result.setdefault("evidence_run_id", store.run_id)
+        result.setdefault("evidence_run_dir", str(store.root))
+        return result
 
     async def arun(self, user_text: str) -> dict[str, Any]:
         """Run audit(s) for the request.
 
         If the request names **multiple** frameworks (e.g. \"PostgreSQL and
         Ubuntu\"), each framework runs as a **separate graph in parallel**,
-        then reports are concatenated.
+        then reports are concatenated. All frameworks share one evidence run
+        directory with a subfolder per framework and per requirement.
         """
         try:
             selected = route_frameworks(user_text, self.settings.agents_dir)
@@ -575,13 +684,30 @@ class AuditorGraph:
                 "error": str(exc),
             }
 
+        run_id = new_run_id()
+        # Seed shared run meta before parallel framework graphs fan out.
+        shared = EvidenceStore(self.settings.evidence_dir, run_id=run_id)
+        self._evidence_by_run[run_id] = shared
+        shared.write_run_meta(
+            user_request=truncate_text(
+                user_text,
+                self.settings.max_user_request_chars,
+                "user_request",
+            ),
+            frameworks=[fw.id for fw in selected],
+        )
+
         if len(selected) == 1:
-            return await self.arun_one(user_text, framework_id=selected[0].id)
+            return await self.arun_one(
+                user_text,
+                framework_id=selected[0].id,
+                run_id=run_id,
+            )
 
         # Separate graph invocation per framework, in parallel.
         results = await asyncio.gather(
             *[
-                self.arun_one(user_text, framework_id=fw.id)
+                self.arun_one(user_text, framework_id=fw.id, run_id=run_id)
                 for fw in selected
             ]
         )
@@ -590,6 +716,8 @@ class AuditorGraph:
             "",
             "Frameworks (parallel separate graphs): "
             + ", ".join(f"`{fw.id}`" for fw in selected),
+            "",
+            f"Evidence directory: `{shared.root}`",
             "",
         ]
         for fw, result in zip(selected, results, strict=True):
@@ -602,10 +730,13 @@ class AuditorGraph:
             sections.append("")
 
         combined = "\n".join(sections).strip() + "\n"
+        (shared.root / "report.md").write_text(combined, encoding="utf-8")
         return {
             "report": combined,
             "messages": [AIMessage(content=combined)],
             "framework_id": ",".join(fw.id for fw in selected),
+            "evidence_run_id": run_id,
+            "evidence_run_dir": str(shared.root),
             "findings": {},  # per-framework findings live inside each sub-report
         }
 
