@@ -77,6 +77,9 @@ class AuditorState(TypedDict, total=False):
     hitl_skipped: list[str]
     # True when the graph is paused waiting for skip/retry.
     awaiting_hitl: bool
+    # Zip archive of report + evidence for chat download.
+    archive_path: str
+    archive_url: str
 
 
 def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:

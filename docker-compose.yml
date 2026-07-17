@@ -24,6 +24,11 @@ services:
       AGENTS_DIR: /app/agents
       EVIDENCE_DIR: /app/artifacts
       HITL_ENABLED: ${HITL_ENABLED:-true}
+      ARCHIVE_ENABLED: ${ARCHIVE_ENABLED:-true}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+      OPEN_WEBUI_URL: ${OPEN_WEBUI_URL:-http://open-webui:8080}
+      OPEN_WEBUI_PUBLIC_URL: ${OPEN_WEBUI_PUBLIC_URL:-http://localhost:3000}
+      OPEN_WEBUI_API_KEY: ${OPEN_WEBUI_API_KEY:-}
       MAX_SESSION_RETRIES: ${MAX_SESSION_RETRIES:-2}
       API_KEY: ${API_KEY:-sk-auditor-local}
       # Mount or inject SSH key path inside the container as needed:

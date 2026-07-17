@@ -37,6 +37,16 @@ class Settings(BaseSettings):
             artifacts (``<evidence_dir>/<run_id>/<framework>/<REQ-NNN>/``).
         hitl_enabled: When true, pause on failed requirements and ask the
             operator to skip or retry (LangGraph interrupt + chat resume).
+        archive_enabled: When true, zip the evidence/report bundle after the
+            audit completes and expose a download link in chat.
+        public_base_url: Browser-reachable base URL for agent download links
+            (e.g. ``http://localhost:8000``).
+        open_webui_url: Internal Open WebUI base URL for uploading the zip
+            (e.g. ``http://open-webui:8080``). Empty disables upload.
+        open_webui_public_url: Optional public Open WebUI URL for absolute
+            file links in chat (defaults to ``open_webui_url``).
+        open_webui_api_key: Bearer token for Open WebUI file upload when auth
+            is enabled.
         max_session_retries: Max cyclic MCP/session reconnect attempts.
         ssh_host: Target host for SSH tools; ``None`` disables SSH until set.
         ssh_port: SSH port (default 22).
@@ -85,6 +95,12 @@ class Settings(BaseSettings):
     evidence_dir: Path = Field(default=Path("artifacts"))
     # Human-in-the-loop pause on failed REQs (skip / retry)
     hitl_enabled: bool = True
+    # Zip report+evidence and link it in Open WebUI chat
+    archive_enabled: bool = True
+    public_base_url: str = "http://localhost:8000"
+    open_webui_url: str | None = None
+    open_webui_public_url: str | None = None
+    open_webui_api_key: str | None = None
     max_session_retries: int = 2
 
     # --- SSH target (PostgreSQL host) ---

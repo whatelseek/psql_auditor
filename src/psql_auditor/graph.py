@@ -61,6 +61,7 @@ from psql_auditor.hitl import (
     interrupt_payload_to_prompt,
     parse_hitl_decision,
 )
+from psql_auditor.report_archive import package_and_publish_archive
 from psql_auditor.llm import build_chat_model
 from psql_auditor.prompts import (
     EVIDENCE_FORCE_PROMPT,
@@ -808,13 +809,33 @@ class AuditorGraph:
             f"Framework: `{fw}` | session reconnects: {retries}{evidence_note}\n\n"
         )
         final_text = f"{header}{summary}\n\n---\n\n{full_report}"
+
+        archive_path = ""
+        archive_url = ""
+        if store is not None and self.settings.archive_enabled:
+            try:
+                packaged = await package_and_publish_archive(
+                    store.root, self.settings
+                )
+                archive_path = str(packaged.get("zip_path") or "")
+                archive_url = str(packaged.get("download_url") or "")
+                final_text = f"{final_text.rstrip()}\n{packaged.get('chat_section') or ''}"
+            except Exception as exc:  # noqa: BLE001
+                final_text = (
+                    f"{final_text.rstrip()}\n\n---\n\n"
+                    f"(Archive packaging failed: {type(exc).__name__}: {exc})\n"
+                )
+
         return {
             "report": final_text,
             "evidence_run_id": state.get("evidence_run_id") or "",
             "evidence_run_dir": state.get("evidence_run_dir") or (
                 str(store.root) if store else ""
             ),
+            "archive_path": archive_path,
+            "archive_url": archive_url,
             "pending_ids": [],
+            "awaiting_hitl": False,
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
                 AIMessage(content=final_text),
@@ -933,7 +954,7 @@ class AuditorGraph:
         base_thread = session.get("base_thread") or thread_id.split(":")[0]
 
         if not remaining:
-            return self._merge_multi_reports(
+            return await self._merge_multi_reports(
                 completed,
                 run_id=str(run_id or ""),
                 base_thread=base_thread,
@@ -983,7 +1004,7 @@ class AuditorGraph:
         ]
         return "\n".join(lines)
 
-    def _merge_multi_reports(
+    async def _merge_multi_reports(
         self,
         completed: list[tuple[str, str, str]],
         *,
@@ -1002,19 +1023,42 @@ class AuditorGraph:
         for fw_id, title, report in completed:
             sections.append(f"## Framework: `{fw_id}` — {title}")
             sections.append("")
-            sections.append((report or "(empty report)").strip())
+            # Drop nested per-framework archive blocks; one zip at the end.
+            body = (report or "(empty report)").strip()
+            if "## Audit archive" in body:
+                body = body.split("## Audit archive", 1)[0].rstrip()
+            sections.append(body)
             sections.append("")
             sections.append("---")
             sections.append("")
         combined = "\n".join(sections).strip() + "\n"
+        archive_path = ""
+        archive_url = ""
         if store is not None:
             (store.root / "report.md").write_text(combined, encoding="utf-8")
+            if self.settings.archive_enabled:
+                try:
+                    packaged = await package_and_publish_archive(
+                        store.root, self.settings
+                    )
+                    archive_path = str(packaged.get("zip_path") or "")
+                    archive_url = str(packaged.get("download_url") or "")
+                    combined = (
+                        f"{combined.rstrip()}\n{packaged.get('chat_section') or ''}"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    combined = (
+                        f"{combined.rstrip()}\n\n---\n\n"
+                        f"(Archive packaging failed: {type(exc).__name__}: {exc})\n"
+                    )
         return {
             "report": combined,
             "messages": [AIMessage(content=combined)],
             "framework_id": ",".join(c[0] for c in completed),
             "evidence_run_id": run_id,
             "evidence_run_dir": str(store.root) if store else "",
+            "archive_path": archive_path,
+            "archive_url": archive_url,
             "thread_id": base_thread,
             "awaiting_hitl": False,
             "findings": {},
@@ -1090,7 +1134,7 @@ class AuditorGraph:
                     return result
                 self._multi_sessions.pop(fw_tid, None)
                 completed.append((fw.id, fw.title, result.get("report") or ""))
-            return self._merge_multi_reports(
+            return await self._merge_multi_reports(
                 completed,
                 run_id=run_id,
                 base_thread=base_thread,
@@ -1111,7 +1155,7 @@ class AuditorGraph:
             (fw.id, fw.title, result.get("report") or "")
             for fw, result in zip(selected, results, strict=True)
         ]
-        return self._merge_multi_reports(
+        return await self._merge_multi_reports(
             completed,
             run_id=run_id,
             base_thread=base_thread,

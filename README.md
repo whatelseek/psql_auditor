@@ -53,6 +53,17 @@ When a requirement fails after automatic session retries, the agent replies with
 
 Reply in the same chat. A marker `[AUDIT_HITL:<thread>]` ties the resume to the paused run. Set `HITL_ENABLED=false` to auto-finalize with `error` statuses instead.
 
+### Audit ZIP in chat
+
+When the audit finishes, the agent:
+
+1. Zips `artifacts/<run_id>/` (Markdown report + per-REQ command outputs)
+2. Serves it at `/v1/downloads/<run_id>_audit.zip?token=…`
+3. Uploads it to Open WebUI Files (when `OPEN_WEBUI_URL` is set)
+4. Appends a **Download ZIP** link to the chat reply
+
+Configure `PUBLIC_BASE_URL` (browser → agent) and `OPEN_WEBUI_URL` (agent → Open WebUI).
+
 ## Chat examples (Open WebUI)
 
 - `Run a PostgreSQL CIS audit`
@@ -104,7 +115,7 @@ Multi-framework runs (e.g. PostgreSQL + Ubuntu) share one `<run_id>` with a subf
 
 ## Config
 
-See [`.env.example`](.env.example): `AGENTS_DIR`, `EVIDENCE_DIR`, `HITL_ENABLED`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
+See [`.env.example`](.env.example): `AGENTS_DIR`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
 
 ## Development
 

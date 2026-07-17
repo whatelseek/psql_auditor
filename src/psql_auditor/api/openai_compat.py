@@ -15,19 +15,22 @@ LangGraph pipe pattern.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 
 from psql_auditor.config import get_settings
 from psql_auditor.graph import get_auditor_graph
 from psql_auditor.hitl import extract_hitl_thread_id
+from psql_auditor.report_archive import archive_filename, verify_download_token
 
 router = APIRouter(prefix="/v1")
 
@@ -128,6 +131,53 @@ async def list_models(
     }
 
 
+_DOWNLOAD_NAME = re.compile(
+    r"^(?P<run_id>.+)_audit\.zip$",
+    re.IGNORECASE,
+)
+
+
+@router.get("/downloads/{filename}")
+async def download_archive(
+    filename: str,
+    authorization: str | None = Header(default=None),
+    token: str | None = Query(default=None),
+):
+    """Download a packaged audit zip (report + per-REQ evidence).
+
+    Auth: valid ``?token=`` (for Open WebUI markdown links) **or** Bearer API key.
+    """
+    settings = get_settings()
+    match = _DOWNLOAD_NAME.match(filename)
+    if not match:
+        raise HTTPException(status_code=404, detail="Unknown archive name")
+    run_id = match.group("run_id")
+    secret = settings.api_key or "psql-auditor-dev"
+    token_ok = verify_download_token(run_id, token, secret)
+    bearer_ok = False
+    if settings.api_key and authorization and authorization.startswith("Bearer "):
+        bearer_ok = authorization.removeprefix("Bearer ").strip() == settings.api_key
+    elif not settings.api_key:
+        bearer_ok = True
+    if not (token_ok or bearer_ok):
+        raise HTTPException(status_code=401, detail="Invalid download token")
+
+    zip_path = Path(settings.evidence_dir) / archive_filename(run_id)
+    if not zip_path.is_file():
+        # Fallback: zip still inside run dir naming convention.
+        alt = Path(settings.evidence_dir) / run_id / archive_filename(run_id)
+        zip_path = alt if alt.is_file() else zip_path
+    if not zip_path.is_file():
+        raise HTTPException(status_code=404, detail="Archive not found")
+
+    return FileResponse(
+        path=zip_path,
+        media_type="application/zip",
+        filename=archive_filename(run_id),
+        content_disposition_type="attachment",
+    )
+
+
 async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]:
     """Start a new audit or resume a HITL-paused thread from chat history."""
     user_text = _latest_user_text(body.messages)
@@ -220,6 +270,12 @@ async def _stream_audit(
         if result.get("awaiting_hitl"):
             yield _sse_chunk(
                 "Paused for your decision (skip / retry).\n\n",
+                model,
+                completion_id,
+            )
+        elif result.get("archive_url"):
+            yield _sse_chunk(
+                "Packaging audit ZIP for download…\n\n",
                 model,
                 completion_id,
             )
