@@ -111,6 +111,8 @@ class Settings(BaseSettings):
     open_webui_url: str | None = None
     open_webui_public_url: str | None = None
     open_webui_api_key: str | None = None
+    # Append CIS compliance % bar charts to the final report text
+    compliance_charts_in_report: bool = True
     max_session_retries: int = 2
 
     # --- SSH target (PostgreSQL host) ---

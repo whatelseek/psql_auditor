@@ -41,6 +41,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command, interrupt
 
 from auditor.checklist import Requirement
+from auditor.compliance import format_compliance_markdown
 from auditor.config import Settings, get_settings
 from auditor.context import (
     compact_findings_for_summary,
@@ -855,6 +856,15 @@ class AuditorGraph:
             f"Framework: `{fw}` | session reconnects: {retries}{evidence_note}\n\n"
         )
         final_text = f"{header}{summary}\n\n---\n\n{full_report}"
+
+        if self.settings.compliance_charts_in_report:
+            try:
+                final_text = (
+                    f"{final_text.rstrip()}\n"
+                    f"{format_compliance_markdown(full_report)}"
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
         archive_path = ""
         archive_url = ""
