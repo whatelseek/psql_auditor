@@ -41,6 +41,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command, interrupt
 
 from auditor.adhoc import run_adhoc_commands
+from auditor.benchmark_store import BenchmarkStore
 from auditor.checklist import Requirement
 from auditor.compliance import format_compliance_markdown
 from auditor.config import Settings, get_settings
@@ -184,6 +185,13 @@ class AuditorGraph:
         )
         self.evidence_model = build_chat_model(self.settings).bind_tools(self.tools)
         self.fill_model = build_chat_model(self.settings)
+        self.benchmark = (
+            BenchmarkStore(self.settings.resolve_benchmark_path())
+            if self.settings.benchmark_enabled
+            else None
+        )
+        if self.benchmark is not None:
+            self.benchmark.ensure_file()
         self.graph = self._build()
 
     def _build(self):
@@ -853,6 +861,26 @@ class AuditorGraph:
         if store is not None:
             store.write_report(fw or "framework", f"{summary}\n\n---\n\n{full_report}")
             evidence_note = f" | evidence: `{store.root}`"
+
+        if self.benchmark is not None and findings and fw:
+            try:
+                evidence_rel = ""
+                if store is not None:
+                    try:
+                        evidence_rel = str(
+                            store.root.relative_to(Path(self.settings.evidence_dir).resolve())
+                        )
+                    except ValueError:
+                        evidence_rel = str(store.root)
+                self.benchmark.append_from_findings(
+                    run_id=state.get("evidence_run_id") or (store.run_id if store else ""),
+                    framework_id=fw,
+                    findings=findings,
+                    evidence_relpath=evidence_rel,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
         header = (
             f"Framework: `{fw}` | session reconnects: {retries}{evidence_note}\n\n"
         )
