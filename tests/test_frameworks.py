@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from psql_auditor.frameworks import (
+from auditor.frameworks import (
     frameworks_catalog_text,
     list_frameworks,
     load_framework_checklist,
@@ -53,7 +53,7 @@ def test_catalog_lists_drop_ins():
 
 def test_empty_agents_dir_raises():
     with pytest.raises(FileNotFoundError):
-        route_framework("anything", Path("/tmp/no-agents-here-psql-auditor"))
+        route_framework("anything", Path("/tmp/no-agents-here-auditor"))
 
 
 def test_route_frameworks_multi_postgres_and_ubuntu():

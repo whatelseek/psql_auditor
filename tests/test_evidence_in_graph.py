@@ -3,9 +3,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from psql_auditor.config import Settings
-from psql_auditor.evidence_store import EvidenceStore
-from psql_auditor.graph import AuditorGraph
+from auditor.config import Settings
+from auditor.evidence_store import EvidenceStore
+from auditor.graph import AuditorGraph
 
 
 @pytest.mark.asyncio

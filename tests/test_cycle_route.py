@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from psql_auditor.config import Settings
-from psql_auditor.graph import AuditorGraph
-from psql_auditor.state import Finding
+from auditor.config import Settings
+from auditor.graph import AuditorGraph
+from auditor.state import Finding
 
 
 def test_route_after_assess_cycles_when_retries_remain():
@@ -37,6 +37,6 @@ def test_assess_queues_recoverable_failures():
         status="error",
         evidence="SSH error: TimeoutError: timed out",
     )
-    from psql_auditor.graph import _is_recoverable_finding
+    from auditor.graph import _is_recoverable_finding
 
     assert _is_recoverable_finding(f)

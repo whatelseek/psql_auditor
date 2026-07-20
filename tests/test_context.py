@@ -1,12 +1,12 @@
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from psql_auditor.context import (
+from auditor.context import (
     compact_findings_for_summary,
     count_tool_rounds,
     truncate_text,
     truncate_tool_messages,
 )
-from psql_auditor.state import Finding
+from auditor.state import Finding
 
 
 def test_truncate_text_adds_marker():

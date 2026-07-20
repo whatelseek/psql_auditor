@@ -11,8 +11,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from psql_auditor.checklist import Requirement
-from psql_auditor.state import Finding
+from auditor.checklist import Requirement
+from auditor.state import Finding
 
 HitlAction = Literal["skip", "retry", "skip_all", "retry_all", "unknown"]
 

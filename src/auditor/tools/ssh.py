@@ -17,7 +17,7 @@ from typing import Any
 import asyncssh
 from langchain_core.tools import tool
 
-from psql_auditor.config import Settings, get_settings
+from auditor.config import Settings, get_settings
 
 
 def _ssh_kwargs(settings: Settings) -> dict[str, Any]:

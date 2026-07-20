@@ -6,9 +6,9 @@ liveness probe for Compose / orchestrators.
 
 Run via::
 
-    uvicorn psql_auditor.api.app:app --host 0.0.0.0 --port 8000
+    uvicorn auditor.api.app:app --host 0.0.0.0 --port 8000
 
-or the console script ``psql-auditor`` which calls ``main()``.
+or the console script ``auditor`` which calls ``main()``.
 """
 
 from __future__ import annotations
@@ -16,9 +16,9 @@ from __future__ import annotations
 import uvicorn
 from fastapi import FastAPI
 
-from psql_auditor import __version__
-from psql_auditor.api.openai_compat import router as openai_router
-from psql_auditor.config import get_settings
+from auditor import __version__
+from auditor.api.openai_compat import router as openai_router
+from auditor.config import get_settings
 
 
 def create_app() -> FastAPI:
@@ -32,10 +32,10 @@ def create_app() -> FastAPI:
         Configured ``FastAPI`` instance.
     """
     app = FastAPI(
-        title="PostgreSQL LangGraph Auditor",
+        title="LangGraph Auditor",
         version=__version__,
         description=(
-            "OpenAI-compatible API for a LangGraph PostgreSQL security auditor. "
+            "OpenAI-compatible API for a LangGraph IT infrastructure security auditor. "
             "Point Open WebUI at /v1."
         ),
     )
@@ -53,18 +53,18 @@ def create_app() -> FastAPI:
     return app
 
 
-# Module-level app for ``uvicorn psql_auditor.api.app:app``.
+# Module-level app for ``uvicorn auditor.api.app:app``.
 app = create_app()
 
 
 def main() -> None:
     """CLI entrypoint: start uvicorn with host/port from settings.
 
-    Invoked by the ``psql-auditor`` console script defined in ``pyproject.toml``.
+    Invoked by the ``auditor`` console script defined in ``pyproject.toml``.
     """
     settings = get_settings()
     uvicorn.run(
-        "psql_auditor.api.app:app",
+        "auditor.api.app:app",
         host=settings.host,
         port=settings.port,
         reload=False,

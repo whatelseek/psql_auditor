@@ -1,5 +1,5 @@
-from psql_auditor.checklist import Requirement
-from psql_auditor.state import Finding, aggregate_findings, render_report
+from auditor.checklist import Requirement
+from auditor.state import Finding, aggregate_findings, render_report
 
 
 def test_aggregate_findings_counts_statuses():

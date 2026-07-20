@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     api_key: str | None = None
     host: str = "0.0.0.0"
     port: int = 8000
-    model_id: str = "psql-auditor"
+    model_id: str = "auditor"
 
     # --- Drop-in frameworks (you create these) ---
     agents_dir: Path = Field(default=Path("agents"))

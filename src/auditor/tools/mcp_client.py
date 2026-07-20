@@ -26,7 +26,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from psql_auditor.config import Settings, get_settings
+from auditor.config import Settings, get_settings
 
 # Default: published npm package from antonorlov/mcp-postgres-server
 _DEFAULT_COMMAND = "npx"

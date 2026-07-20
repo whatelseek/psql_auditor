@@ -1,11 +1,11 @@
 # Starting an audit (Open WebUI)
 
-This document describes how an operator starts a security audit with **psql_auditor** through Open WebUI: attach a **target file** (host, credentials, description), then ask the agent to run one or more frameworks.
+This document describes how an operator starts a security audit with **auditor** through Open WebUI: attach a **target file** (host, credentials, description), then ask the agent to run one or more frameworks.
 
 ## Operator flow
 
 ```text
-Open WebUI chat (model: psql-auditor)
+Open WebUI chat (model: auditor)
   │
   ├─ 1. Attach target file (YAML / JSON preferred)
   ├─ 2. Message: which frameworks to run
@@ -23,7 +23,7 @@ Agent
 
 ### Step-by-step
 
-1. Open [Open WebUI](http://localhost:3000) and select model **`psql-auditor`**.
+1. Open [Open WebUI](http://localhost:3000) and select model **`auditor`**.
 2. Attach a target file (see [Target file format](#target-file-format)).
 3. Send a clear start request naming the frameworks, for example:
    - `Start PostgreSQL CIS audit on this host`
@@ -114,7 +114,7 @@ Framework ids match drop-in files under [`agents/`](../agents/) (filename stem o
 
 ## Open WebUI settings (file content)
 
-Open WebUI normally processes attachments with RAG. For target files that contain **credentials and a short structured document**, configure the `psql-auditor` model so the **full file** reaches the agent:
+Open WebUI normally processes attachments with RAG. For target files that contain **credentials and a short structured document**, configure the `auditor` model so the **full file** reaches the agent:
 
 - Prefer **Bypass Embedding and Retrieval** (or equivalent “full file context”) for this model / chat, **or**
 - Ensure **File Context** injects the entire small target file into the prompt (not sparse RAG chunks).

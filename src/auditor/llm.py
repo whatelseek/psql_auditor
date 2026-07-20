@@ -13,7 +13,7 @@ from __future__ import annotations
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
-from psql_auditor.config import Settings, get_settings
+from auditor.config import Settings, get_settings
 
 
 def build_chat_model(settings: Settings | None = None) -> BaseChatModel:

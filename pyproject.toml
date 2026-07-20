@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "psql-auditor"
+name = "auditor"
 version = "0.1.0"
-description = "LangGraph PostgreSQL security auditor with LiteLLM and Open WebUI"
+description = "LangGraph IT infrastructure security auditor with LiteLLM and Open WebUI"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -34,13 +34,13 @@ dev = [
 ]
 
 [project.scripts]
-psql-auditor = "psql_auditor.api.app:main"
+auditor = "auditor.api.app:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/psql_auditor"]
+packages = ["src/auditor"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/psql_auditor", "agents", "README.md"]
+include = ["src/auditor", "agents", "README.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

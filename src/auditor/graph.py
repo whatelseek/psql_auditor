@@ -40,31 +40,31 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command, interrupt
 
-from psql_auditor.checklist import Requirement
-from psql_auditor.config import Settings, get_settings
-from psql_auditor.context import (
+from auditor.checklist import Requirement
+from auditor.config import Settings, get_settings
+from auditor.context import (
     compact_findings_for_summary,
     count_tool_rounds,
     truncate_text,
 )
-from psql_auditor.evidence_store import EvidenceStore, new_run_id
-from psql_auditor.frameworks import (
+from auditor.evidence_store import EvidenceStore, new_run_id
+from auditor.frameworks import (
     frameworks_catalog_text,
     get_framework,
     load_framework_checklist,
     route_framework,
     route_frameworks,
 )
-from psql_auditor.hitl import (
+from auditor.hitl import (
     build_hitl_prompt,
     format_hitl_assistant_message,
     interrupt_payload_to_prompt,
     parse_hitl_decision,
 )
-from psql_auditor.memory.playbook_store import PlaybookMemory
-from psql_auditor.report_archive import package_and_publish_archive
-from psql_auditor.llm import build_chat_model
-from psql_auditor.prompts import (
+from auditor.memory.playbook_store import PlaybookMemory
+from auditor.report_archive import package_and_publish_archive
+from auditor.llm import build_chat_model
+from auditor.prompts import (
     EVIDENCE_FORCE_PROMPT,
     EVIDENCE_PROMPT,
     EVIDENCE_SYSTEM_PROMPT,
@@ -72,9 +72,9 @@ from psql_auditor.prompts import (
     FILL_SYSTEM_PROMPT,
     FINALIZE_PROMPT,
 )
-from psql_auditor.state import AuditorState, Finding, render_report
-from psql_auditor.tools.mcp_client import get_mcp_tools, reconnect_mcp_session
-from psql_auditor.tools.ssh import get_ssh_tools
+from auditor.state import AuditorState, Finding, render_report
+from auditor.tools.mcp_client import get_mcp_tools, reconnect_mcp_session
+from auditor.tools.ssh import get_ssh_tools
 
 _RECOVERABLE_MARKERS = (
     "mcp error",
