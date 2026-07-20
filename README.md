@@ -158,11 +158,21 @@ Ask the model to **run commands** without a full checklist audit:
 
 ```text
 Run this command: `grep PermitRootLogin /etc/ssh/sshd_config`
-Run playbook commands for REQ-002 on Ubuntu
 Execute SQL: SELECT name, setting FROM pg_settings WHERE name = 'ssl'
 ```
 
 See [`docs/adhoc-commands.md`](docs/adhoc-commands.md). Toggle with `ADHOC_COMMANDS_ENABLED`.
+
+## Post-audit follow-up
+
+After an audit, revise a requirement (new logs land in the same `REQ-*` folder) and rebuild the report:
+
+```text
+Revise REQ-002 on Ubuntu
+Update the report from new evidence
+```
+
+See [`docs/post-audit-followup.md`](docs/post-audit-followup.md).
 
 ## Config
 

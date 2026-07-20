@@ -279,6 +279,19 @@ artifacts/<run_id>/
 
 ZIP: `artifacts/<run_id>_audit.zip` + ссылка в чате (`PUBLIC_BASE_URL`).
 
+### 8.3. Дополнительные проверки после аудита
+
+После завершения аудита можно **дозапросить REQ** — новые логи пишутся в ту же папку `REQ-*` (файлы `003_…`, `004_…`), затем **обновить отчёт**:
+
+```text
+Перепроверь REQ-002 на Ubuntu
+Run another check for REQ-002: `sshd -T | grep permitrootlogin`
+Обнови отчёт
+Update the report from new evidence
+```
+
+Подробнее: [post-audit-followup.md](post-audit-followup.md).
+
 ---
 
 ## 9. Диаграммы соответствия CIS

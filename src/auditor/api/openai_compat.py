@@ -180,7 +180,7 @@ async def download_archive(
 
 
 async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]:
-    """Start a new audit, ad-hoc command run, or resume a HITL-paused thread."""
+    """Start audit, follow-up, ad-hoc command run, or resume HITL."""
     user_text = _latest_user_text(body.messages)
     hitl_thread = extract_hitl_thread_id(body.messages)
     if hitl_thread:
@@ -191,9 +191,16 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
         thread_id = f"user-{body.user}"
 
     settings = get_settings()
-    if settings.adhoc_commands_enabled and classify_intent(
-        user_text, agents_dir=settings.agents_dir
-    ) == "adhoc":
+    intent = classify_intent(user_text, agents_dir=settings.agents_dir)
+    if intent == "revise_req":
+        return await auditor.arun_revise_req(
+            user_text, messages=body.messages, thread_id=thread_id
+        )
+    if intent == "update_report":
+        return await auditor.arun_update_report(
+            user_text, messages=body.messages, thread_id=thread_id
+        )
+    if settings.adhoc_commands_enabled and intent == "adhoc":
         return await auditor.arun_adhoc(user_text, thread_id=thread_id)
 
     return await auditor.arun(user_text, thread_id=thread_id)
@@ -249,16 +256,26 @@ async def _stream_audit(
     hitl_thread = extract_hitl_thread_id(body.messages)
 
     yield _sse_chunk(None, model, completion_id)
+    intent = classify_intent(user_text, agents_dir=settings.agents_dir)
     if hitl_thread:
         yield _sse_chunk(
             f"Resuming paused audit (`{hitl_thread}`)…\n\n",
             model,
             completion_id,
         )
-    elif (
-        settings.adhoc_commands_enabled
-        and classify_intent(user_text, agents_dir=settings.agents_dir) == "adhoc"
-    ):
+    elif intent == "revise_req":
+        yield _sse_chunk(
+            "Revising requirement(s) in the prior audit evidence folder…\n\n",
+            model,
+            completion_id,
+        )
+    elif intent == "update_report":
+        yield _sse_chunk(
+            "Updating report from collected evidence…\n\n",
+            model,
+            completion_id,
+        )
+    elif settings.adhoc_commands_enabled and intent == "adhoc":
         yield _sse_chunk(
             "Running ad-hoc audit command(s)…\n\n",
             model,
