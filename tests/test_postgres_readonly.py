@@ -1,4 +1,4 @@
-from psql_auditor.tools.postgres import _is_readonly
+from auditor.tools.postgres import _is_readonly
 
 
 def test_allows_select_and_show():

@@ -1,6 +1,6 @@
 """
 title: CIS Compliance Charts
-author: psql_auditor
+author: auditor
 author_url: https://github.com/whatelseek/psql_auditor
 funding_url: https://github.com/whatelseek/psql_auditor
 version: 0.1.0
@@ -329,7 +329,7 @@ class Tools:
         language: str = "",
     ) -> str:
         """
-        Visualize CIS / psql-auditor Markdown report as compliance % bar charts by severity.
+        Visualize CIS / auditor Markdown report as compliance % bar charts by severity.
 
         :param report_markdown: Full audit report Markdown (summary table with Severity + Status).
         :param language: Optional en|ru (default from Valves / auto-detect).

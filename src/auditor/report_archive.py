@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 import httpx
 
-from psql_auditor.config import Settings
+from auditor.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ def create_run_archive(run_dir: Path | str, *, zip_path: Path | None = None) -> 
 
 def make_download_token(run_id: str, secret: str) -> str:
     """Create a stable HMAC token so browser markdown links can download."""
-    key = (secret or "psql-auditor-dev").encode("utf-8")
+    key = (secret or "auditor-dev").encode("utf-8")
     return hmac.new(key, run_id.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
 
 
@@ -72,7 +72,7 @@ def verify_download_token(run_id: str, token: str | None, secret: str) -> bool:
 def public_download_url(settings: Settings, run_id: str) -> str:
     """Browser-reachable download URL for the zip (tokenized query)."""
     base = (settings.public_base_url or f"http://localhost:{settings.port}").rstrip("/")
-    token = make_download_token(run_id, settings.api_key or "psql-auditor-dev")
+    token = make_download_token(run_id, settings.api_key or "auditor-dev")
     name = quote(archive_filename(run_id))
     return f"{base}/v1/downloads/{name}?token={token}"
 
@@ -200,7 +200,7 @@ async def package_and_publish_archive(
                 "download_url": download_url,
                 "open_webui_file_id": file_id,
                 "token": make_download_token(
-                    run_id, settings.api_key or "psql-auditor-dev"
+                    run_id, settings.api_key or "auditor-dev"
                 ),
             },
             indent=2,

@@ -14,7 +14,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
-from psql_auditor.checklist import Requirement
+from auditor.checklist import Requirement
 
 FindingStatus = Literal["pass", "fail", "partial", "error", "skipped"]
 

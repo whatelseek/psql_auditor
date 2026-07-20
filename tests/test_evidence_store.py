@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from psql_auditor.evidence_store import EvidenceStore
+from auditor.evidence_store import EvidenceStore
 
 
 def test_evidence_store_creates_per_requirement_folders(tmp_path: Path):

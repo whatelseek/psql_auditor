@@ -1,4 +1,4 @@
-from psql_auditor.compliance import (
+from auditor.compliance import (
     compliance_by_severity,
     format_compliance_markdown,
     overall_compliance,

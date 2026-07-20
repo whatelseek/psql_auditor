@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncpg
 from langchain_core.tools import tool
 
-from psql_auditor.config import Settings, get_settings
+from auditor.config import Settings, get_settings
 
 # Statement-start verbs that must never run in the auditor.
 _FORBIDDEN_PREFIXES = (

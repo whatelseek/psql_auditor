@@ -4,10 +4,10 @@ from unittest.mock import patch
 
 import pytest
 
-from psql_auditor.checklist import Requirement
-from psql_auditor.config import Settings
-from psql_auditor.graph import AuditorGraph, _is_recoverable_finding
-from psql_auditor.state import Finding
+from auditor.checklist import Requirement
+from auditor.config import Settings
+from auditor.graph import AuditorGraph, _is_recoverable_finding
+from auditor.state import Finding
 
 
 @pytest.mark.asyncio

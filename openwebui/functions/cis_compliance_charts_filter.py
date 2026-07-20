@@ -1,6 +1,6 @@
 """
 title: CIS Compliance Charts (Auto Filter)
-author: psql_auditor
+author: auditor
 version: 0.1.0
 license: MIT
 description: Outlet filter — appends CIS compliance % bar charts to auditor Markdown reports.

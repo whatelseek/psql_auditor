@@ -16,7 +16,7 @@ Visualize auditor CIS results as **compliance % bar charts by severity**.
 1. Open WebUI → **Workspace → Functions** (or Admin → Functions)
 2. Create function → paste  
    [`openwebui/functions/cis_compliance_charts.py`](../openwebui/functions/cis_compliance_charts.py)
-3. Enable it and grant the tool to model `psql-auditor` (or your chat)
+3. Enable it and grant the tool to model `auditor` (or your chat)
 4. After an audit, ask:
 
    `Visualize CIS compliance from this report`  

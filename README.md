@@ -1,4 +1,4 @@
-# psql_auditor
+# auditor
 
 LangGraph security auditor. **You create frameworks** by dropping Markdown files into [`agents/`](agents/). The agent routes your chat request to a framework, fills a fixed report (Status / Observation / Recommendation), **writes command results under a folder per requirement**, **pauses for human-in-the-loop** when a check cannot be audited, and can **cycle to reconnect** if the MCP/SSH session dies.
 
@@ -75,7 +75,7 @@ Full procedure, YAML/JSON schema, Open WebUI file-context settings, and security
 
 Short version:
 
-1. Open WebUI → model `psql-auditor`
+1. Open WebUI → model `auditor`
 2. Attach target YAML/JSON (see example above)
 3. Chat: `Start PostgreSQL and Ubuntu CIS audit`
 4. Agent confirms target (secrets redacted) → assesses → HITL if needed → **Download ZIP** in chat
@@ -109,7 +109,7 @@ Procedural memory remembers **how to verify** each REQ (SSH/SQL recipes) per fra
 ```bash
 cp .env.example .env   # OPENAI_API_KEY, PG_*, SSH_*
 docker compose up --build
-# http://localhost:3000 → model psql-auditor
+# http://localhost:3000 → model auditor
 ```
 
 ## Fixed report cells

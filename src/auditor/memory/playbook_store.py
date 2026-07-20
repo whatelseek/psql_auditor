@@ -24,7 +24,7 @@ from typing import Any
 import yaml
 from langgraph.store.memory import InMemoryStore
 
-from psql_auditor.config import Settings, get_settings
+from auditor.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 

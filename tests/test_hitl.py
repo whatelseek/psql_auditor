@@ -4,16 +4,16 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from langchain_core.messages import AIMessage
 
-from psql_auditor.checklist import Requirement
-from psql_auditor.config import Settings
-from psql_auditor.graph import AuditorGraph, _hitl_candidates
-from psql_auditor.hitl import (
+from auditor.checklist import Requirement
+from auditor.config import Settings
+from auditor.graph import AuditorGraph, _hitl_candidates
+from auditor.hitl import (
     build_hitl_prompt,
     extract_hitl_thread_id,
     format_hitl_assistant_message,
     parse_hitl_decision,
 )
-from psql_auditor.state import Finding
+from auditor.state import Finding
 
 
 def test_parse_hitl_decision_variants():

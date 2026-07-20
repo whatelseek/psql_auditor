@@ -1,5 +1,5 @@
-from psql_auditor.config import Settings
-from psql_auditor.tools.mcp_client import rewrite_show_to_select
+from auditor.config import Settings
+from auditor.tools.mcp_client import rewrite_show_to_select
 
 
 def test_rewrite_show_setting():

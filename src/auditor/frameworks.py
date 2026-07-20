@@ -18,7 +18,7 @@ from pathlib import Path
 
 import yaml
 
-from psql_auditor.checklist import Checklist, parse_checklist_markdown
+from auditor.checklist import Checklist, parse_checklist_markdown
 
 _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n(.*)\Z", re.DOTALL)
 

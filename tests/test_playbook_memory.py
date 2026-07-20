@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from psql_auditor.memory.playbook_store import PlaybookMemory
+from auditor.memory.playbook_store import PlaybookMemory
 
 
 def test_loads_seed_playbooks_from_agents(tmp_path: Path):

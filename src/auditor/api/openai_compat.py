@@ -3,7 +3,7 @@
 Open WebUI connects to this service as if it were an OpenAI (or LiteLLM) chat
 backend. Two endpoints matter:
 
-* ``GET /v1/models`` — advertises ``Settings.model_id`` (default ``psql-auditor``)
+* ``GET /v1/models`` — advertises ``Settings.model_id`` (default ``auditor``)
 * ``POST /v1/chat/completions`` — runs the LangGraph audit and returns the report
 
 Human-in-the-loop: when a requirement fails, the graph interrupts and the
@@ -27,10 +27,10 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 
-from psql_auditor.config import get_settings
-from psql_auditor.graph import get_auditor_graph
-from psql_auditor.hitl import extract_hitl_thread_id
-from psql_auditor.report_archive import archive_filename, verify_download_token
+from auditor.config import get_settings
+from auditor.graph import get_auditor_graph
+from auditor.hitl import extract_hitl_thread_id
+from auditor.report_archive import archive_filename, verify_download_token
 
 router = APIRouter(prefix="/v1")
 
@@ -125,7 +125,7 @@ async def list_models(
                 "id": settings.model_id,
                 "object": "model",
                 "created": int(time.time()),
-                "owned_by": "psql-auditor",
+                "owned_by": "auditor",
             }
         ],
     }
@@ -152,7 +152,7 @@ async def download_archive(
     if not match:
         raise HTTPException(status_code=404, detail="Unknown archive name")
     run_id = match.group("run_id")
-    secret = settings.api_key or "psql-auditor-dev"
+    secret = settings.api_key or "auditor-dev"
     token_ok = verify_download_token(run_id, token, secret)
     bearer_ok = False
     if settings.api_key and authorization and authorization.startswith("Bearer "):
@@ -234,7 +234,7 @@ async def _stream_audit(
     completion_id: str,
 ) -> AsyncIterator[str]:
     """Stream an audit (or HITL resume) as OpenAI-compatible SSE chunks."""
-    from psql_auditor.frameworks import route_frameworks
+    from auditor.frameworks import route_frameworks
 
     settings = get_settings()
     user_text = _latest_user_text(body.messages)

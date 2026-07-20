@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-from psql_auditor.state import Finding
+from auditor.state import Finding
 
 
 def truncate_text(text: str, max_chars: int, label: str = "output") -> str:

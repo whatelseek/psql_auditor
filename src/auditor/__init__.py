@@ -1,6 +1,7 @@
-"""PostgreSQL LangGraph auditor package.
+"""LangGraph IT infrastructure auditor package.
 
-This package implements a checklist-driven security auditor for PostgreSQL:
+Checklist-driven security auditor for frameworks you drop into ``agents/``
+(PostgreSQL, Ubuntu, Windows, …):
 
 * ``checklist`` — parse Markdown requirements into structured objects
 * ``graph`` — LangGraph workflow that assesses each requirement in order
@@ -10,8 +11,8 @@ This package implements a checklist-driven security auditor for PostgreSQL:
 
 Typical entrypoints:
 
-* HTTP: ``psql_auditor.api.app:app`` (uvicorn / Docker)
-* CLI: ``psql-auditor`` console script → ``api.app:main``
+* HTTP: ``auditor.api.app:app`` (uvicorn / Docker)
+* CLI: ``auditor`` console script → ``api.app:main``
 """
 
 __version__ = "0.1.0"

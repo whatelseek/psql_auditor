@@ -4,9 +4,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from psql_auditor.api.app import create_app
-from psql_auditor.config import Settings, get_settings
-from psql_auditor.report_archive import (
+from auditor.api.app import create_app
+from auditor.config import Settings, get_settings
+from auditor.report_archive import (
     archive_filename,
     create_run_archive,
     format_archive_chat_section,
@@ -100,7 +100,7 @@ async def test_package_uploads_to_open_webui(tmp_path: Path):
     mock_client.__aexit__ = AsyncMock(return_value=None)
     mock_client.post = AsyncMock(return_value=mock_response)
 
-    with patch("psql_auditor.report_archive.httpx.AsyncClient", return_value=mock_client):
+    with patch("auditor.report_archive.httpx.AsyncClient", return_value=mock_client):
         result = await package_and_publish_archive(run, settings)
 
     assert result["open_webui_file_id"] == "file-xyz"
@@ -123,7 +123,7 @@ def test_download_endpoint_serves_zip(tmp_path: Path):
         api_key="sk-test",
         public_base_url="http://localhost:8000",
     )
-    with patch("psql_auditor.api.openai_compat.get_settings", return_value=settings):
+    with patch("auditor.api.openai_compat.get_settings", return_value=settings):
         app = create_app()
         client = TestClient(app)
         url = public_download_url(settings, run_id)

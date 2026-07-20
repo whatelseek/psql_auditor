@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from psql_auditor.checklist import parse_checklist_markdown
+from auditor.checklist import parse_checklist_markdown
 
 
 SAMPLE = """# Sample Checklist
@@ -37,7 +37,7 @@ def test_parse_checklist_markdown_extracts_requirements():
 def test_load_bundled_postgres_cis_checklist():
     path = Path(__file__).resolve().parents[1] / "agents" / "postgres_cis.md"
     # Strip frontmatter for the raw loader used by unit test helpers.
-    from psql_auditor.frameworks import _parse_agent_file, load_framework_checklist
+    from auditor.frameworks import _parse_agent_file, load_framework_checklist
 
     fw = _parse_agent_file(path)
     checklist = load_framework_checklist(fw)

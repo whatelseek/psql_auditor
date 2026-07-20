@@ -1,6 +1,6 @@
 # Long-term memory (procedural playbooks)
 
-psql_auditor uses [LangGraph / LangChain long-term memory concepts](https://docs.langchain.com/oss/python/concepts/memory) as **procedural memory**: remembered *how* to verify requirements for each framework (PostgreSQL, Ubuntu, Windows, …).
+**auditor** uses [LangGraph / LangChain long-term memory concepts](https://docs.langchain.com/oss/python/concepts/memory) as **procedural memory**: remembered *how* to verify requirements for each framework (PostgreSQL, Ubuntu, Windows, …).
 
 This is **not** chat history. Short-term (thread) memory remains the HITL checkpointer; long-term memory is a **playbook store**.
 
