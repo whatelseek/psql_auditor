@@ -52,9 +52,12 @@ class Settings(BaseSettings):
             file links in chat (defaults to ``open_webui_url``).
         open_webui_api_key: Bearer token for Open WebUI file upload when auth
             is enabled.
-        compliance_charts_in_report: Append SVG compliance charts to reports.
+        compliance_charts_in_report: When true, append SVG compliance charts
+            to the finalized Markdown report.
         benchmark_enabled: Append aggregate scores to cumulative benchmark.md.
         benchmark_path: Optional path to benchmark.md (default memory/benchmark.md).
+        adhoc_commands_enabled: When true, command-style chat requests use the
+            ad-hoc executor instead of a full checklist audit.
         max_session_retries: Max cyclic MCP/session reconnect attempts.
         ssh_host: Target host for SSH tools; ``None`` disables SSH until set.
         ssh_port: SSH port (default 22).
@@ -119,6 +122,8 @@ class Settings(BaseSettings):
     # Cumulative benchmark.md ledger of past audit scores
     benchmark_enabled: bool = True
     benchmark_path: Path | None = None
+    # Allow chat to run ad-hoc SSH/SQL/playbook commands without a full audit
+    adhoc_commands_enabled: bool = True
     max_session_retries: int = 2
 
     # --- SSH target (PostgreSQL host) ---

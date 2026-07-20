@@ -2,6 +2,8 @@
 
 LangGraph security auditor. **You create frameworks** by dropping Markdown files into [`agents/`](agents/). The agent routes your chat request to a framework, fills a fixed report (Status / Observation / Recommendation), **writes command results under a folder per requirement**, **pauses for human-in-the-loop** when a check cannot be audited, and can **cycle to reconnect** if the MCP/SSH session dies.
 
+**Руководство пользователя (RU):** [`docs/user-manual-ru.md`](docs/user-manual-ru.md) — развёртывание, использование, добавление Markdown-фреймворков.
+
 ## Create a framework
 
 Add `agents/<name>.md`:
@@ -150,9 +152,21 @@ Bar charts of **compliance % by severity** (Overall / Critical / High / …):
 
 Every completed checklist audit appends aggregate scores to [`memory/benchmark.md`](memory/benchmark.md) (pass/fail/compliance % by framework). See [`docs/audit-benchmark.md`](docs/audit-benchmark.md).
 
+## Ad-hoc commands (Open WebUI)
+
+Ask the model to **run commands** without a full checklist audit:
+
+```text
+Run this command: `grep PermitRootLogin /etc/ssh/sshd_config`
+Run playbook commands for REQ-002 on Ubuntu
+Execute SQL: SELECT name, setting FROM pg_settings WHERE name = 'ssl'
+```
+
+See [`docs/adhoc-commands.md`](docs/adhoc-commands.md). Toggle with `ADHOC_COMMANDS_ENABLED`.
+
 ## Config
 
-See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `BENCHMARK_ENABLED`, `BENCHMARK_PATH`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
+See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `BENCHMARK_ENABLED`, `BENCHMARK_PATH`, `ADHOC_COMMANDS_ENABLED`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
 
 ## Development
 
