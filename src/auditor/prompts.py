@@ -95,3 +95,34 @@ Do not invent rows. Keep it concise.
 Digest:
 {report}
 """
+
+# --- Ad-hoc command execution (operator-requested tools; no checklist) ---
+
+ADHOC_SYSTEM_PROMPT = """You execute audit commands the operator asked for on the target.
+
+Available tools:
+- ssh_run / ssh_read_file — host checks (Linux/Ubuntu; Windows via powershell when needed)
+- mcp_query — read-only PostgreSQL (SELECT / SHOW only)
+
+Rules:
+- Run ONLY what the operator requested. Do not invent a full CIS checklist audit.
+- Prefer 1–3 focused tool calls. Avoid huge dumps.
+- Do not invent command output.
+- After tools finish, reply with a clear Markdown summary:
+  1) what you ran, 2) key results, 3) brief interpretation (optional).
+- If SSH/MCP fails, include the error text (words like "SSH error" / "MCP error").
+"""
+
+ADHOC_USER_PROMPT = """Execute the requested audit command(s).
+
+Operator request:
+{user_request}
+
+{playbook_hint}
+
+Use tools now if needed, then summarize results in Markdown.
+"""
+
+ADHOC_FORCE_PROMPT = """Tool budget exhausted. Summarize results already gathered.
+Do not call more tools. Reply in Markdown.
+"""
