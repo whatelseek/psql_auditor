@@ -52,6 +52,9 @@ class Settings(BaseSettings):
             file links in chat (defaults to ``open_webui_url``).
         open_webui_api_key: Bearer token for Open WebUI file upload when auth
             is enabled.
+        compliance_charts_in_report: Append SVG compliance charts to reports.
+        benchmark_enabled: Append aggregate scores to cumulative benchmark.md.
+        benchmark_path: Optional path to benchmark.md (default memory/benchmark.md).
         max_session_retries: Max cyclic MCP/session reconnect attempts.
         ssh_host: Target host for SSH tools; ``None`` disables SSH until set.
         ssh_port: SSH port (default 22).
@@ -113,6 +116,9 @@ class Settings(BaseSettings):
     open_webui_api_key: str | None = None
     # Append CIS compliance % bar charts to the final report text
     compliance_charts_in_report: bool = True
+    # Cumulative benchmark.md ledger of past audit scores
+    benchmark_enabled: bool = True
+    benchmark_path: Path | None = None
     max_session_retries: int = 2
 
     # --- SSH target (PostgreSQL host) ---
@@ -213,6 +219,12 @@ class Settings(BaseSettings):
         return (
             f"postgresql://{auth}{fields['host']}:{fields['port']}/{fields['database']}"
         )
+
+    def resolve_benchmark_path(self) -> Path:
+        """Path to the cumulative audit benchmark Markdown ledger."""
+        if self.benchmark_path is not None:
+            return Path(self.benchmark_path)
+        return Path(self.memory_dir) / "benchmark.md"
 
 
 @lru_cache
