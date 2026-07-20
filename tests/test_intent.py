@@ -16,7 +16,8 @@ def test_adhoc_execute_sql():
 
 
 def test_adhoc_run_req_playbook():
-    assert classify_intent("Run playbook commands for REQ-002 on Ubuntu") == "adhoc"
+    # REQ-targeted commands after an audit revise the same evidence folder.
+    assert classify_intent("Run playbook commands for REQ-002 on Ubuntu") == "revise_req"
 
 
 def test_adhoc_russian():

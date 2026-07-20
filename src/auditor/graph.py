@@ -50,6 +50,7 @@ from auditor.context import (
     count_tool_rounds,
     truncate_text,
 )
+from auditor.followup import followup_footer, run_revise_req, run_update_report
 from auditor.evidence_store import EvidenceStore, new_run_id
 from auditor.frameworks import (
     frameworks_catalog_text,
@@ -911,6 +912,8 @@ class AuditorGraph:
                     f"(Archive packaging failed: {type(exc).__name__}: {exc})\n"
                 )
 
+        final_text = f"{final_text.rstrip()}{followup_footer()}"
+
         return {
             "report": final_text,
             "evidence_run_id": state.get("evidence_run_id") or "",
@@ -1148,6 +1151,28 @@ class AuditorGraph:
             "awaiting_hitl": False,
             "findings": {},
         }
+
+    async def arun_revise_req(
+        self,
+        user_text: str,
+        *,
+        messages: list | None = None,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Re-check REQ(s) and append tool logs into the prior audit folder."""
+        del thread_id
+        return await run_revise_req(self, user_text, messages=messages)
+
+    async def arun_update_report(
+        self,
+        user_text: str,
+        *,
+        messages: list | None = None,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Rebuild report.md / ZIP from on-disk findings after follow-up checks."""
+        del thread_id
+        return await run_update_report(self, user_text, messages=messages)
 
     async def arun_adhoc(
         self,
