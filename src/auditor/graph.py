@@ -94,7 +94,7 @@ _RECOVERABLE_MARKERS = (
 
 
 def _all_tools() -> list:
-    """SSH + MCP tools available to every framework worker."""
+    """SSH + LangChain MCP (Postgres) tools available to every framework worker."""
     return [*get_ssh_tools(), *get_mcp_tools()]
 
 

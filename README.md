@@ -102,7 +102,7 @@ Procedural memory remembers **how to verify** each REQ (SSH/SQL recipes) per fra
 ## Stack
 
 - **LangGraph** orchestration + **LangChain** tools/models
-- DB evidence: [antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server)
+- DB evidence: [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters) → [antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server)
 - Host evidence: SSH (`ssh_run` / `ssh_read_file`)
 - Models: LiteLLM · UI: Open WebUI (`/v1`)
 
@@ -166,7 +166,9 @@ See [`docs/adhoc-commands.md`](docs/adhoc-commands.md). Toggle with `ADHOC_COMMA
 
 ## Config
 
-See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `BENCHMARK_ENABLED`, `BENCHMARK_PATH`, `ADHOC_COMMANDS_ENABLED`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
+See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `BENCHMARK_ENABLED`, `BENCHMARK_PATH`, `ADHOC_COMMANDS_ENABLED`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`, `MCP_POSTGRES_*`.
+
+MCP architecture: [`docs/langchain-mcp.md`](docs/langchain-mcp.md).
 
 ## Development
 

@@ -5,7 +5,7 @@ Checklist-driven security auditor for frameworks you drop into ``agents/``
 
 * ``checklist`` — parse Markdown requirements into structured objects
 * ``graph`` — LangGraph workflow that assesses each requirement in order
-* ``tools`` — SSH, SQL, and MCP helpers used during assessment
+* ``tools`` — SSH + LangChain MCP adapters (Postgres) helpers
 * ``llm`` — LiteLLM-backed chat model factory
 * ``api`` — OpenAI-compatible HTTP API for Open WebUI
 

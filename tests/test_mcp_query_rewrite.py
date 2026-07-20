@@ -1,5 +1,9 @@
 from auditor.config import Settings
-from auditor.tools.mcp_client import rewrite_show_to_select
+from auditor.tools.mcp_client import (
+    mcp_call_tool,
+    postgres_mcp_connection,
+    rewrite_show_to_select,
+)
 
 
 def test_rewrite_show_setting():
@@ -51,3 +55,27 @@ def test_pg_env_parses_database_url():
     assert env["PG_USER"] == "alice"
     assert env["PG_PASSWORD"] == "s3cret"
     assert env["PG_DATABASE"] == "appdb"
+
+
+def test_postgres_mcp_connection_shape():
+    settings = Settings(
+        _env_file=None,
+        mcp_postgres_command="npx",
+        mcp_postgres_args="-y mcp-postgres-server",
+        pg_host="db.example",
+        pg_user="auditor",
+        pg_password="secret",
+        pg_database="postgres",
+        database_url=None,
+    )
+    conn = postgres_mcp_connection(settings)
+    assert conn["transport"] == "stdio"
+    assert conn["command"] == "npx"
+    assert conn["args"] == ["-y", "mcp-postgres-server"]
+    assert conn["env"]["PG_HOST"] == "db.example"
+
+
+async def test_mcp_call_tool_blocks_execute():
+    result = await mcp_call_tool("execute", '{"sql": "DELETE FROM t"}')
+    assert "MCP error" in result
+    assert "disabled" in result.lower() or "execute" in result.lower()
