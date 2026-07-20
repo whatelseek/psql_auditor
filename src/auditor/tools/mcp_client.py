@@ -1,17 +1,21 @@
-"""PostgreSQL access via antonorlov/mcp-postgres-server (MCP stdio).
+"""PostgreSQL access via LangChain MCP adapters + antonorlov/mcp-postgres-server.
 
-This module is the **only** database query path for the auditor agent. It wraps
-`https://github.com/antonorlov/mcp-postgres-server` tools:
+Database evidence for the auditor goes through
+[`langchain-mcp-adapters`](https://github.com/langchain-ai/langchain-mcp-adapters)
+``MultiServerMCPClient`` (stdio transport) to the published npm package
+`antonorlov/mcp-postgres-server`.
 
-* ``connect_db`` — optional explicit connect (env PG_* usually suffices)
-* ``query`` — SELECT only (SHOW is rewritten to ``pg_settings``)
-* ``list_schemas`` / ``list_tables`` / ``describe_table`` — catalog helpers
+Exposed LangChain tools keep stable names used by playbooks / prompts:
 
-Mutating ``execute`` from that MCP server is intentionally **not** exposed.
+* ``mcp_connect_db`` — optional explicit connect (env ``PG_*`` usually suffices)
+* ``mcp_query`` — SELECT only (``SHOW`` rewritten to ``pg_settings``)
+* ``mcp_list_schemas`` / ``mcp_list_tables`` / ``mcp_describe_table``
+* ``mcp_list_tools`` — discovery via the live MCP session
 
-A process-wide persistent stdio MCP session is kept so connection state survives
-across tool calls. The subprocess inherits ``PG_HOST``, ``PG_PORT``, ``PG_USER``,
-``PG_PASSWORD``, and ``PG_DATABASE`` (parsed from ``DATABASE_URL`` when needed).
+Mutating remote ``execute`` is intentionally **not** exposed.
+
+A process-wide persistent MCP session is kept (locked) so connection state
+survives across parallel REQ workers and cyclic reconnect.
 """
 
 from __future__ import annotations
@@ -24,59 +28,64 @@ import shlex
 from contextlib import AsyncExitStack
 from typing import Any
 
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from auditor.config import Settings, get_settings
 
-# Default: published npm package from antonorlov/mcp-postgres-server
 _DEFAULT_COMMAND = "npx"
 _DEFAULT_ARGS = "-y mcp-postgres-server"
+_SERVER_NAME = "postgres"
+
+# Remote MCP tools we refuse to bind / call.
+_BLOCKED_REMOTE_TOOLS = frozenset({"execute"})
+
+
+def postgres_mcp_connection(settings: Settings | None = None) -> dict[str, Any]:
+    """Build a ``MultiServerMCPClient`` stdio connection dict for Postgres MCP."""
+    settings = settings or get_settings()
+    command = settings.mcp_postgres_command or _DEFAULT_COMMAND
+    args = shlex.split(settings.mcp_postgres_args or _DEFAULT_ARGS)
+    env = {k: v for k, v in os.environ.items() if isinstance(v, str)}
+    env.update(settings.pg_env_for_mcp())
+    return {
+        "transport": "stdio",
+        "command": command,
+        "args": args,
+        "env": env,
+    }
 
 
 class PostgresMcpSession:
-    """Long-lived stdio client for antonorlov/mcp-postgres-server.
+    """Long-lived LangChain MCP session for antonorlov/mcp-postgres-server.
 
-    Lazily starts the MCP subprocess on first ``call_tool`` and reuses the same
-    ``ClientSession`` for subsequent calls. Thread-safe via an asyncio lock.
+    Uses ``MultiServerMCPClient.session`` under an ``AsyncExitStack`` so the
+    stdio subprocess stays up across tool calls until ``reconnect`` / ``close``.
     """
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._stack: AsyncExitStack | None = None
+        self._client: MultiServerMCPClient | None = None
         self._session: Any = None
 
-    def _server_env(self, settings: Settings) -> dict[str, str]:
-        """Build env for the MCP child (parent env + PG_* credentials)."""
-        env = {k: v for k, v in os.environ.items() if isinstance(v, str)}
-        pg = settings.pg_env_for_mcp()
-        env.update(pg)
-        return env
-
-    def _stdio_params(self, settings: Settings):
-        from mcp.client.stdio import StdioServerParameters
-
-        command = settings.mcp_postgres_command or _DEFAULT_COMMAND
-        args = shlex.split(settings.mcp_postgres_args or _DEFAULT_ARGS)
-        return StdioServerParameters(
-            command=command,
-            args=args,
-            env=self._server_env(settings),
+    def _build_client(self, settings: Settings) -> MultiServerMCPClient:
+        return MultiServerMCPClient(
+            {_SERVER_NAME: postgres_mcp_connection(settings)},
+            handle_tool_errors=True,
         )
 
     async def _ensure_session(self, settings: Settings) -> Any:
-        """Start stdio MCP client if needed; return the active ClientSession."""
+        """Start LangChain MCP client + session if needed."""
         if self._session is not None:
             return self._session
 
-        from mcp import ClientSession
-        from mcp.client.stdio import stdio_client
-
+        client = self._build_client(settings)
         stack = AsyncExitStack()
-        read, write = await stack.enter_async_context(
-            stdio_client(self._stdio_params(settings))
+        session = await stack.enter_async_context(
+            client.session(_SERVER_NAME, auto_initialize=True)
         )
-        session = await stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
+        self._client = client
         self._stack = stack
         self._session = session
         return session
@@ -87,25 +96,20 @@ class PostgresMcpSession:
         arguments: dict[str, Any] | None = None,
         settings: Settings | None = None,
     ) -> str:
-        """Call an MCP tool on the persistent session.
-
-        Args:
-            tool_name: Remote tool name (``query``, ``list_tables``, …).
-            arguments: Tool arguments object.
-            settings: Optional settings override.
-
-        Returns:
-            Formatted tool result text, or an ``MCP error: …`` string.
-        """
+        """Call a remote MCP tool on the persistent LangChain-managed session."""
         settings = settings or get_settings()
         arguments = arguments or {}
+        if tool_name in _BLOCKED_REMOTE_TOOLS:
+            return (
+                "MCP error: mutating execute is disabled for the auditor. "
+                "Use mcp_query for SELECT evidence."
+            )
         async with self._lock:
             try:
                 session = await self._ensure_session(settings)
                 result = await session.call_tool(tool_name, arguments=arguments)
                 return _format_mcp_result(result)
             except Exception as exc:  # noqa: BLE001
-                # Reset session so the next call can reconnect after a crash.
                 await self._reset_unlocked()
                 return f"MCP error: {type(exc).__name__}: {exc}"
 
@@ -121,6 +125,27 @@ class PostgresMcpSession:
                 await self._reset_unlocked()
                 return f"MCP error: {type(exc).__name__}: {exc}"
 
+    async def load_adapted_tools(
+        self, settings: Settings | None = None
+    ) -> list[BaseTool]:
+        """Load LangChain tools from the live MCP session via adapters.
+
+        Filters out blocked remote tools (e.g. ``execute``). Prefer the curated
+        ``get_mcp_tools()`` wrappers for playbook-stable names; this helper is
+        for diagnostics / future expansion.
+        """
+        from langchain_mcp_adapters.tools import load_mcp_tools
+
+        settings = settings or get_settings()
+        async with self._lock:
+            session = await self._ensure_session(settings)
+            tools = await load_mcp_tools(
+                session,
+                server_name=_SERVER_NAME,
+                handle_tool_errors=True,
+            )
+            return [t for t in tools if getattr(t, "name", "") not in _BLOCKED_REMOTE_TOOLS]
+
     async def _reset_unlocked(self) -> None:
         if self._stack is not None:
             try:
@@ -129,6 +154,7 @@ class PostgresMcpSession:
                 pass
         self._stack = None
         self._session = None
+        self._client = None
 
     async def close(self) -> None:
         """Shut down the MCP subprocess (tests / graceful shutdown)."""
@@ -136,13 +162,10 @@ class PostgresMcpSession:
             await self._reset_unlocked()
 
     async def reconnect(self, settings: Settings | None = None) -> str:
-        """Force-close a dead MCP session and open a fresh stdio connection.
+        """Force-close a dead MCP session and open a fresh LangChain MCP session.
 
         Used by the LangGraph ``reconnect_session`` node when the cyclic audit
         loop detects recoverable MCP/session failures.
-
-        Returns:
-            Status string for the audit log / messages.
         """
         settings = settings or get_settings()
         async with self._lock:
@@ -209,12 +232,6 @@ def rewrite_show_to_select(sql: str) -> str:
 
     antonorlov/mcp-postgres-server ``query`` accepts SELECT only. Auditors often
     need ``SHOW ssl`` / ``SHOW password_encryption``; this helper translates them.
-
-    Args:
-        sql: Original SQL (may already be SELECT).
-
-    Returns:
-        Possibly rewritten SELECT statement.
     """
     text = sql.strip()
     if _SHOW_ALL.match(text):
@@ -230,7 +247,7 @@ def rewrite_show_to_select(sql: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# LangChain tools bound into the assess loop
+# Curated LangChain tools (stable names for playbooks / prompts)
 # ---------------------------------------------------------------------------
 
 
@@ -247,19 +264,8 @@ async def mcp_connect_db(
     Usually unnecessary when PG_HOST / PG_USER / PG_PASSWORD / PG_DATABASE are
     already set in the environment — the MCP server auto-connects. Use this when
     switching targets mid-audit or recovering from a failed connection.
-
-    Args:
-        host: Database host.
-        port: Database port (default 5432).
-        user: Database user.
-        password: Database password.
-        database: Database name.
-
-    Returns:
-        Success message or MCP error text.
     """
     settings = get_settings()
-    # Fill blanks from settings so the model can call with partial args.
     args = {
         "host": host or settings.pg_host or "",
         "port": port or settings.pg_port,
@@ -279,22 +285,14 @@ async def mcp_connect_db(
 
 @tool
 async def mcp_query(sql: str, params_json: str = "[]") -> str:
-    """Run a read-only SELECT against PostgreSQL via antonorlov/mcp-postgres-server.
+    """Run a read-only SELECT against PostgreSQL via LangChain MCP adapters.
 
-    This is the primary database evidence tool. Prefer catalog SELECTs, e.g.:
+    Prefer catalog SELECTs, e.g.:
     - SELECT name, setting FROM pg_settings WHERE name = 'ssl'
     - SELECT rolname, rolsuper FROM pg_roles
-    - SELECT * FROM pg_extension
 
-    SHOW statements are auto-rewritten to pg_settings SELECTs. Do not use for
-    INSERT/UPDATE/DELETE (mutating execute is not exposed).
-
-    Args:
-        sql: SELECT statement (or SHOW, which is rewritten).
-        params_json: Optional JSON array of prepared-statement parameters.
-
-    Returns:
-        JSON rows from the MCP server, or an error string.
+    SHOW statements are auto-rewritten to pg_settings SELECTs. Mutating SQL is
+    not allowed (remote ``execute`` is not exposed).
     """
     try:
         params = json.loads(params_json) if params_json else []
@@ -304,7 +302,6 @@ async def mcp_query(sql: str, params_json: str = "[]") -> str:
         return f"MCP error: invalid params_json: {exc}"
 
     rewritten = rewrite_show_to_select(sql)
-    # Soft-guard: MCP server rejects non-SELECT; fail early with a clear hint.
     if not rewritten.lstrip().upper().startswith("SELECT"):
         return (
             "MCP error: only SELECT is allowed via mcp_query. "
@@ -318,28 +315,19 @@ async def mcp_query(sql: str, params_json: str = "[]") -> str:
 
 @tool
 async def mcp_list_schemas() -> str:
-    """List database schemas via antonorlov/mcp-postgres-server."""
+    """List database schemas via antonorlov/mcp-postgres-server (LangChain MCP)."""
     return await _SESSION.call_tool("list_schemas", {})
 
 
 @tool
 async def mcp_list_tables(schema_name: str = "public") -> str:
-    """List tables in a schema via antonorlov/mcp-postgres-server.
-
-    Args:
-        schema_name: Schema name (default ``public``).
-    """
+    """List tables in a schema via antonorlov/mcp-postgres-server (LangChain MCP)."""
     return await _SESSION.call_tool("list_tables", {"schema": schema_name})
 
 
 @tool
 async def mcp_describe_table(table: str, schema_name: str = "public") -> str:
-    """Describe a table's columns via antonorlov/mcp-postgres-server.
-
-    Args:
-        table: Table name.
-        schema_name: Schema name (default ``public``).
-    """
+    """Describe a table's columns via antonorlov/mcp-postgres-server (LangChain MCP)."""
     return await _SESSION.call_tool(
         "describe_table",
         {"table": table, "schema": schema_name},
@@ -353,10 +341,9 @@ async def mcp_list_tools() -> str:
 
 
 def get_mcp_tools() -> list:
-    """Return LangChain tools that query Postgres exclusively via MCP.
+    """Return curated LangChain tools that query Postgres via MCP adapters.
 
-    Returns:
-        connect / query / catalog helpers (no mutating execute).
+    Playbooks and prompts depend on these stable ``mcp_*`` names.
     """
     return [
         mcp_connect_db,
@@ -368,16 +355,15 @@ def get_mcp_tools() -> list:
     ]
 
 
-# Back-compat alias used by older imports / generic call sites.
 async def mcp_call_tool(tool_name: str, arguments_json: str = "{}") -> str:
-    """Generic MCP tool caller (prefer mcp_query / mcp_* helpers)."""
+    """Generic MCP tool caller (prefer ``mcp_query`` / ``mcp_*`` helpers)."""
     try:
         arguments = json.loads(arguments_json) if arguments_json else {}
         if not isinstance(arguments, dict):
             return "MCP error: arguments_json must be a JSON object"
     except json.JSONDecodeError as exc:
         return f"MCP error: invalid arguments_json: {exc}"
-    if tool_name == "execute":
+    if tool_name in _BLOCKED_REMOTE_TOOLS:
         return (
             "MCP error: mutating execute is disabled for the auditor. "
             "Use mcp_query for SELECT evidence."

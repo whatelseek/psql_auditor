@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     pg_password: str | None = None
     pg_database: str = "postgres"
 
-    # --- MCP stdio: https://github.com/antonorlov/mcp-postgres-server ---
+    # --- MCP stdio via langchain-mcp-adapters → antonorlov/mcp-postgres-server ---
     mcp_postgres_command: str = "npx"
     mcp_postgres_args: str = "-y mcp-postgres-server"
 

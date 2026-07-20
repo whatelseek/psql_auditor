@@ -22,7 +22,7 @@ Rules:
   - Linux/Ubuntu/Windows host checks → ssh_run / ssh_read_file
     (on Windows targets prefer powershell/pwsh commands over SSH).
   - PostgreSQL / DB checks → mcp_query and related MCP tools
-    (antonorlov/mcp-postgres-server).
+    (LangChain MCP adapters → antonorlov/mcp-postgres-server).
 - When a **long-term playbook memory** block is provided, run those preferred
   tool calls FIRST before inventing new ones.
 - Prefer 1–2 focused tool calls. Avoid huge dumps.

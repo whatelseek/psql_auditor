@@ -349,7 +349,10 @@ description: Чек-лист безопасности My App
 Агент использует:
 
 - **SSH:** `ssh_run`, `ssh_read_file` — хост Linux/Ubuntu; для Windows — команды через OpenSSH/PowerShell на цели;
-- **PostgreSQL:** `mcp_query` (только чтение: `SELECT` / `SHOW`) через [antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server).
+- **PostgreSQL:** `mcp_query` (только чтение: `SELECT` / `SHOW`) через
+  [LangChain MCP adapters](https://github.com/langchain-ai/langchain-mcp-adapters) →
+  [antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server).
+  См. также [langchain-mcp.md](langchain-mcp.md).
 
 В **How to verify** пишите, *что* проверять; конкретные команды лучше продублировать в playbook (раздел 11).
 
