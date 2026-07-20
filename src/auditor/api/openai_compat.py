@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from auditor.config import get_settings
 from auditor.graph import get_auditor_graph
 from auditor.hitl import extract_hitl_thread_id
+from auditor.intent import classify_intent
 from auditor.report_archive import archive_filename, verify_download_token
 
 router = APIRouter(prefix="/v1")
@@ -179,7 +180,7 @@ async def download_archive(
 
 
 async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]:
-    """Start a new audit or resume a HITL-paused thread from chat history."""
+    """Start a new audit, ad-hoc command run, or resume a HITL-paused thread."""
     user_text = _latest_user_text(body.messages)
     hitl_thread = extract_hitl_thread_id(body.messages)
     if hitl_thread:
@@ -188,6 +189,13 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
     thread_id = None
     if body.user:
         thread_id = f"user-{body.user}"
+
+    settings = get_settings()
+    if settings.adhoc_commands_enabled and classify_intent(
+        user_text, agents_dir=settings.agents_dir
+    ) == "adhoc":
+        return await auditor.arun_adhoc(user_text, thread_id=thread_id)
+
     return await auditor.arun(user_text, thread_id=thread_id)
 
 
@@ -197,7 +205,7 @@ async def chat_completions(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    """Run or resume a checklist audit as a chat completion."""
+    """Run or resume a checklist audit (or ad-hoc commands) as a chat completion."""
     _check_api_key(authorization)
     settings = get_settings()
     model = body.model or settings.model_id
@@ -244,6 +252,15 @@ async def _stream_audit(
     if hitl_thread:
         yield _sse_chunk(
             f"Resuming paused audit (`{hitl_thread}`)…\n\n",
+            model,
+            completion_id,
+        )
+    elif (
+        settings.adhoc_commands_enabled
+        and classify_intent(user_text, agents_dir=settings.agents_dir) == "adhoc"
+    ):
+        yield _sse_chunk(
+            "Running ad-hoc audit command(s)…\n\n",
             model,
             completion_id,
         )

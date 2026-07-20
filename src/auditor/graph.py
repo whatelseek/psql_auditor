@@ -40,6 +40,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command, interrupt
 
+from auditor.adhoc import run_adhoc_commands
 from auditor.checklist import Requirement
 from auditor.compliance import format_compliance_markdown
 from auditor.config import Settings, get_settings
@@ -1119,6 +1120,26 @@ class AuditorGraph:
             "awaiting_hitl": False,
             "findings": {},
         }
+
+    async def arun_adhoc(
+        self,
+        user_text: str,
+        *,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Run operator-requested audit commands (no checklist report).
+
+        Args:
+            user_text: Operator message asking to run SSH/SQL/playbook commands.
+            thread_id: Unused today (reserved for future HITL on ad-hoc).
+
+        Returns:
+            Result dict with ``report`` Markdown and ``adhoc=True``.
+        """
+        del thread_id
+        if not self.settings.adhoc_commands_enabled:
+            return await self.arun(user_text)
+        return await run_adhoc_commands(self, user_text)
 
     async def arun(
         self,

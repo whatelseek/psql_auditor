@@ -146,9 +146,21 @@ Bar charts of **compliance % by severity** (Overall / Critical / High / …):
 - Open WebUI **Tool** + auto **Filter**: [`docs/cis-compliance-charts.md`](docs/cis-compliance-charts.md)
 - Also appended in the agent report when `COMPLIANCE_CHARTS_IN_REPORT=true`
 
+## Ad-hoc commands (Open WebUI)
+
+Ask the model to **run commands** without a full checklist audit:
+
+```text
+Run this command: `grep PermitRootLogin /etc/ssh/sshd_config`
+Run playbook commands for REQ-002 on Ubuntu
+Execute SQL: SELECT name, setting FROM pg_settings WHERE name = 'ssl'
+```
+
+See [`docs/adhoc-commands.md`](docs/adhoc-commands.md). Toggle with `ADHOC_COMMANDS_ENABLED`.
+
 ## Config
 
-See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
+See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `ADHOC_COMMANDS_ENABLED`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`.
 
 ## Development
 

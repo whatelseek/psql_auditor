@@ -52,6 +52,10 @@ class Settings(BaseSettings):
             file links in chat (defaults to ``open_webui_url``).
         open_webui_api_key: Bearer token for Open WebUI file upload when auth
             is enabled.
+        compliance_charts_in_report: When true, append SVG compliance charts
+            to the finalized Markdown report.
+        adhoc_commands_enabled: When true, command-style chat requests use the
+            ad-hoc executor instead of a full checklist audit.
         max_session_retries: Max cyclic MCP/session reconnect attempts.
         ssh_host: Target host for SSH tools; ``None`` disables SSH until set.
         ssh_port: SSH port (default 22).
@@ -113,6 +117,8 @@ class Settings(BaseSettings):
     open_webui_api_key: str | None = None
     # Append CIS compliance % bar charts to the final report text
     compliance_charts_in_report: bool = True
+    # Allow chat to run ad-hoc SSH/SQL/playbook commands without a full audit
+    adhoc_commands_enabled: bool = True
     max_session_retries: int = 2
 
     # --- SSH target (PostgreSQL host) ---
