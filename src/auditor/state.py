@@ -87,6 +87,8 @@ class AuditorState(TypedDict, total=False):
     has_cmdb: bool
     has_access: bool
     audit_types: str  # cybersecurity | cis | it | both
+    # Results warehouse session (Postgres); allocated once per new audit.
+    results_session_number: int
     evidence_host_id: str  # host slug under artifacts/<client>/<host>/
     host_facts_md: str
     cmdb_drift_md: str

@@ -1,0 +1,259 @@
+"""Unit tests for the results PostgreSQL warehouse helpers."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from auditor.checklist import Requirement
+from auditor.intent import classify_intent
+from auditor.results_store import (
+    AuditSessionInfo,
+    ResultsStore,
+    format_sessions_markdown,
+    get_results_store,
+    record_results_safe,
+    sanitize_db_name,
+)
+from auditor.state import Finding
+
+
+def test_sanitize_db_name_prefix_and_slug() -> None:
+    assert sanitize_db_name("results_", "Acme Corp!") == "results_acme_corp"
+    assert sanitize_db_name("results", "acme_corp") == "results_acme_corp"
+    assert sanitize_db_name("results_", "") == "results_client"
+
+
+def test_client_database_name_uses_slug() -> None:
+    settings = SimpleNamespace(
+        results_db_enabled=True,
+        results_database_url="postgresql://u:p@h/postgres",
+        results_db_per_client=True,
+        results_db_name_prefix="results_",
+    )
+    store = ResultsStore(settings)  # type: ignore[arg-type]
+    assert store.client_database_name("Test Company") == "results_test_company"
+
+
+def test_get_results_store_disabled_without_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    import auditor.results_store as rs
+
+    rs._STORE = None
+    monkeypatch.setenv("RESULTS_DB_ENABLED", "true")
+    monkeypatch.setenv("RESULTS_DATABASE_URL", "")
+    from auditor.config import get_settings
+
+    get_settings.cache_clear()
+    assert get_results_store() is None
+    get_settings.cache_clear()
+    rs._STORE = None
+
+
+def test_get_results_store_disabled_when_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    import auditor.results_store as rs
+
+    rs._STORE = None
+    monkeypatch.setenv("RESULTS_DB_ENABLED", "false")
+    monkeypatch.setenv("RESULTS_DATABASE_URL", "postgresql://u:p@localhost/postgres")
+    from auditor.config import get_settings
+
+    get_settings.cache_clear()
+    assert get_results_store() is None
+    get_settings.cache_clear()
+    rs._STORE = None
+
+
+def test_intent_list_sessions() -> None:
+    assert classify_intent("Which sessions need continue?") == "list_sessions"
+    assert classify_intent("List audit sessions") == "list_sessions"
+    assert classify_intent("Какие сессии прерваны?") == "list_sessions"
+    assert classify_intent("Start Ubuntu CIS audit") == "audit"
+
+
+def test_format_sessions_markdown_includes_continue_hints() -> None:
+    text = format_sessions_markdown(
+        [
+            AuditSessionInfo(
+                id=1,
+                session_number=3,
+                client_name="Acme",
+                client_slug="acme",
+                evidence_run_id="Acme",
+                status="interrupted",
+                continue_thread_id="user-1:ubuntu_cis",
+                framework_id="ubuntu_cis",
+                pending_ids=("REQ-010", "REQ-011"),
+                started_at=datetime.now(timezone.utc),
+            )
+        ]
+    )
+    assert "#3" in text
+    assert "Acme" in text
+    assert "[AUDIT_CONTINUE:user-1:ubuntu_cis]" in text
+
+
+@pytest.mark.asyncio
+async def test_record_results_safe_noop_when_disabled() -> None:
+    settings = SimpleNamespace(
+        results_db_enabled=False,
+        results_database_url="",
+        results_db_per_client=True,
+        results_db_name_prefix="results_",
+    )
+    with patch("auditor.results_store.get_results_store", return_value=None):
+        await record_results_safe(
+            settings,  # type: ignore[arg-type]
+            client_name="c",
+            evidence_run_id="c",
+            framework_id="ubuntu_cis",
+            evidence_host_id=None,
+            findings={},
+            session_number=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_start_session_allocates_next_number() -> None:
+    settings = SimpleNamespace(
+        results_db_enabled=True,
+        results_database_url="postgresql://u:p@localhost/postgres",
+        results_db_per_client=False,
+        results_db_name_prefix="results_",
+    )
+    store = ResultsStore(settings)  # type: ignore[arg-type]
+
+    class _Row(dict):
+        def get(self, key, default=None):
+            return dict.get(self, key, default)
+
+    row = _Row(
+        id=9,
+        session_number=2,
+        client_name="Acme",
+        client_slug="acme",
+        evidence_run_id="Acme",
+        status="running",
+        continue_thread_id="t1",
+        framework_id="",
+        pending_ids=[],
+        started_at=datetime.now(timezone.utc),
+        finished_at=None,
+    )
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=2)
+    conn.fetchrow = AsyncMock(return_value=row)
+    tx = MagicMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction = MagicMock(return_value=tx)
+    conn.execute = AsyncMock()
+    conn.close = AsyncMock()
+
+    with (
+        patch.object(store, "_ensure_schema_on_dsn", new=AsyncMock()),
+        patch("auditor.results_store.asyncpg.connect", new=AsyncMock(return_value=conn)),
+    ):
+        info = await store.start_session(
+            client_name="Acme",
+            evidence_run_id="Acme",
+            continue_thread_id="t1",
+        )
+
+    assert info is not None
+    assert info.session_number == 2
+    assert info.id == 9
+
+
+@pytest.mark.asyncio
+async def test_record_host_framework_audit_tags_session_number() -> None:
+    settings = SimpleNamespace(
+        results_db_enabled=True,
+        results_database_url="postgresql://u:p@localhost/postgres",
+        results_db_per_client=False,
+        results_db_name_prefix="results_",
+    )
+    store = ResultsStore(settings)  # type: ignore[arg-type]
+    findings = {
+        "REQ-001": Finding(
+            requirement_id="REQ-001",
+            title="SSH root",
+            category="Access",
+            severity="High",
+            status="fail",
+            pass_criteria="PermitRootLogin no",
+            evidence="PermitRootLogin yes",
+            remediation="Set PermitRootLogin no",
+            notes="",
+        )
+    }
+    requirements = {
+        "REQ-001": Requirement(
+            id="REQ-001",
+            title="SSH root",
+            category="Access",
+            severity="High",
+            how_to_verify="sshd -T",
+            pass_criteria="PermitRootLogin no",
+        )
+    }
+
+    class _Row(dict):
+        def __getitem__(self, key):
+            return dict.__getitem__(self, key)
+
+        def get(self, key, default=None):
+            return dict.get(self, key, default)
+
+    sess_row = _Row(
+        id=11,
+        session_number=3,
+        client_name="Acme",
+        client_slug="acme",
+        evidence_run_id="Acme",
+        status="running",
+        continue_thread_id="",
+        framework_id="",
+        pending_ids=[],
+        started_at=datetime.now(timezone.utc),
+        finished_at=None,
+    )
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=sess_row)
+    conn.fetchval = AsyncMock(side_effect=[22, 33])  # host_pk, hr_pk
+    conn.execute = AsyncMock()
+    tx = MagicMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction = MagicMock(return_value=tx)
+    conn.close = AsyncMock()
+
+    with (
+        patch.object(store, "_ensure_schema_on_dsn", new=AsyncMock()),
+        patch("auditor.results_store.asyncpg.connect", new=AsyncMock(return_value=conn)),
+    ):
+        await store.record_host_framework_audit(
+            client_name="Acme",
+            evidence_run_id="Acme",
+            framework_id="ubuntu_cis",
+            evidence_host_id="10.0.0.1",
+            findings=findings,
+            requirements=requirements,
+            evidence_relpath="Acme",
+            source="finalize",
+            session_number=3,
+        )
+
+    req_calls = [
+        c
+        for c in conn.execute.await_args_list
+        if c.args and "INSERT INTO requirement_results" in str(c.args[0])
+    ]
+    assert req_calls
+    args = req_calls[0].args
+    assert 3 in args  # session_number column
+    assert "PermitRootLogin yes" in args
+    assert "Set PermitRootLogin no" in args

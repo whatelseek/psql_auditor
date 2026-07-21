@@ -60,6 +60,11 @@ class Settings(BaseSettings):
         benchmark_path: Optional path to benchmark.md (default memory/benchmark.md).
         adhoc_commands_enabled: When true, command-style chat requests use the
             ad-hoc executor instead of a full checklist audit.
+        results_db_enabled: Dual-write filled checklist cells to a Postgres
+            warehouse (evidence files stay on disk).
+        results_database_url: Admin DSN for the warehouse (not the audit target).
+        results_db_per_client: Create ``results_<client_slug>`` databases.
+        results_db_name_prefix: Prefix for per-client warehouse database names.
         max_session_retries: Max cyclic MCP/session reconnect attempts.
         ssh_host: Target host for SSH tools; ``None`` disables SSH until set.
         ssh_port: SSH port (default 22).
@@ -141,6 +146,12 @@ class Settings(BaseSettings):
     intake_enabled: bool = True
     # Working inventory docs (INVENTORY.md) when CMDB is absent
     inventory_dir: Path = Field(default=Path("inventory"))
+    # Results warehouse (filled checklists). Separate from PG_* / DATABASE_URL
+    # used to audit the target Postgres instance via MCP.
+    results_db_enabled: bool = False
+    results_database_url: str = ""
+    results_db_per_client: bool = True
+    results_db_name_prefix: str = "results_"
 
     # --- SSH target (PostgreSQL host) ---
     ssh_host: str | None = None

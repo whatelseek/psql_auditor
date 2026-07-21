@@ -39,7 +39,7 @@ from auditor.api.stream_progress import (
     responses_progress_events,
 )
 from auditor.report_archive import archive_filename, verify_download_token
-from auditor.session_store import find_interrupted_run
+from auditor.results_store import resolve_continue_target
 
 router = APIRouter(prefix="/v1")
 
@@ -489,14 +489,12 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
             return await auditor.acontinue(thread_id)
         return await auditor.aresume(thread_id, user_text)
 
-    # Free-text continue when an interrupted run exists (no marker in history).
+    # Free-text continue when an interrupted run / warehouse session exists.
     if is_continue_reply(user_text):
-        found = find_interrupted_run(get_settings().evidence_dir)
-        if found:
-            run_id, meta = found
-            tid = str(meta.get("continue_thread_id") or meta.get("thread_id") or "")
-            if tid:
-                return await auditor.acontinue(tid, run_id=run_id)
+        target = await resolve_continue_target(get_settings(), user_text)
+        if target:
+            tid, run_id, _sess = target
+            return await auditor.acontinue(tid, run_id=run_id)
 
     thread_id = None
     if body.user:
@@ -504,6 +502,8 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
 
     settings = get_settings()
     intent = classify_intent(user_text, agents_dir=settings.agents_dir)
+    if intent == "list_sessions":
+        return await auditor.alist_sessions(user_text)
     if intent == "revise_req":
         return await auditor.arun_revise_req(
             user_text, messages=body.messages, thread_id=thread_id
@@ -639,6 +639,12 @@ async def _stream_audit(
     elif paused and paused[0] == "continue":
         yield _sse_chunk(
             f"Continuing interrupted audit (`{paused[1]}`)…\n\n",
+            model,
+            completion_id,
+        )
+    elif intent == "list_sessions":
+        yield _sse_chunk(
+            "Looking up audit sessions in the results warehouse…\n\n",
             model,
             completion_id,
         )

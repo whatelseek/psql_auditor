@@ -180,9 +180,19 @@ Update the report from new evidence
 
 See [`docs/post-audit-followup.md`](docs/post-audit-followup.md).
 
+## Results PostgreSQL warehouse
+
+Optionally dual-write filled checklist cells to a per-client Postgres database and
+track **numbered audit sessions** (`#1`, `#2`, …). Evidence files stay on disk.
+
+Chat uses **phrase patterns** (not free-form LLM): *which sessions need continue?*,
+*list audit sessions*, `continue session 3 for Acme`. Session list ≠ LangGraph
+checkpoint query — resume with **continue**. Details:
+[`docs/results-database.md`](docs/results-database.md) (`RESULTS_DB_*`).
+
 ## Config
 
-See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `BENCHMARK_ENABLED`, `BENCHMARK_PATH`, `ADHOC_COMMANDS_ENABLED`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`, `MCP_POSTGRES_*`.
+See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `BENCHMARK_ENABLED`, `BENCHMARK_PATH`, `ADHOC_COMMANDS_ENABLED`, `RESULTS_DB_*`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`, `MCP_POSTGRES_*`.
 
 MCP architecture: [`docs/langchain-mcp.md`](docs/langchain-mcp.md).
 

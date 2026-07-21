@@ -32,6 +32,7 @@ from auditor.secrets_file import (
     bind_ssh_target,
     list_client_ssh_targets,
 )
+from auditor.results_store import record_results_safe
 from auditor.state import Finding, render_report
 
 if TYPE_CHECKING:
@@ -647,6 +648,35 @@ async def run_update_report(
         final_text = f"{header}{body}"
         store.write_report(fw_id, final_text)
         completed.append((fw_id, title, final_text))
+
+        evidence_rel = ""
+        try:
+            evidence_rel = str(
+                store.root.relative_to(Path(settings.evidence_dir).resolve())
+            )
+        except ValueError:
+            evidence_rel = str(store.root)
+        client = str(meta.get("client_name") or store.run_id or "")
+        session_number = None
+        raw_sess = meta.get("results_session_number")
+        if raw_sess is not None:
+            try:
+                session_number = int(raw_sess)
+            except (TypeError, ValueError):
+                session_number = None
+        await record_results_safe(
+            settings,
+            client_name=client,
+            evidence_run_id=store.run_id,
+            framework_id=fw_id,
+            evidence_host_id=host_part,
+            findings=findings,
+            requirements=requirements or None,
+            evidence_relpath=evidence_rel,
+            source="update_report",
+            report_language=report_lang_code or None,
+            session_number=session_number,
+        )
 
     if not completed:
         msg = (

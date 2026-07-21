@@ -120,6 +120,11 @@ from auditor.language import (
 )
 from auditor.memory.playbook_store import PlaybookMemory
 from auditor.report_archive import package_and_publish_archive
+from auditor.results_store import (
+    record_results_safe,
+    start_session_safe,
+    sync_session_status_from_run_meta,
+)
 from auditor.llm import build_chat_model
 from auditor.prompts import (
     EVIDENCE_FORCE_PROMPT,
@@ -1020,6 +1025,14 @@ class AuditorGraph:
                             pending_ids=remaining,
                             framework_id=framework_id,
                         )
+                        await sync_session_status_from_run_meta(
+                            self.settings,
+                            run_id=store.run_id,
+                            status="interrupted",
+                            thread_id=thread_hint,
+                            pending_ids=remaining,
+                            framework_id=framework_id,
+                        )
                     raise
                 except Exception as exc:  # noqa: BLE001
                     req = requirements.get(req_id)
@@ -1070,6 +1083,14 @@ class AuditorGraph:
                     store.run_id,
                     status="interrupted",
                     thread_id=thread_hint,
+                    pending_ids=remaining,
+                    framework_id=framework_id,
+                )
+                await sync_session_status_from_run_meta(
+                    self.settings,
+                    run_id=store.run_id,
+                    status="interrupted",
+                    thread_id=thread_hint or "",
                     pending_ids=remaining,
                     framework_id=framework_id,
                 )
@@ -1791,6 +1812,47 @@ class AuditorGraph:
             except Exception:  # noqa: BLE001
                 pass
 
+        if findings or requirements:
+            evidence_rel = ""
+            if store is not None:
+                try:
+                    evidence_rel = str(
+                        store.root.relative_to(
+                            Path(self.settings.evidence_dir).resolve()
+                        )
+                    )
+                except ValueError:
+                    evidence_rel = str(store.root)
+            session_number = None
+            if store is not None:
+                raw_sess = store.read_run_meta().get("results_session_number")
+                if raw_sess is not None:
+                    try:
+                        session_number = int(raw_sess)
+                    except (TypeError, ValueError):
+                        session_number = None
+            if session_number is None and state.get("results_session_number") is not None:
+                try:
+                    session_number = int(state["results_session_number"])  # type: ignore[index]
+                except (TypeError, ValueError):
+                    session_number = None
+            await record_results_safe(
+                self.settings,
+                client_name=str(state.get("client_name") or "")
+                or (store.run_id if store else ""),
+                evidence_run_id=str(
+                    state.get("evidence_run_id") or (store.run_id if store else "")
+                ),
+                framework_id=fw or "framework",
+                evidence_host_id=str(state.get("evidence_host_id") or "") or None,
+                findings=findings,
+                requirements=requirements,
+                evidence_relpath=evidence_rel,
+                source="finalize",
+                report_language=report_lang.code if report_lang else None,
+                session_number=session_number,
+            )
+
         header = (
             f"Framework: `{fw}` | session reconnects: {retries}{evidence_note}\n\n"
         )
@@ -1955,6 +2017,10 @@ class AuditorGraph:
             meta["intake"] = intake_state.get("intake") or intake_state
             meta["client_name"] = intake_state.get("client_name")
             meta["audit_types"] = intake_state.get("audit_types")
+            if intake_state.get("results_session_number") is not None:
+                meta["results_session_number"] = intake_state[
+                    "results_session_number"
+                ]
         store.write_run_meta(**meta)
         initial: AuditorState = {
             "messages": [HumanMessage(content=user_text)],
@@ -1982,6 +2048,10 @@ class AuditorGraph:
                     "audit_types": str(intake_state.get("audit_types") or ""),
                 }
             )
+            if intake_state.get("results_session_number") is not None:
+                initial["results_session_number"] = int(
+                    intake_state["results_session_number"]
+                )
         if framework_id:
             initial["framework_id"] = framework_id
         if evidence_host_id:
@@ -2228,14 +2298,65 @@ class AuditorGraph:
 
     def interrupted_continue_message(self, thread_id: str, run_id: str) -> str:
         """Build operator-facing interrupt message with continue marker."""
+        session_note = ""
+        try:
+            store = EvidenceStore.open_existing(self.settings.evidence_dir, run_id)
+            meta = store.read_run_meta()
+            sess = meta.get("results_session_number")
+            client = meta.get("client_name") or run_id
+            if sess is not None:
+                session_note = (
+                    f"\nResults warehouse session **#{sess}** "
+                    f"(client `{client}`).\n"
+                    "Ask *which sessions need continue?* to list interrupted audits.\n"
+                )
+        except Exception:  # noqa: BLE001
+            session_note = ""
         return format_continue_assistant_message(
             (
                 "## Audit interrupted\n\n"
                 f"Run `{run_id}` stopped before all requirements finished.\n"
+                f"{session_note}"
                 "Reply **continue** (or **продолжи**) to resume from the last checkpoint."
             ),
             thread_id,
         )
+
+    async def alist_sessions(
+        self,
+        user_text: str = "",
+        *,
+        interrupted_only: bool = False,
+    ) -> dict[str, Any]:
+        """Answer which warehouse sessions exist / need continue."""
+        from auditor.results_store import list_sessions_report
+
+        client = None
+        # Optional "for Acme" / "для Acme"
+        m = re.search(
+            r"\b(?:for|для)\s+([A-Za-z0-9][A-Za-z0-9 _.-]{1,80})",
+            user_text or "",
+            re.I,
+        )
+        if m:
+            client = m.group(1).strip().rstrip("?.!,")
+        text = await list_sessions_report(
+            self.settings,
+            client_name=client,
+            interrupted_only=interrupted_only
+            or bool(
+                re.search(
+                    r"interrupt|need\s+continue|прерв|продолж|resume",
+                    user_text or "",
+                    re.I,
+                )
+            ),
+        )
+        return {
+            "report": text,
+            "messages": [AIMessage(content=text)],
+            "awaiting_hitl": False,
+        }
 
     async def _discover_inventory_hosts(
         self,
@@ -2325,6 +2446,22 @@ class AuditorGraph:
             "has_access": has_access,
             "audit_types": audit_type,
         }
+
+        # New audit → allocate next results warehouse session_number (Postgres tracker).
+        session_info = await start_session_safe(
+            self.settings,
+            client_name=str(intake.get("client_name") or run_id),
+            evidence_run_id=run_id,
+            continue_thread_id=base_thread,
+            evidence_path=str(store.root),
+        )
+        if session_info is not None:
+            store.write_run_meta(
+                results_session_number=session_info.session_number,
+                results_session_id=session_info.id,
+                status="running",
+            )
+            intake_state["results_session_number"] = session_info.session_number
 
         # Jobs: (ssh_target, facts, framework)
         jobs: list[tuple[InventorySshTarget, HostFacts, Any]] = []
