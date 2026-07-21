@@ -190,10 +190,6 @@ class NetboxMcpSession:
 _SESSION = NetboxMcpSession()
 
 
-def get_netbox_session() -> NetboxMcpSession:
-    return _SESSION
-
-
 async def reconnect_netbox_session() -> str:
     return await _SESSION.reconnect()
 

@@ -747,14 +747,6 @@ async def start_session_safe(settings: Settings, **kwargs: Any) -> AuditSessionI
         return None
 
 
-async def update_session_status_safe(settings: Settings, **kwargs: Any) -> None:
-    store = get_results_store(settings)
-    if store is None:
-        return
-    try:
-        await store.update_session_status(**kwargs)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Results session status update failed: %s", exc)
 
 
 async def record_results_safe(

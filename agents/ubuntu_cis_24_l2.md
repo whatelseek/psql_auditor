@@ -1,6 +1,6 @@
 ---
 id: ubuntu_cis_24_l2
-aliases: [ubuntu24, ubuntu-cis-24, cis-ubuntu-24, ubuntu l2]
+aliases: [ubuntu, ubuntu24, ubuntu-cis, ubuntu-cis-24, cis-ubuntu-24, ubuntu l2, ubuntu cis]
 description: CIS Ubuntu Linux 24.04 LTS v1.0.0 Level 2 Server (converted from Nessus .audit)
 domain: cybersecurity
 detect:

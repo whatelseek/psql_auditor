@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Callable
 from typing import Any
 
 from auditor.progress import (
     ProgressEvent,
-    ProgressSink,
     args_for_stream,
-    bind_progress_sink,
 )
 
 
@@ -212,39 +209,3 @@ def responses_progress_events(
 
     return events
 
-
-async def run_with_progress(
-    coro_factory: Callable[[], Awaitable[dict[str, Any]]],
-    *,
-    on_event: Callable[[ProgressEvent], Awaitable[None] | None],
-) -> dict[str, Any]:
-    """Run audit coroutine while draining a ProgressSink to ``on_event``."""
-    sink = ProgressSink()
-    result_box: dict[str, Any] = {}
-    error_box: list[BaseException] = []
-
-    async def _runner() -> None:
-        with bind_progress_sink(sink):
-            try:
-                result_box["result"] = await coro_factory()
-            except BaseException as exc:  # noqa: BLE001
-                error_box.append(exc)
-            finally:
-                sink.close()
-
-    task = asyncio.create_task(_runner())
-    try:
-        while True:
-            event = await sink.queue.get()
-            if event is None:
-                break
-            maybe = on_event(event)
-            if asyncio.iscoroutine(maybe) or isinstance(maybe, Awaitable):
-                await maybe  # type: ignore[arg-type]
-        await task
-    except asyncio.CancelledError:
-        # Keep graph running as orphan — caller may shield the task separately.
-        raise
-    if error_box:
-        raise error_box[0]
-    return result_box.get("result") or {}

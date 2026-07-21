@@ -24,13 +24,13 @@ value     = { tools: [...], notes, source: seed|learned, updated_at }
 Editable YAML under [`agents/playbooks/`](../agents/playbooks/):
 
 - `postgres_cis.yaml`
-- `ubuntu_cis.yaml`
-- `windows_cis.yaml`
+- `ubuntu_cis_24_l2.yaml`
+- `it_audit.yaml`
 
 Example:
 
 ```yaml
-framework_id: ubuntu_cis
+framework_id: ubuntu_cis_24_l2
 framework_tips:
   - Prefer ssh_read_file for config files; ssh_run for status commands.
 requirements:

@@ -194,9 +194,12 @@ def _score_frameworks(
         if re.search(rf"\b{re.escape(fw.id.lower())}\b", text):
             score += 10
         for alias in fw.aliases:
-            alias_l = alias.lower()
-            if alias_l and alias_l in text:
-                # Short aliases (pg, os, win) score lower to avoid false multi-hits.
+            alias_l = alias.lower().strip()
+            if not alias_l:
+                continue
+            # Word-boundary match so short aliases like ``it`` do not hit
+            # substrings inside ``audit``.
+            if re.search(rf"\b{re.escape(alias_l)}\b", text):
                 score += 3 if len(alias_l) > 4 else 1
         if fw.title.lower() in text:
             score += 4
