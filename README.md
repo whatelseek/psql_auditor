@@ -106,7 +106,7 @@ Procedural memory remembers **how to verify** each REQ (SSH/SQL recipes) per fra
 ## Stack
 
 - **LangGraph** orchestration + **LangChain** tools/models
-- DB evidence: [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters) → [antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server)
+- DB evidence: [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters) (`MultiServerMCPClient` stateful sessions + pool) → [antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server) — see [`docs/langchain-mcp.md`](docs/langchain-mcp.md) and [LangChain MCP docs](https://docs.langchain.com/oss/python/langchain/mcp)
 - Host evidence: SSH (`ssh_run` / `ssh_read_file`)
 - Models: LiteLLM · UI: Open WebUI (`/v1`)
 
