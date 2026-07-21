@@ -69,7 +69,14 @@ The evidence prompt includes a **playbook memory** block. The model is instructe
 
 Docker mounts `./memory` so learning survives container restarts.
 
+Historical audit **scores** are not stored under `memory/` (the old
+`benchmark.md` ledger was removed). Use the results Postgres warehouse
+([`results-database.md`](results-database.md)) for session history and
+compliance aggregates.
+
 ## Related
 
 - LangChain memory overview: https://docs.langchain.com/oss/python/concepts/memory
 - Starting audits: [`starting-an-audit.md`](starting-an-audit.md)
+- Results warehouse: [`results-database.md`](results-database.md)
+- Ad-hoc playbook path: [`adhoc-commands.md`](adhoc-commands.md)

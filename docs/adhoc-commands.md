@@ -59,5 +59,7 @@ See [`post-audit-followup.md`](post-audit-followup.md).
 
 ## Related
 
+- Intent routing details: [`chat-intent.md`](chat-intent.md)
 - Playbooks / memory: [`long-term-memory.md`](long-term-memory.md)
 - Starting full audits: [`starting-an-audit.md`](starting-an-audit.md)
+- Post-audit follow-up: [`post-audit-followup.md`](post-audit-followup.md)

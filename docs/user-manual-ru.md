@@ -44,9 +44,9 @@
 
 - Docker и Docker Compose
 - Ключ к модели для LiteLLM (например `OPENAI_API_KEY`)
-- Доступ по **SSH** к целевому хосту (для Ubuntu/Windows-проверок)
+- Доступ по **SSH** к целевому хосту (для Ubuntu/Linux-проверок; Windows — при своём фреймворке)
 - Учётные данные **PostgreSQL** (для проверок БД через MCP)
-- Браузер → Open WebUI на порту **3000** (по умолчанию)
+- Браузер → Open WebUI на порту **3001** (по умолчанию, `WEBUI_HOST_PORT`)
 
 ---
 
@@ -68,14 +68,14 @@ docker compose up --build
 
 | Сервис | URL | Назначение |
 |--------|-----|------------|
-| Open WebUI | http://localhost:3000 | Чат с оператором |
-| Агент `auditor` | http://localhost:8000 | API `/v1` (OpenAI-совместимый) |
-| LiteLLM | http://localhost:4000 | Шлюз к модели |
+| Open WebUI | http://localhost:3001 | Чат с оператором (`WEBUI_HOST_PORT`) |
+| Агент `auditor` | http://localhost:8001 | API `/v1` (`AGENT_HOST_PORT` → контейнер `:8000`) |
+| LiteLLM | http://localhost:4000 | Шлюз к модели (профиль `local-llm`) |
 
 Проверка живости агента:
 
 ```bash
-curl -s http://localhost:8000/healthz
+curl -s http://localhost:8001/healthz
 ```
 
 Ожидается JSON со `"status":"ok"`.
@@ -118,9 +118,9 @@ PG_USER=postgres
 PG_PASSWORD=...
 PG_DATABASE=postgres
 
-PUBLIC_BASE_URL=http://localhost:8000
+PUBLIC_BASE_URL=http://localhost:8001
 OPEN_WEBUI_URL=http://open-webui:8080
-OPEN_WEBUI_PUBLIC_URL=http://localhost:3000
+OPEN_WEBUI_PUBLIC_URL=http://localhost:3001
 MODEL_ID=auditor
 ```
 
@@ -153,7 +153,7 @@ MODEL_ID=auditor
 
 В интерфейсе:
 
-1. Откройте http://localhost:3000
+1. Откройте http://localhost:3001
 2. Выберите модель **`auditor`**
 3. (Рекомендуется) для файлов-целей отключите «сжатие» вложения до RAG-фрагментов — нужен **полный текст** файла в контексте чата (см. [docs/starting-an-audit.md](starting-an-audit.md))
 
@@ -162,6 +162,13 @@ MODEL_ID=auditor
 ---
 
 ## 6. Как провести аудит
+
+Каждое сообщение сначала **классифицируется по намерению** (intent): полный аудит,
+ad-hoc команда, доработка REQ, список сессий и т.д. Подробно:
+[chat-intent.md](chat-intent.md).
+
+**Опрос перед аудитом (intake)** — только для полного аудита: клиент → CMDB →
+доступ → тип. Подробно: [pre-audit-intake.md](pre-audit-intake.md).
 
 ### 6.1. Базовый сценарий
 
@@ -225,8 +232,10 @@ frameworks:
 |------|----------------|
 | PostgreSQL | `Запусти аудит PostgreSQL CIS` |
 | Ubuntu | `Проведи Ubuntu CIS аудит` |
-| Windows | `Проверка Windows Server CIS` |
+| IT | `Проведи IT-аудит` |
 | Два фреймворка | `Проведи аудит PostgreSQL и Ubuntu` |
+| Ad-hoc команда | `Выполни команду \`uptime\`` |
+| Сессии | `Какие сессии прерваны?` |
 
 Агент выбирает файл из `agents/` по `id`, `aliases` и заголовку.
 
@@ -486,7 +495,7 @@ cp .env.example .env   # заполнить ключи и SSH/PG
 docker compose up --build
 
 # Открыть UI
-# http://localhost:3000 → модель auditor
+# http://localhost:3001 → модель auditor
 
 # Запуск аудита (пример)
 # «Проведи аудит Ubuntu CIS»
@@ -503,6 +512,9 @@ docker compose up -d --build agent
 
 ## Связанные документы (EN)
 
+- [README.md](README.md) — оглавление документации  
+- [chat-intent.md](chat-intent.md) — маршрутизация сообщений (intent)  
+- [pre-audit-intake.md](pre-audit-intake.md) — опрос перед аудитом (intake)  
 - [starting-an-audit.md](starting-an-audit.md) — старт аудита и формат target-файла  
 - [long-term-memory.md](long-term-memory.md) — playbook-память  
 - [cis-compliance-charts.md](cis-compliance-charts.md) — графики соответствия  
