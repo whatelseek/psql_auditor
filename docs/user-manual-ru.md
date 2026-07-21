@@ -129,6 +129,7 @@ MODEL_ID=auditor
 | Переменная | По умолчанию | Смысл |
 |------------|--------------|--------|
 | `HITL_ENABLED` | `true` | Пауза skip/retry при ошибках REQ |
+| `CHECKPOINT_PATH` | `artifacts/.checkpoints/auditor.sqlite` | Durable resume после обрыва/рестарта |
 | `ARCHIVE_ENABLED` | `true` | ZIP отчёта в чат |
 | `MEMORY_ENABLED` / `MEMORY_LEARN` | `true` | Подсказки playbook / обучение |
 | `COMPLIANCE_CHARTS_IN_REPORT` | `true` | SVG-графики % соответствия в отчёте |
@@ -248,6 +249,17 @@ HITL_ENABLED=false
 ```
 
 Русские формулировки решений тоже поддерживаются (`пропустить`, `повторить` и т.п.).
+
+### Живой поток инструментов и продолжение после обрыва
+
+Во время аудита в Open WebUI стримятся вызовы инструментов (SSH/MCP) и краткие phase/reasoning-сообщения.
+
+Если чат оборвался посреди оценки:
+
+1. Ответьте **continue** / **продолжи** в том же чате, или
+2. Используйте маркер `[AUDIT_CONTINUE:<thread>]` из сообщения об обрыве.
+
+Чекпоинты LangGraph пишутся в Sqlite (`CHECKPOINT_PATH`, по умолчанию `artifacts/.checkpoints/auditor.sqlite`) и переживают перезапуск контейнера агента (том `./artifacts`).
 
 ---
 

@@ -3,6 +3,8 @@
 When a requirement cannot be audited, the graph interrupts and asks the
 operator to **skip** or **try again**. Open WebUI resumes via the next chat
 message (same pattern as LangGraph interrupt + Command(resume=…)).
+
+Clear replies are parsed with regex; otherwise the LLM interprets intent.
 """
 
 from __future__ import annotations
@@ -11,16 +13,33 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from auditor.checklist import Requirement
 from auditor.state import Finding
 
 HitlAction = Literal["skip", "retry", "skip_all", "retry_all", "unknown"]
+PauseKind = Literal["hitl", "intake", "continue"]
 
 # Visible marker embedded in assistant replies so the next chat turn can resume.
 HITL_MARKER_RE = re.compile(
     r"\[AUDIT_HITL:(?P<thread>[A-Za-z0-9._:-]+)\]",
     re.IGNORECASE,
 )
+
+# Most recent pause marker wins — CONTINUE / HITL / INTAKE.
+PAUSE_MARKER_RE = re.compile(
+    r"\[AUDIT_(?P<kind>HITL|INTAKE|CONTINUE):(?P<thread>[A-Za-z0-9._:-]+)\]",
+    re.IGNORECASE,
+)
+
+CONTINUE_REPLY_RE = re.compile(
+    r"\b(continue|resume|продолж\w*|далее)\b",
+    re.IGNORECASE,
+)
+
+_VALID_ACTIONS = frozenset({"skip", "retry", "skip_all", "retry_all"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,22 +48,50 @@ class HitlDecision:
 
     action: HitlAction
     raw: str
+    source: Literal["regex", "llm", "explicit"] = "regex"
 
 
 def extract_hitl_thread_id(messages: list[Any]) -> str | None:
-    """Find ``[AUDIT_HITL:<thread>]`` in recent assistant messages."""
+    """Find ``[AUDIT_HITL:<thread>]`` only when it is the newest pause marker."""
+    resolved = resolve_pause_resume(messages)
+    if resolved and resolved[0] == "hitl":
+        return resolved[1]
+    return None
+
+
+def resolve_pause_resume(messages: list[Any]) -> tuple[PauseKind, str] | None:
+    """Return ``(kind, thread_id)`` from the newest assistant pause marker.
+
+    Scans chat history newest-first and uses the last ``AUDIT_HITL`` /
+    ``AUDIT_INTAKE`` marker in that message so a HITL pause after intake is
+    not overridden by older intake markers still present in history.
+    """
     for msg in reversed(messages):
-        role = getattr(msg, "role", None)
-        content = getattr(msg, "content", None)
-        if isinstance(msg, dict):
-            role = msg.get("role")
-            content = msg.get("content")
+        role, content = _msg_role_content(msg)
         if role not in ("assistant", "system") or not content:
             continue
-        match = HITL_MARKER_RE.search(str(content))
-        if match:
-            return match.group("thread")
+        matches = list(PAUSE_MARKER_RE.finditer(str(content)))
+        if not matches:
+            continue
+        m = matches[-1]
+        kind = m.group("kind").lower()
+        if kind in ("hitl", "intake", "continue"):
+            return kind, m.group("thread")  # type: ignore[return-value]
     return None
+
+
+def format_continue_assistant_message(prompt: str, thread_id: str) -> str:
+    """Marker so the operator can resume an interrupted mid-assess run."""
+    return (
+        f"{prompt.strip()}\n\n"
+        f"---\n"
+        f"[AUDIT_CONTINUE:{thread_id}]\n"
+        f"_Audit interrupted. Reply **continue** to resume from checkpoint._\n"
+    )
+
+
+def is_continue_reply(text: str) -> bool:
+    return bool(CONTINUE_REPLY_RE.search(str(text or "")))
 
 
 def parse_hitl_decision(text: Any) -> HitlDecision:
@@ -52,8 +99,8 @@ def parse_hitl_decision(text: Any) -> HitlDecision:
     if isinstance(text, dict):
         action = str(text.get("action") or text.get("decision") or "").strip().lower()
         raw = str(text.get("text") or text.get("raw") or action)
-        if action in ("skip", "retry", "skip_all", "retry_all"):
-            return HitlDecision(action=action, raw=raw)  # type: ignore[arg-type]
+        if action in _VALID_ACTIONS:
+            return HitlDecision(action=action, raw=raw, source="explicit")  # type: ignore[arg-type]
         text = raw
 
     # LangGraph may resume with a list of messages from some clients.
@@ -67,7 +114,9 @@ def parse_hitl_decision(text: Any) -> HitlDecision:
         text = "\n".join(parts)
 
     raw = str(text or "").strip()
-    normalized = re.sub(r"\s+", " ", raw.lower())
+    # Strip markdown emphasis so **skip all** still matches.
+    normalized = re.sub(r"[*_`]+", "", raw.lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
 
     if not normalized:
         return HitlDecision(action="unknown", raw=raw)
@@ -92,6 +141,76 @@ def parse_hitl_decision(text: Any) -> HitlDecision:
         return HitlDecision(action="retry", raw=raw)
 
     return HitlDecision(action="unknown", raw=raw)
+
+
+async def interpret_hitl_decision(
+    text: Any,
+    *,
+    llm: BaseChatModel,
+    requirement_id: str = "",
+    requirement_title: str = "",
+    why: str = "",
+    candidates: list[str] | None = None,
+) -> HitlDecision:
+    """Regex-parse first; if unclear, ask the LLM to choose an action."""
+    decision = parse_hitl_decision(text)
+    if decision.action != "unknown":
+        return decision
+
+    raw = decision.raw
+    if not raw.strip():
+        return decision
+
+    pending = ", ".join(candidates or ([requirement_id] if requirement_id else []))
+    system = (
+        "You classify an operator reply for a paused security audit (HITL).\n"
+        "Choose exactly one action:\n"
+        "- skip — skip only the current failed requirement and continue\n"
+        "- retry — retry only the current failed requirement\n"
+        "- skip_all — skip all remaining failed requirements and continue\n"
+        "- retry_all — retry all remaining failed requirements\n"
+        "Reply with ONLY the action token (skip|retry|skip_all|retry_all), no punctuation."
+    )
+    human = (
+        f"Current requirement: {requirement_id or '—'} "
+        f"({requirement_title or '—'})\n"
+        f"Why paused: {(why or '—')[:800]}\n"
+        f"Remaining failed ids: {pending or '—'}\n\n"
+        f"Operator reply:\n{raw[:1500]}"
+    )
+    try:
+        response = await llm.ainvoke(
+            [SystemMessage(content=system), HumanMessage(content=human)]
+        )
+        content = getattr(response, "content", response)
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text") if isinstance(part, dict) else part)
+                for part in content
+            )
+        token = re.sub(r"[*_`]+", "", str(content or "").strip().lower())
+        token = re.sub(r"\s+", "_", token.split()[0]) if token.split() else ""
+        # Accept "skip all" style from the model too
+        llm_parsed = parse_hitl_decision(str(content or ""))
+        if llm_parsed.action != "unknown":
+            return HitlDecision(
+                action=llm_parsed.action, raw=raw, source="llm"
+            )
+        if token in _VALID_ACTIONS:
+            return HitlDecision(action=token, raw=raw, source="llm")  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 — fall through to unknown
+        return HitlDecision(action="unknown", raw=raw, source="llm")
+
+    return HitlDecision(action="unknown", raw=raw, source="llm")
+
+
+def _msg_role_content(msg: Any) -> tuple[Any, Any]:
+    role = getattr(msg, "role", None)
+    content = getattr(msg, "content", None)
+    if isinstance(msg, dict):
+        role = msg.get("role")
+        content = msg.get("content")
+    return role, content
 
 
 def build_hitl_prompt(

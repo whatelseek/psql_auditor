@@ -55,6 +55,50 @@ def parse_yes_no(text: str) -> YesNo:
     return "unknown"
 
 
+def resolve_yes_no(text: str, llm_payload: dict[str, Any] | None = None) -> YesNo:
+    """Prefer LLM JSON ``answer``, else regex ``parse_yes_no``."""
+    if isinstance(llm_payload, dict):
+        ans = str(llm_payload.get("answer") or "").strip().lower()
+        if ans in {"yes", "y", "true", "1", "да"}:
+            return "yes"
+        if ans in {"no", "n", "false", "0", "нет", "nay", "nope"}:
+            return "no"
+        if ans == "unknown":
+            # Still try regex in case the model hedged on a clear reply
+            regex = parse_yes_no(text)
+            return regex if regex != "unknown" else "unknown"
+    return parse_yes_no(text)
+
+
+def resolve_client_name(
+    text: str, llm_payload: dict[str, Any] | None = None
+) -> str:
+    """Prefer LLM JSON ``client_name``, else ``parse_client_name``."""
+    if isinstance(llm_payload, dict):
+        name = str(llm_payload.get("client_name") or "").strip()
+        if name:
+            return name[:120]
+    return parse_client_name(text)
+
+
+def resolve_audit_type(
+    text: str, llm_payload: dict[str, Any] | None = None
+) -> AuditType | None:
+    """Prefer LLM JSON ``audit_type``, else ``parse_audit_type``."""
+    if isinstance(llm_payload, dict) and "audit_type" in llm_payload:
+        raw = llm_payload.get("audit_type")
+        if raw is None or str(raw).strip().lower() in {"", "null", "none", "unknown"}:
+            return parse_audit_type(text)
+        at = str(raw).strip().lower()
+        if at in {"cis", "cyber", "cybersecurity"}:
+            return "cybersecurity"
+        if at in {"it"}:
+            return "it"
+        if at in {"both"}:
+            return "both"
+    return parse_audit_type(text)
+
+
 def parse_client_name(text: str) -> str:
     raw = (text or "").strip()
     # Strip common prefixes
@@ -178,17 +222,12 @@ def format_intake_assistant_message(prompt: str, thread_id: str) -> str:
 
 
 def extract_intake_thread_id(messages: list[Any]) -> str | None:
-    for msg in reversed(messages):
-        role = getattr(msg, "role", None)
-        content = getattr(msg, "content", None)
-        if isinstance(msg, dict):
-            role = msg.get("role")
-            content = msg.get("content")
-        if role not in ("assistant", "system") or not content:
-            continue
-        match = INTAKE_MARKER_RE.search(str(content))
-        if match:
-            return match.group("thread")
+    """Find intake thread only when it is the newest pause marker."""
+    from auditor.hitl import resolve_pause_resume
+
+    resolved = resolve_pause_resume(messages)
+    if resolved and resolved[0] == "intake":
+        return resolved[1]
     return None
 
 

@@ -68,18 +68,36 @@ from auditor.frameworks import (
 )
 from auditor.host_facts import (
     HostFacts,
-    collect_host_facts_ssh,
     compare_to_netbox,
     format_host_facts_markdown,
+    merge_facts_from_raw,
+    parse_host_facts_json,
     resolve_client_inventory,
     upsert_inventory_md,
     write_host_facts_json,
 )
 from auditor.hitl import (
+    HitlDecision,
     build_hitl_prompt,
+    format_continue_assistant_message,
     format_hitl_assistant_message,
+    interpret_hitl_decision,
     interrupt_payload_to_prompt,
-    parse_hitl_decision,
+)
+from auditor.progress import (
+    bind_progress_sink,
+    emit_phase,
+    emit_reasoning,
+    emit_req_status,
+    emit_tool_call,
+    emit_tool_result,
+)
+from auditor.session_store import (
+    drop_multi_session,
+    find_interrupted_run,
+    load_all_multi_sessions,
+    save_multi_session,
+    write_run_status,
 )
 from auditor.intake import (
     client_slug,
@@ -87,10 +105,10 @@ from auditor.intake import (
     format_intake_assistant_message,
     frameworks_for_audit_type,
     intake_interrupt_payload,
-    parse_audit_type,
-    parse_client_name,
-    parse_yes_no,
     prompts_for_language,
+    resolve_audit_type,
+    resolve_client_name,
+    resolve_yes_no,
     summarize_access_probe,
     summarize_cmdb_capabilities,
 )
@@ -110,6 +128,17 @@ from auditor.prompts import (
     FILL_CELL_PROMPT,
     FILL_SYSTEM_PROMPT,
     FINALIZE_PROMPT,
+    HOST_FACTS_FILL_PROMPT,
+    HOST_FACTS_FILL_SYSTEM_PROMPT,
+    HOST_FACTS_FORCE_PROMPT,
+    HOST_FACTS_PROMPT,
+    HOST_FACTS_SYSTEM_PROMPT,
+    INTAKE_INTERPRET_AUDIT_TYPE_PROMPT,
+    INTAKE_INTERPRET_AUDIT_TYPE_SYSTEM,
+    INTAKE_INTERPRET_CLIENT_PROMPT,
+    INTAKE_INTERPRET_CLIENT_SYSTEM,
+    INTAKE_INTERPRET_YES_NO_PROMPT,
+    INTAKE_INTERPRET_YES_NO_SYSTEM,
 )
 from auditor.secrets_file import (
     InventorySshTarget,
@@ -225,6 +254,10 @@ class AuditorGraph:
         # Multi-framework orchestration while a HITL pause is active.
         self._multi_sessions: dict[str, dict[str, Any]] = {}
         self._checkpointer = MemorySaver()
+        self._checkpoint_conn = None
+        self._async_cp_ready = False
+        # Orphaned runs still executing after client disconnect (thread_id → task).
+        self._orphan_tasks: dict[str, asyncio.Task[Any]] = {}
         # Long-term procedural memory (framework command playbooks).
         self.playbooks = (
             PlaybookMemory(
@@ -239,6 +272,9 @@ class AuditorGraph:
         self.evidence_model_no_netbox = build_chat_model(self.settings).bind_tools(
             self._tools_no_netbox
         )
+        self.evidence_model_ssh = build_chat_model(self.settings).bind_tools(
+            get_ssh_tools()
+        )
         self.fill_model = build_chat_model(self.settings)
         self.benchmark = (
             BenchmarkStore(self.settings.resolve_benchmark_path())
@@ -249,6 +285,60 @@ class AuditorGraph:
             self.benchmark.ensure_file()
         self.graph = self._build()
         self.intake_graph = self._build_intake()
+
+    async def ensure_async_checkpointer(self) -> None:
+        """Upgrade to AsyncSqliteSaver (required for ``ainvoke`` durability)."""
+        if self._async_cp_ready:
+            return
+        try:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+            path = Path(self.settings.checkpoint_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Keep the async context manager open for the process lifetime.
+            self._sqlite_cm = AsyncSqliteSaver.from_conn_string(str(path))
+            self._checkpointer = await self._sqlite_cm.__aenter__()
+            self._checkpoint_conn = getattr(self._checkpointer, "conn", None)
+            self.graph = self._build()
+            self.intake_graph = self._build_intake()
+            self._async_cp_ready = True
+        except Exception:  # noqa: BLE001
+            # Keep MemorySaver — process-local resume only.
+            self._async_cp_ready = True
+
+    def _remember_multi_session(self, thread_id: str, session: dict[str, Any]) -> None:
+        self._multi_sessions[thread_id] = session
+        run_id = str(session.get("run_id") or "")
+        if run_id:
+            try:
+                save_multi_session(
+                    self.settings.evidence_dir, run_id, thread_id, session
+                )
+            except OSError:
+                pass
+
+    def _forget_multi_session(self, thread_id: str) -> dict[str, Any] | None:
+        session = self._multi_sessions.pop(thread_id, None)
+        if session is None:
+            return None
+        run_id = str(session.get("run_id") or "")
+        if run_id:
+            try:
+                drop_multi_session(self.settings.evidence_dir, run_id, thread_id)
+            except OSError:
+                pass
+        return session
+
+    def _reload_multi_sessions(self, run_id: str) -> None:
+        if not run_id:
+            return
+        try:
+            loaded = load_all_multi_sessions(self.settings.evidence_dir, run_id)
+        except OSError:
+            return
+        for tid, sess in loaded.items():
+            if tid not in self._multi_sessions:
+                self._multi_sessions[tid] = sess
 
     def _evidence_llm(self, *, has_cmdb: bool):
         return self.evidence_model if has_cmdb else self.evidence_model_no_netbox
@@ -297,6 +387,51 @@ class AuditorGraph:
         graph.add_edge("intake_gate", END)
         return graph.compile(checkpointer=self._checkpointer)
 
+    async def _intake_llm_json(
+        self, system: str, user: str
+    ) -> dict[str, Any] | None:
+        """One fill_model call for intake answer interpretation."""
+        try:
+            response = await self.fill_model.ainvoke(
+                [
+                    SystemMessage(content=system),
+                    HumanMessage(content=user),
+                ]
+            )
+            return _extract_json(str(response.content or ""))
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _intake_resolve_yes_no(
+        self, raw: str, *, question_hint: str
+    ) -> str:
+        payload = await self._intake_llm_json(
+            INTAKE_INTERPRET_YES_NO_SYSTEM,
+            INTAKE_INTERPRET_YES_NO_PROMPT.format(
+                question_hint=question_hint,
+                reply=str(raw or "").strip() or "(empty)",
+            ),
+        )
+        return resolve_yes_no(str(raw or ""), payload)
+
+    async def _intake_resolve_client_name(self, raw: str) -> str:
+        payload = await self._intake_llm_json(
+            INTAKE_INTERPRET_CLIENT_SYSTEM,
+            INTAKE_INTERPRET_CLIENT_PROMPT.format(
+                reply=str(raw or "").strip() or "(empty)",
+            ),
+        )
+        return resolve_client_name(str(raw or ""), payload)
+
+    async def _intake_resolve_audit_type(self, raw: str) -> str | None:
+        payload = await self._intake_llm_json(
+            INTAKE_INTERPRET_AUDIT_TYPE_SYSTEM,
+            INTAKE_INTERPRET_AUDIT_TYPE_PROMPT.format(
+                reply=str(raw or "").strip() or "(empty)",
+            ),
+        )
+        return resolve_audit_type(str(raw or ""), payload)
+
     async def intake_gate(self, state: AuditorState) -> dict[str, Any]:
         """Multi-step pre-audit questionnaire via successive interrupts."""
         if not self.settings.intake_enabled or state.get("intake_complete"):
@@ -311,7 +446,7 @@ class AuditorGraph:
             raw = interrupt(
                 intake_interrupt_payload(step="client_name", prompt=prompts.client)
             )
-            name = parse_client_name(str(raw or ""))
+            name = await self._intake_resolve_client_name(str(raw or ""))
             if name:
                 intake["client_name"] = name
                 intake["client_slug"] = client_slug(name)
@@ -372,7 +507,9 @@ class AuditorGraph:
             raw = interrupt(
                 intake_interrupt_payload(step="cmdb", prompt=prompts.cmdb)
             )
-            yn = parse_yes_no(str(raw or ""))
+            yn = await self._intake_resolve_yes_no(
+                str(raw or ""), question_hint="Does the client have CMDB/NetBox?"
+            )
             if yn == "unknown":
                 continue
             intake["has_cmdb"] = yn == "yes"
@@ -437,7 +574,10 @@ class AuditorGraph:
             raw = interrupt(
                 intake_interrupt_payload(step="access", prompt=access_prompt)
             )
-            yn = parse_yes_no(str(raw or ""))
+            yn = await self._intake_resolve_yes_no(
+                str(raw or ""),
+                question_hint="Do I have access to servers/services to probe?",
+            )
             if yn == "unknown":
                 continue
             intake["has_access"] = yn == "yes"
@@ -459,7 +599,7 @@ class AuditorGraph:
             raw = interrupt(
                 intake_interrupt_payload(step="audit_type", prompt=audit_prompt)
             )
-            atype = parse_audit_type(str(raw or ""))
+            atype = await self._intake_resolve_audit_type(str(raw or ""))
             if atype:
                 intake["audit_types"] = atype
                 break
@@ -492,10 +632,103 @@ class AuditorGraph:
                 )
             ],
         }
-        if store is not None:
+        if store is not None and store.run_id != state.get("evidence_run_id"):
             out["evidence_run_id"] = store.run_id
             out["evidence_run_dir"] = str(store.root)
         return out
+
+    async def _collect_host_facts_llm(
+        self,
+        *,
+        store: EvidenceStore | None = None,
+        host_id: str = "",
+        user_request: str = "",
+    ) -> HostFacts:
+        """SSH-only tool loop + JSON fill → ``HostFacts`` (parser fallback)."""
+        ssh_host = str(self.settings.ssh_host or "")
+        evidence_fw = "host_facts"
+        evidence_req = "discover"
+        if store is not None and host_id:
+            store.host_segment = host_id
+
+        messages: list = [
+            SystemMessage(content=HOST_FACTS_SYSTEM_PROMPT),
+            HumanMessage(
+                content=HOST_FACTS_PROMPT.format(
+                    user_request=truncate_text(
+                        user_request or "Discover host inventory for audit routing.",
+                        self.settings.max_user_request_chars,
+                        "user_request",
+                    ),
+                    ssh_host=ssh_host or "(unknown)",
+                )
+            ),
+        ]
+        chunks: list[str] = []
+        raw: dict[str, str] = {}
+        max_rounds = self.settings.max_tool_rounds_per_item
+        tool_idx = 0
+
+        for _ in range(max_rounds + 1):
+            rounds = count_tool_rounds(messages)
+            if rounds >= max_rounds:
+                messages.append(HumanMessage(content=HOST_FACTS_FORCE_PROMPT))
+                response = await self.fill_model.ainvoke(messages)
+                chunks.append(str(response.content or ""))
+                break
+
+            response = await self.evidence_model_ssh.ainvoke(messages)
+            messages.append(response)
+            tool_calls = getattr(response, "tool_calls", None) or []
+            if not tool_calls:
+                chunks.append(str(response.content or ""))
+                break
+
+            tool_messages = await self._execute_tool_calls(
+                tool_calls,
+                framework_id=evidence_fw,
+                req_id=evidence_req,
+                store=store,
+                has_cmdb=False,
+            )
+            messages.extend(tool_messages)
+            for tm in tool_messages:
+                tool_idx += 1
+                text = str(tm.content or "")
+                raw[f"tool_{tool_idx}_{tm.name or 'ssh'}"] = text
+                chunks.append(f"[{tm.name}] {text}")
+
+        evidence = "\n---\n".join(c.strip() for c in chunks if c and c.strip())
+        evidence = truncate_text(
+            evidence,
+            self.settings.max_tool_output_chars * 2,
+            "host_facts_evidence",
+        )
+
+        fill_messages = [
+            SystemMessage(content=HOST_FACTS_FILL_SYSTEM_PROMPT),
+            HumanMessage(
+                content=HOST_FACTS_FILL_PROMPT.format(
+                    ssh_host=ssh_host or "(unknown)",
+                    evidence=evidence or "(no evidence collected)",
+                )
+            ),
+        ]
+        try:
+            fill_response = await self.fill_model.ainvoke(fill_messages)
+            payload = _extract_json(str(fill_response.content or ""))
+        except Exception as exc:  # noqa: BLE001
+            payload = {"error": f"{type(exc).__name__}: {exc}"}
+
+        facts = parse_host_facts_json(payload, ssh_host=ssh_host, raw=raw)
+        facts = merge_facts_from_raw(facts, raw)
+        if not facts.ssh_host:
+            facts.ssh_host = ssh_host
+        if not facts.collected_at:
+            from datetime import datetime, timezone
+
+            facts.collected_at = datetime.now(timezone.utc).isoformat()
+        return facts
 
     async def collect_host_facts(self, state: AuditorState) -> dict[str, Any]:
         """Gather hostname/OS/software/disk/RAM/CPU; compare NetBox; refresh INVENTORY.md."""
@@ -516,7 +749,12 @@ class AuditorGraph:
         facts = None
 
         if has_access and self.settings.ssh_host:
-            facts = await collect_host_facts_ssh()
+            store = self._store_from_state(state)
+            facts = await self._collect_host_facts_llm(
+                store=store,
+                host_id=host_id,
+                user_request=str(state.get("user_request") or ""),
+            )
             nb_device = None
             if has_cmdb and facts.hostname and not facts.error:
                 nb_device = await fetch_netbox_device_by_name(
@@ -532,7 +770,6 @@ class AuditorGraph:
                 # Already embedded in facts_md; keep a short flag for meta
                 drift_md = facts_md
 
-            store = self._store_from_state(state)
             if store is not None and facts is not None:
                 if host_id:
                     store.host_segment = host_id
@@ -709,9 +946,18 @@ class AuditorGraph:
         has_cmdb = bool(state.get("has_cmdb") or (state.get("intake") or {}).get("has_cmdb"))
         limit = max(1, self.settings.max_parallel_assessments)
         sem = asyncio.Semaphore(limit)
+        thread_hint = str(state.get("thread_id") or "")
+        emit_phase(
+            f"Assessing {len(pending)} requirement(s) for `{framework_id}` "
+            f"(concurrency={limit})…",
+            framework_id=framework_id,
+        )
 
         async def _worker(req_id: str) -> Finding:
             async with sem:
+                emit_req_status(
+                    req_id, "started", framework_id=framework_id, text=f"Assessing `{req_id}`…"
+                )
                 try:
                     special = self._deterministic_it_audit_finding(
                         req_id=req_id,
@@ -737,8 +983,13 @@ class AuditorGraph:
                             store.write_finding(
                                 framework_id, req_id, special.model_dump()
                             )
+                        emit_req_status(
+                            req_id,
+                            special.status,
+                            framework_id=framework_id,
+                        )
                         return special
-                    return await self._fill_requirement_cells(
+                    finding = await self._fill_requirement_cells(
                         req_id=req_id,
                         requirement=requirements[req_id],
                         user_request=user_request,
@@ -747,6 +998,28 @@ class AuditorGraph:
                         report_language=report_lang,
                         has_cmdb=has_cmdb,
                     )
+                    emit_req_status(
+                        req_id,
+                        finding.status,
+                        framework_id=framework_id,
+                    )
+                    return finding
+                except asyncio.CancelledError:
+                    if store is not None and thread_hint:
+                        remaining = [
+                            rid
+                            for rid in pending
+                            if rid not in (state.get("findings") or {})
+                        ]
+                        write_run_status(
+                            self.settings.evidence_dir,
+                            store.run_id,
+                            status="interrupted",
+                            thread_id=thread_hint,
+                            pending_ids=remaining,
+                            framework_id=framework_id,
+                        )
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     req = requirements.get(req_id)
                     finding = Finding(
@@ -765,10 +1038,42 @@ class AuditorGraph:
                             req_id,
                             finding.model_dump(),
                         )
+                    emit_req_status(
+                        req_id, "error", framework_id=framework_id, text=str(exc)[:200]
+                    )
                     return finding
 
         work_ids = [rid for rid in pending if rid in requirements]
-        findings_list = await asyncio.gather(*[_worker(rid) for rid in work_ids])
+        # Finish as completed so disk findings survive mid-run cancel.
+        tasks = {asyncio.create_task(_worker(rid)): rid for rid in work_ids}
+        findings_list: list[Finding] = []
+        try:
+            for coro in asyncio.as_completed(tasks):
+                findings_list.append(await coro)
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if store is not None:
+                done_ids = {f.requirement_id for f in findings_list}
+                # Also pick up any findings already on disk from cancelled workers.
+                for rid in work_ids:
+                    if rid in done_ids:
+                        continue
+                    raw = store.load_finding(framework_id, rid)
+                    if raw:
+                        done_ids.add(rid)
+                remaining = [rid for rid in work_ids if rid not in done_ids]
+                write_run_status(
+                    self.settings.evidence_dir,
+                    store.run_id,
+                    status="interrupted",
+                    thread_id=thread_hint,
+                    pending_ids=remaining,
+                    framework_id=framework_id,
+                )
+            raise
+
         new_findings = {f.requirement_id: f for f in findings_list}
 
         # Keep recoverable failures in pending_ids for the reconnect cycle.
@@ -874,18 +1179,43 @@ class AuditorGraph:
             "prompt": prompt,
         }
 
-        decision = parse_hitl_decision(interrupt(payload))
-        while decision.action == "unknown":
+        raw_reply = interrupt(payload)
+        decision = await interpret_hitl_decision(
+            raw_reply,
+            llm=self.fill_model,
+            requirement_id=req_id,
+            requirement_title=requirement.title,
+            why=finding.evidence or finding.notes or "",
+            candidates=candidates,
+        )
+        if decision.action == "unknown":
             retry_prompt = (
-                "I didn't understand that reply.\n\n"
+                "I didn't understand that reply "
+                "(and the model could not classify it).\n\n"
                 "Please answer with **skip**, **retry**, **skip all**, or **retry all**.\n\n"
                 f"{prompt}"
             )
-            decision = parse_hitl_decision(
-                interrupt({**payload, "prompt": retry_prompt})
+            raw_reply = interrupt({**payload, "prompt": retry_prompt})
+            decision = await interpret_hitl_decision(
+                raw_reply,
+                llm=self.fill_model,
+                requirement_id=req_id,
+                requirement_title=requirement.title,
+                why=finding.evidence or finding.notes or "",
+                candidates=candidates,
+            )
+        if decision.action == "unknown":
+            # Last resort: continue the audit rather than deadlocking the chat.
+            decision = HitlDecision(
+                action="skip_all", raw=decision.raw, source="llm"
             )
 
         skipped = list(state.get("hitl_skipped") or [])
+        via = (
+            " (LLM interpreted reply)"
+            if decision.source == "llm"
+            else ""
+        )
 
         if decision.action == "skip_all":
             updates: dict[str, Finding] = {}
@@ -904,7 +1234,8 @@ class AuditorGraph:
                 "messages": [
                     AIMessage(
                         content=(
-                            f"Operator skipped {len(candidates)} failed requirement(s)."
+                            f"Operator skipped {len(candidates)} failed "
+                            f"requirement(s){via}."
                         ),
                         name="auditor",
                     )
@@ -920,7 +1251,7 @@ class AuditorGraph:
                     AIMessage(
                         content=(
                             f"Operator requested retry for {len(candidates)} "
-                            "failed requirement(s)."
+                            f"failed requirement(s){via}."
                         ),
                         name="auditor",
                     )
@@ -942,7 +1273,7 @@ class AuditorGraph:
                 "awaiting_hitl": False,
                 "messages": [
                     AIMessage(
-                        content=f"Operator skipped `{req_id}`.",
+                        content=f"Operator skipped `{req_id}`{via}.",
                         name="auditor",
                     )
                 ],
@@ -955,7 +1286,7 @@ class AuditorGraph:
             "awaiting_hitl": False,
             "messages": [
                 AIMessage(
-                    content=f"Operator requested retry for `{req_id}`.",
+                    content=f"Operator requested retry for `{req_id}`{via}.",
                     name="auditor",
                 )
             ],
@@ -1230,6 +1561,13 @@ class AuditorGraph:
             name = tc.get("name") or ""
             args = tc.get("args") or {}
             call_id = tc.get("id") or name
+            emit_tool_call(
+                name,
+                args,
+                call_id=str(call_id),
+                requirement_id=req_id,
+                framework_id=framework_id,
+            )
             error: str | None = None
             full_result = ""
             if not has_cmdb and name.startswith("netbox"):
@@ -1258,6 +1596,14 @@ class AuditorGraph:
                         full_result = f"Tool error: {type(exc).__name__}: {exc}"
                         error = full_result
                         content = full_result
+            emit_tool_result(
+                name,
+                full_result,
+                call_id=str(call_id),
+                requirement_id=req_id,
+                framework_id=framework_id,
+                error=error,
+            )
             if store is not None and req_id:
                 store.write_tool_result(
                     framework_id,
@@ -1556,6 +1902,7 @@ class AuditorGraph:
             "evidence_run_dir": str(store.root),
             "intake_complete": False,
             "intake": {},
+            "thread_id": thread_id,
         }
         config = {"configurable": {"thread_id": thread_id}}
         result = await self.intake_graph.ainvoke(initial, config)
@@ -1614,6 +1961,7 @@ class AuditorGraph:
             "hitl_skipped": [],
             "awaiting_hitl": False,
             "intake_complete": True,
+            "thread_id": tid,
         }
         if intake_state:
             initial.update(
@@ -1665,7 +2013,7 @@ class AuditorGraph:
 
         if is_intake and values.get("intake_complete"):
             # Continue into framework audits using intake answers.
-            session = self._multi_sessions.pop(thread_id, None) or {}
+            session = self._forget_multi_session(thread_id) or {}
             user_req = session.get("user_text") or values.get("user_request") or user_text
             base_thread = session.get("base_thread") or thread_id.replace(":intake", "")
             run_id = (
@@ -1683,6 +2031,202 @@ class AuditorGraph:
 
         # If this thread was part of a multi-framework run, continue the queue.
         return await self._continue_multi_after_resume(thread_id, decorated)
+
+    async def acontinue(self, thread_id: str, *, run_id: str | None = None) -> dict[str, Any]:
+        """Resume an interrupted mid-assess (or HITL) run after disconnect/restart."""
+        emit_phase(f"Continuing audit from checkpoint (`{thread_id}`)…")
+        config = {"configurable": {"thread_id": thread_id}}
+        is_intake = ":intake" in thread_id or thread_id.endswith("intake")
+        graph = self.intake_graph if is_intake else self.graph
+
+        rid = run_id or ""
+        if not rid:
+            found = find_interrupted_run(self.settings.evidence_dir)
+            if found:
+                rid, meta = found
+                if not thread_id:
+                    thread_id = str(meta.get("continue_thread_id") or thread_id)
+            else:
+                # Fall back to thread meta on any run folder
+                rid = ""
+
+        if rid:
+            self._reload_multi_sessions(rid)
+            store = self._evidence_by_run.get(rid)
+            if store is None:
+                try:
+                    store = EvidenceStore.open_existing(self.settings.evidence_dir, rid)
+                    self._evidence_by_run[rid] = store
+                except Exception:  # noqa: BLE001
+                    store = None
+        else:
+            store = None
+
+        # Prefer LangGraph checkpoint if the graph still has work / interrupt.
+        try:
+            snap = await graph.aget_state(config)
+        except Exception:  # noqa: BLE001
+            snap = None
+
+        if snap is not None and (snap.next or (snap.tasks and any(
+            getattr(t, "interrupts", None) for t in (snap.tasks or [])
+        ))):
+            # Pending interrupt → treat as resume with continue/skip-all friendly text
+            interrupts = []
+            for task in snap.tasks or []:
+                interrupts.extend(list(getattr(task, "interrupts", None) or []))
+            if interrupts:
+                return await self.aresume(thread_id, "continue")
+            result = await graph.ainvoke(None, config)
+            values = (await graph.aget_state(config)).values or {}
+            run_id2 = values.get("evidence_run_id") or rid
+            if store is None and run_id2:
+                try:
+                    store = EvidenceStore.open_existing(
+                        self.settings.evidence_dir, str(run_id2)
+                    )
+                    self._evidence_by_run[store.run_id] = store
+                except Exception:  # noqa: BLE001
+                    pass
+            decorated = self._decorate_result(
+                result, thread_id=thread_id, store=store, intake=is_intake
+            )
+            if decorated.get("awaiting_hitl"):
+                return decorated
+            if rid:
+                write_run_status(
+                    self.settings.evidence_dir, str(run_id2 or rid), status="running"
+                )
+            return await self._continue_multi_after_resume(thread_id, decorated)
+
+        # Evidence fallback: rebuild pending_ids from disk and re-enter assess.
+        if not rid:
+            return {
+                "report": (
+                    "No interrupted audit checkpoint found. "
+                    "Start a new audit or reply from a message that still has "
+                    "`[AUDIT_CONTINUE:…]` / `[AUDIT_HITL:…]`."
+                ),
+                "awaiting_hitl": False,
+                "messages": [],
+            }
+
+        assert store is not None or rid
+        if store is None:
+            store = EvidenceStore.open_existing(self.settings.evidence_dir, rid)
+            self._evidence_by_run[rid] = store
+
+        meta = store.read_run_meta()
+        framework_id = str(
+            meta.get("framework_id")
+            or (thread_id.split(":")[-1] if ":" in thread_id else "")
+        )
+        host_id = str(meta.get("evidence_host_id") or "")
+        if host_id:
+            store.host_segment = host_id
+        # Resolve framework folder under host if needed
+        fw_key = f"{host_id}/{framework_id}" if host_id else framework_id
+        disk_findings = store.load_findings(fw_key)
+        if not disk_findings and framework_id:
+            disk_findings = store.load_findings(framework_id)
+
+        from auditor.checklist import load_checklist
+        from auditor.frameworks import get_framework
+
+        fw = get_framework(framework_id, self.settings.agents_dir)
+        if fw is None:
+            return {
+                "report": f"Cannot continue: framework `{framework_id}` not found.",
+                "awaiting_hitl": False,
+            }
+        checklist = load_checklist(fw.path)
+        done = set(disk_findings.keys())
+        pending = [rid_ for rid_ in checklist.ids() if rid_ not in done]
+        meta_pending = meta.get("pending_ids")
+        if isinstance(meta_pending, list) and meta_pending:
+            pending = [str(x) for x in meta_pending if str(x) not in done]
+
+        findings_objs: dict[str, Finding] = {}
+        for req_id, raw in disk_findings.items():
+            try:
+                findings_objs[req_id] = Finding.model_validate(raw)
+            except Exception:  # noqa: BLE001
+                continue
+
+        write_run_status(
+            self.settings.evidence_dir,
+            rid,
+            status="running",
+            thread_id=thread_id,
+            pending_ids=pending,
+            framework_id=framework_id,
+        )
+
+        if not pending:
+            # All REQs done — finalize via graph update + finalize node path
+            await graph.aupdate_state(
+                config,
+                {
+                    "findings": findings_objs,
+                    "pending_ids": [],
+                    "requirements": {r.id: r for r in checklist.requirements},
+                    "framework_id": framework_id,
+                    "framework_title": fw.title,
+                    "checklist_title": checklist.title,
+                    "evidence_run_id": rid,
+                    "evidence_run_dir": str(store.root),
+                    "evidence_host_id": host_id,
+                    "thread_id": thread_id,
+                    "user_request": str(meta.get("user_request") or "continue"),
+                    "intake_complete": True,
+                    "awaiting_hitl": False,
+                },
+                as_node="assess_parallel",
+            )
+            result = await graph.ainvoke(None, config)
+            decorated = self._decorate_result(
+                result, thread_id=thread_id, store=store
+            )
+            return await self._continue_multi_after_resume(thread_id, decorated)
+
+        await graph.aupdate_state(
+            config,
+            {
+                "findings": findings_objs,
+                "pending_ids": pending,
+                "requirements": {r.id: r for r in checklist.requirements},
+                "framework_id": framework_id,
+                "framework_title": fw.title,
+                "checklist_title": checklist.title,
+                "evidence_run_id": rid,
+                "evidence_run_dir": str(store.root),
+                "evidence_host_id": host_id,
+                "thread_id": thread_id,
+                "user_request": str(meta.get("user_request") or "continue"),
+                "intake_complete": True,
+                "awaiting_hitl": False,
+                "retry_count": 0,
+                "hitl_skipped": list(meta.get("hitl_skipped") or []),
+            },
+            as_node="load_framework",
+        )
+        result = await graph.ainvoke(None, config)
+        decorated = self._decorate_result(result, thread_id=thread_id, store=store)
+        if decorated.get("awaiting_hitl"):
+            return decorated
+        write_run_status(self.settings.evidence_dir, rid, status="completed")
+        return await self._continue_multi_after_resume(thread_id, decorated)
+
+    def interrupted_continue_message(self, thread_id: str, run_id: str) -> str:
+        """Build operator-facing interrupt message with continue marker."""
+        return format_continue_assistant_message(
+            (
+                "## Audit interrupted\n\n"
+                f"Run `{run_id}` stopped before all requirements finished.\n"
+                "Reply **continue** (or **продолжи**) to resume from the last checkpoint."
+            ),
+            thread_id,
+        )
 
     async def _discover_inventory_hosts(
         self,
@@ -1707,7 +2251,11 @@ class AuditorGraph:
         for target in targets:
             with bind_ssh_target(target):
                 self.settings = get_settings()
-                facts = await collect_host_facts_ssh()
+                facts = await self._collect_host_facts_llm(
+                    store=store,
+                    host_id=target.slug,
+                    user_request=str(intake.get("client_name") or ""),
+                )
             facts.ssh_host = target.host
             host_base = store.host_root(target.slug)
             write_host_facts_json(host_base / "host_facts.json", facts, [])
@@ -1893,7 +2441,7 @@ class AuditorGraph:
             key = _job_key(target, fw)
             fw_tid = _thread_id(target, fw)
             remaining = [_job_key(t, f) for t, _, f in jobs[index + 1 :]]
-            self._multi_sessions[fw_tid] = {
+            self._remember_multi_session(fw_tid, {
                 "base_thread": base_thread,
                 "run_id": run_id,
                 "user_text": user_text,
@@ -1921,7 +2469,7 @@ class AuditorGraph:
                 "completed": list(completed),
                 "intake_state": intake_state,
                 "plan_md": plan_md,
-            }
+            })
             result = await self.arun_one(
                 user_text,
                 framework_id=fw.id,
@@ -1936,7 +2484,7 @@ class AuditorGraph:
                 preamble = f"{plan_md}\n{prefix}" if plan_md else prefix
                 result["report"] = f"{preamble}{result.get('report') or ''}"
                 return result
-            self._multi_sessions.pop(fw_tid, None)
+            self._forget_multi_session(fw_tid)
             title = fw.title if target is None else f"{target.host} — {fw.title}"
             completed.append((key, title, result.get("report") or ""))
 
@@ -1954,7 +2502,7 @@ class AuditorGraph:
         thread_id: str,
         finished: dict[str, Any],
     ) -> dict[str, Any]:
-        session = self._multi_sessions.pop(thread_id, None)
+        session = self._forget_multi_session(thread_id)
         if not session:
             return finished
 
@@ -2010,7 +2558,7 @@ class AuditorGraph:
                 else f"{base_thread}:{next_id}"
             )
             ssh_target = _target_from_job(nxt_job)
-            self._multi_sessions[next_tid] = {
+            self._remember_multi_session(next_tid, {
                 "base_thread": base_thread,
                 "run_id": run_id,
                 "user_text": user_text,
@@ -2024,7 +2572,7 @@ class AuditorGraph:
                 "completed": completed,
                 "intake_state": intake_state,
                 "plan_md": plan_md,
-            }
+            })
             nxt = await self.arun_one(
                 user_text,
                 framework_id=next_id,
@@ -2046,7 +2594,7 @@ class AuditorGraph:
         next_fw = get_framework(next_id, self.settings.agents_dir)
         title = next_fw.title if next_fw else next_id
         next_tid = f"{base_thread}:{next_id}"
-        self._multi_sessions[next_tid] = {
+        self._remember_multi_session(next_tid, {
             "base_thread": base_thread,
             "run_id": run_id,
             "user_text": user_text,
@@ -2058,7 +2606,7 @@ class AuditorGraph:
             "completed": completed,
             "intake_state": intake_state,
             "plan_md": plan_md,
-        }
+        })
         nxt = await self.arun_one(
             user_text,
             framework_id=next_id,
@@ -2253,11 +2801,11 @@ class AuditorGraph:
 
         if self.settings.intake_enabled:
             intake_tid = f"{base_thread}:intake"
-            self._multi_sessions[intake_tid] = {
+            self._remember_multi_session(intake_tid, {
                 "base_thread": base_thread,
                 "run_id": run_id,
                 "user_text": user_text,
-            }
+            })
             intake_result = await self.arun_intake(
                 user_text,
                 run_id=run_id,
@@ -2271,7 +2819,7 @@ class AuditorGraph:
                 {"configurable": {"thread_id": intake_tid}}
             )
             intake = (snap.values or {}).get("intake") or {}
-            self._multi_sessions.pop(intake_tid, None)
+            self._forget_multi_session(intake_tid)
             return await self._start_frameworks_after_intake(
                 user_text=user_text,
                 base_thread=base_thread,
@@ -2304,7 +2852,7 @@ class AuditorGraph:
             for index, fw in enumerate(selected):
                 fw_tid = f"{base_thread}:{fw.id}"
                 remaining = [f.id for f in selected[index + 1 :]]
-                self._multi_sessions[fw_tid] = {
+                self._remember_multi_session(fw_tid, {
                     "base_thread": base_thread,
                     "run_id": run_id,
                     "user_text": user_text,
@@ -2312,7 +2860,7 @@ class AuditorGraph:
                     "framework_title": fw.title,
                     "remaining": remaining,
                     "completed": list(completed),
-                }
+                })
                 result = await self.arun_one(
                     user_text,
                     framework_id=fw.id,
@@ -2323,7 +2871,7 @@ class AuditorGraph:
                     prefix = self._multi_progress_preamble(completed, fw.id)
                     result["report"] = f"{prefix}{result.get('report') or ''}"
                     return result
-                self._multi_sessions.pop(fw_tid, None)
+                self._forget_multi_session(fw_tid)
                 completed.append((fw.id, fw.title, result.get("report") or ""))
             return await self._merge_multi_reports(
                 completed,
@@ -2361,3 +2909,10 @@ def get_auditor_graph() -> AuditorGraph:
     if _graph is None:
         _graph = AuditorGraph()
     return _graph
+
+
+async def get_auditor_graph_ready() -> AuditorGraph:
+    """Return the singleton after durable Sqlite checkpointer setup."""
+    graph = get_auditor_graph()
+    await graph.ensure_async_checkpointer()
+    return graph

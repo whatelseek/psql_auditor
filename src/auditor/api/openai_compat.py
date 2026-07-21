@@ -30,11 +30,16 @@ from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 
 from auditor.config import get_settings
-from auditor.graph import get_auditor_graph
-from auditor.hitl import extract_hitl_thread_id
-from auditor.intake import extract_intake_thread_id
+from auditor.graph import get_auditor_graph_ready
+from auditor.hitl import is_continue_reply, resolve_pause_resume
 from auditor.intent import classify_intent
+from auditor.progress import ProgressSink, bind_progress_sink
+from auditor.api.stream_progress import (
+    chat_progress_chunks,
+    responses_progress_events,
+)
 from auditor.report_archive import archive_filename, verify_download_token
+from auditor.session_store import find_interrupted_run
 
 router = APIRouter(prefix="/v1")
 
@@ -159,6 +164,7 @@ async def _stream_responses_audit(
     seq = 0
     message_id = f"msg_{uuid.uuid4().hex[:20]}"
     created_at = int(time.time())
+    progress_q: asyncio.Queue[Any] = asyncio.Queue()
 
     def _next() -> int:
         nonlocal seq
@@ -185,35 +191,6 @@ async def _stream_responses_audit(
             "sequence_number": _next(),
         }
     )
-
-    # Keep the SSE socket alive while the (often long) audit runs.
-    run_task = asyncio.create_task(_run_or_resume(auditor, body))
-    while not run_task.done():
-        try:
-            await asyncio.wait_for(asyncio.shield(run_task), timeout=15.0)
-        except TimeoutError:
-            yield _sse_responses_event(
-                {
-                    "type": "response.in_progress",
-                    "response": empty,
-                    "sequence_number": _next(),
-                }
-            )
-
-    try:
-        result = run_task.result()
-        content = result.get("report") or _last_ai_text(result.get("messages") or [])
-        if result.get("awaiting_intake"):
-            prefix = "Paused for intake — reply to continue the questionnaire.\n\n"
-            content = f"{prefix}{content}"
-        elif result.get("awaiting_hitl"):
-            prefix = "Paused for your decision (skip / retry).\n\n"
-            content = f"{prefix}{content}"
-        if not content:
-            content = "Audit finished (no report captured)."
-    except Exception as exc:  # noqa: BLE001
-        content = f"Audit error: {exc}"
-
     yield _sse_responses_event(
         {
             "type": "response.output_item.added",
@@ -238,6 +215,82 @@ async def _stream_responses_audit(
             "sequence_number": _next(),
         }
     )
+
+    sink = ProgressSink()
+
+    async def _runner() -> dict[str, Any]:
+        with bind_progress_sink(sink):
+            try:
+                return await _run_or_resume(auditor, body)
+            finally:
+                sink.close()
+
+    run_task = asyncio.create_task(_runner())
+    # Shield so client disconnect does not cancel the audit mid-assess.
+    shielded = asyncio.ensure_future(asyncio.shield(run_task))
+
+    async def _pump_progress() -> None:
+        while True:
+            event = await sink.queue.get()
+            await progress_q.put(event)
+            if event is None:
+                break
+
+    pump = asyncio.create_task(_pump_progress())
+
+    content = ""
+    try:
+        while True:
+            if shielded.done() and progress_q.empty():
+                # Drain any last events
+                pass
+            try:
+                event = await asyncio.wait_for(progress_q.get(), timeout=15.0)
+            except TimeoutError:
+                yield _sse_responses_event(
+                    {
+                        "type": "response.in_progress",
+                        "response": empty,
+                        "sequence_number": _next(),
+                    }
+                )
+                if shielded.done() and progress_q.empty():
+                    break
+                continue
+            if event is None:
+                break
+            for ev in responses_progress_events(
+                event,
+                response_id=response_id,
+                seq_fn=_next,
+                message_id=message_id,
+            ):
+                yield _sse_responses_event(ev)
+
+        await pump
+        result = await shielded
+        content = result.get("report") or _last_ai_text(result.get("messages") or [])
+        if result.get("awaiting_intake"):
+            content = (
+                "Paused for intake — reply to continue the questionnaire.\n\n"
+                + (content or "")
+            )
+        elif result.get("awaiting_hitl"):
+            content = (
+                "Paused for your decision (skip / retry).\n\n" + (content or "")
+            )
+        if not content:
+            content = "Audit finished (no report captured)."
+    except Exception as exc:  # noqa: BLE001
+        if not run_task.done():
+            # Keep orphan running for continue-from-checkpoint
+            tid = ""
+            try:
+                # best-effort: leave task in auditor orphan map if thread known later
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+        content = f"Audit error: {exc}"
 
     chunk_size = 400
     for i in range(0, len(content), chunk_size):
@@ -427,14 +480,23 @@ async def download_archive(
 
 
 async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]:
-    """Start audit, follow-up, ad-hoc command run, or resume intake/HITL."""
+    """Start audit, follow-up, ad-hoc command run, or resume intake/HITL/continue."""
     user_text = _latest_user_text(body.messages)
-    intake_thread = extract_intake_thread_id(body.messages)
-    if intake_thread:
-        return await auditor.aresume(intake_thread, user_text)
-    hitl_thread = extract_hitl_thread_id(body.messages)
-    if hitl_thread:
-        return await auditor.aresume(hitl_thread, user_text)
+    paused = resolve_pause_resume(body.messages)
+    if paused:
+        kind, thread_id = paused
+        if kind == "continue":
+            return await auditor.acontinue(thread_id)
+        return await auditor.aresume(thread_id, user_text)
+
+    # Free-text continue when an interrupted run exists (no marker in history).
+    if is_continue_reply(user_text):
+        found = find_interrupted_run(get_settings().evidence_dir)
+        if found:
+            run_id, meta = found
+            tid = str(meta.get("continue_thread_id") or meta.get("thread_id") or "")
+            if tid:
+                return await auditor.acontinue(tid, run_id=run_id)
 
     thread_id = None
     if body.user:
@@ -471,7 +533,7 @@ async def chat_completions(
     settings = get_settings()
     model = body.model or settings.model_id
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    auditor = get_auditor_graph()
+    auditor = await get_auditor_graph_ready()
 
     if body.stream:
         return StreamingResponse(
@@ -514,7 +576,7 @@ async def responses_api(
         temperature=body.temperature,
         user=body.user,
     )
-    auditor = get_auditor_graph()
+    auditor = await get_auditor_graph_ready()
     response_id = f"resp_{uuid.uuid4().hex[:24]}"
 
     if body.stream:
@@ -558,20 +620,25 @@ async def _stream_audit(
     """Stream an audit (or intake/HITL resume) as OpenAI-compatible SSE chunks."""
     settings = get_settings()
     user_text = _latest_user_text(body.messages)
-    intake_thread = extract_intake_thread_id(body.messages)
-    hitl_thread = extract_hitl_thread_id(body.messages)
+    paused = resolve_pause_resume(body.messages)
 
     yield _sse_chunk(None, model, completion_id)
     intent = classify_intent(user_text, agents_dir=settings.agents_dir)
-    if intake_thread:
+    if paused and paused[0] == "intake":
         yield _sse_chunk(
-            f"Continuing pre-audit intake (`{intake_thread}`)…\n\n",
+            f"Continuing pre-audit intake (`{paused[1]}`)…\n\n",
             model,
             completion_id,
         )
-    elif hitl_thread:
+    elif paused and paused[0] == "hitl":
         yield _sse_chunk(
-            f"Resuming paused audit (`{hitl_thread}`)…\n\n",
+            f"Resuming paused audit (`{paused[1]}`)…\n\n",
+            model,
+            completion_id,
+        )
+    elif paused and paused[0] == "continue":
+        yield _sse_chunk(
+            f"Continuing interrupted audit (`{paused[1]}`)…\n\n",
             model,
             completion_id,
         )
@@ -600,7 +667,6 @@ async def _stream_audit(
             completion_id,
         )
     elif settings.intake_enabled:
-        # Do not announce frameworks before intake finishes.
         yield _sse_chunk(
             "Starting pre-audit intake…\n\n",
             model,
@@ -625,8 +691,55 @@ async def _stream_audit(
             yield "data: [DONE]\n\n"
             return
 
+    sink = ProgressSink()
+    progress_q: asyncio.Queue[Any] = asyncio.Queue()
+    tool_index = 0
+
+    async def _runner() -> dict[str, Any]:
+        with bind_progress_sink(sink):
+            try:
+                return await _run_or_resume(auditor, body)
+            finally:
+                sink.close()
+
+    run_task = asyncio.create_task(_runner())
+    shielded = asyncio.ensure_future(asyncio.shield(run_task))
+
+    async def _pump() -> None:
+        while True:
+            event = await sink.queue.get()
+            await progress_q.put(event)
+            if event is None:
+                break
+
+    pump = asyncio.create_task(_pump())
+    final_report = ""
+
     try:
-        result = await _run_or_resume(auditor, body)
+        while True:
+            try:
+                event = await asyncio.wait_for(progress_q.get(), timeout=15.0)
+            except TimeoutError:
+                # Keepalive whitespace so proxies don't idle-out.
+                yield _sse_chunk(" ", model, completion_id)
+                if shielded.done() and progress_q.empty():
+                    break
+                continue
+            if event is None:
+                break
+            nonlocal_chunks = chat_progress_chunks(
+                event,
+                model=model,
+                completion_id=completion_id,
+                tool_index=tool_index,
+            )
+            if event.kind == "tool_call":
+                tool_index += 1
+            for chunk in nonlocal_chunks:
+                yield chunk
+
+        await pump
+        result = await shielded
         final_report = result.get("report") or ""
         if result.get("awaiting_intake") or (
             result.get("awaiting_hitl")

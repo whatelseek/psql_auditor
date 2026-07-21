@@ -10,6 +10,9 @@ from auditor.intake import (
     parse_audit_type,
     parse_client_name,
     parse_yes_no,
+    resolve_audit_type,
+    resolve_client_name,
+    resolve_yes_no,
 )
 
 
@@ -19,6 +22,30 @@ def test_parse_yes_no():
     assert parse_yes_no("no") == "no"
     assert parse_yes_no("нет") == "no"
     assert parse_yes_no("maybe") == "unknown"
+    assert parse_yes_no("nayn") == "unknown"
+
+
+def test_resolve_yes_no_llm_payload():
+    # Typo that regex rejects — LLM JSON wins
+    assert resolve_yes_no("nayn", {"answer": "no"}) == "no"
+    assert resolve_yes_no("yep!", {"answer": "yes"}) == "yes"
+    assert resolve_yes_no("maybe", {"answer": "unknown"}) == "unknown"
+    # Regex fallback when no / bad payload
+    assert resolve_yes_no("no", None) == "no"
+    assert resolve_yes_no("yes", {}) == "yes"
+    # LLM unknown but regex clear
+    assert resolve_yes_no("no", {"answer": "unknown"}) == "no"
+
+
+def test_resolve_client_and_audit_type_llm():
+    assert resolve_client_name("whatever", {"client_name": "Acme Corp"}) == "Acme Corp"
+    assert resolve_client_name("Client: Acme", None) == "Acme"
+    assert (
+        resolve_audit_type("please do cyber stuff", {"audit_type": "cybersecurity"})
+        == "cybersecurity"
+    )
+    assert resolve_audit_type("both", {"audit_type": None}) == "both"
+    assert resolve_audit_type("garbage", {"audit_type": None}) is None
 
 
 def test_parse_client_and_slug():

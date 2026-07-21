@@ -1,4 +1,4 @@
-"""Deterministic host inventory facts via SSH + CMDB drift helpers."""
+"""Host inventory facts: LLM gather + parsers, CMDB drift, inventory helpers."""
 
 from __future__ import annotations
 
@@ -121,76 +121,152 @@ def parse_listening_ports(stdout: str) -> list[int]:
     return ports
 
 
-async def collect_host_facts_ssh() -> HostFacts:
-    """Run fixed SSH commands and parse hostname / OS / software / capacity."""
-    from auditor.tools.ssh import ssh_run
-    from auditor.config import get_settings
+def parse_host_facts_json(
+    payload: dict[str, Any] | None,
+    *,
+    ssh_host: str = "",
+    raw: dict[str, str] | None = None,
+) -> HostFacts:
+    """Build ``HostFacts`` from an LLM fill JSON object."""
+    data = payload if isinstance(payload, dict) else {}
+    ips_raw = data.get("ips") or []
+    if isinstance(ips_raw, str):
+        ips = parse_ips(ips_raw)
+    else:
+        ips = parse_ips(" ".join(str(p) for p in ips_raw if str(p).strip()))
 
-    settings = get_settings()
-    facts = HostFacts(
+    binaries_raw = data.get("binaries") or []
+    if isinstance(binaries_raw, str):
+        binaries = [
+            p.strip().lower()
+            for p in re.split(r"[\s,;]+", binaries_raw)
+            if p.strip()
+        ]
+    else:
+        binaries = [str(b).strip().lower() for b in binaries_raw if str(b).strip()]
+
+    ports: list[int] = []
+    ports_raw = data.get("listening_ports") or []
+    if isinstance(ports_raw, (str, int)):
+        ports_raw = [ports_raw]
+    for p in ports_raw:
+        try:
+            port = int(p)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= port <= 65535 and port not in ports:
+            ports.append(port)
+
+    os_id = str(data.get("os_id") or "").strip().lower()
+    return HostFacts(
+        hostname=str(data.get("hostname") or "").strip(),
+        ips=ips,
+        disk=str(data.get("disk") or "").strip(),
+        ram=str(data.get("ram") or "").strip(),
+        cpu=str(data.get("cpu") or "").strip(),
+        os_id=os_id,
+        os_version_id=str(data.get("os_version_id") or "").strip(),
+        os_pretty_name=str(data.get("os_pretty_name") or "").strip(),
+        binaries=binaries,
+        listening_ports=ports,
+        raw=dict(raw or {}),
         collected_at=datetime.now(timezone.utc).isoformat(),
-        ssh_host=str(settings.ssh_host or ""),
+        error=str(data.get("error") or "").strip(),
+        ssh_host=ssh_host or str(data.get("ssh_host") or "").strip(),
     )
-    commands = {
-        "hostname": "hostname -f 2>/dev/null || hostname; hostnamectl 2>/dev/null | head -n 20",
-        "ips": "hostname -I 2>/dev/null; ip -4 -o addr show 2>/dev/null | awk '{print $4}'",
-        "disk": "df -h 2>/dev/null | head -n 20",
-        "ram": "free -m 2>/dev/null; echo '---'; grep -E 'MemTotal|MemAvailable' /proc/meminfo 2>/dev/null",
-        "cpu": "nproc 2>/dev/null; lscpu 2>/dev/null | grep -E 'Model name|CPU\\(s\\)|Thread|Core' | head -n 20",
-        "os": (
-            "if [ -f /etc/os-release ]; then cat /etc/os-release; "
-            "elif command -v powershell >/dev/null 2>&1; then "
-            "powershell -NoProfile -Command "
-            "\"Write-Output ('ID=windows'); Write-Output ('PRETTY_NAME=' + [System.Environment]::OSVersion.VersionString)\"; "
-            "elif command -v pwsh >/dev/null 2>&1; then "
-            "pwsh -NoProfile -Command "
-            "\"Write-Output ('ID=windows'); Write-Output ('PRETTY_NAME=' + [System.Environment]::OSVersion.VersionString)\"; "
-            "else uname -a; fi"
-        ),
-        "binaries": (
-            "for c in postgres psql docker nginx apache2 httpd; do "
-            "p=$(command -v \"$c\" 2>/dev/null || true); "
-            "echo \"$c=${p:-}\"; done"
-        ),
-        "ports": (
-            "ss -lnt 2>/dev/null | head -n 40 || "
-            "netstat -lnt 2>/dev/null | head -n 40 || true"
-        ),
-    }
-    try:
-        for key, cmd in commands.items():
-            result = await ssh_run.ainvoke({"command": cmd})
-            text = str(result or "")
-            facts.raw[key] = text
-            if text.lower().startswith("ssh error"):
-                facts.error = text
-                return facts
-        facts.hostname = parse_hostname(facts.raw.get("hostname", ""))
-        facts.ips = parse_ips(facts.raw.get("ips", ""))
-        facts.disk = facts.raw.get("disk", "").strip()
-        # Compact RAM / CPU one-liners for tables
-        ram_lines = [
-            ln
-            for ln in facts.raw.get("ram", "").splitlines()
-            if ln.strip() and not ln.lower().startswith("exit_code")
-        ]
-        facts.ram = " | ".join(ram_lines[:4])
-        cpu_lines = [
-            ln
-            for ln in facts.raw.get("cpu", "").splitlines()
-            if ln.strip() and not ln.lower().startswith("exit_code")
-        ]
-        facts.cpu = " | ".join(cpu_lines[:4])
-        os_id, os_ver, os_pretty = parse_os_release(facts.raw.get("os", ""))
-        if not os_id and "linux" in (facts.raw.get("os") or "").lower():
+
+
+def merge_facts_from_raw(facts: HostFacts, raw: dict[str, str] | None = None) -> HostFacts:
+    """Fill empty HostFacts fields using deterministic parsers on tool stdout.
+
+    Used when the LLM fill JSON is incomplete. ``raw`` keys may be semantic
+    (``hostname``, ``os``, …) or opaque (``tool_1``, …); for opaque blobs the
+    full concatenated text is also scanned.
+    """
+    blob_map = dict(raw or facts.raw or {})
+    facts.raw = blob_map
+    combined = "\n".join(str(v) for v in blob_map.values() if v)
+
+    if not facts.hostname:
+        facts.hostname = parse_hostname(
+            blob_map.get("hostname", "") or combined
+        )
+    if not facts.ips:
+        facts.ips = parse_ips(blob_map.get("ips", "") or combined)
+
+    if not facts.os_id or not facts.os_pretty_name:
+        os_src = blob_map.get("os", "") or combined
+        os_id, os_ver, os_pretty = parse_os_release(os_src)
+        if not os_id and "linux" in os_src.lower():
             os_id = "linux"
-        facts.os_id = os_id
-        facts.os_version_id = os_ver
-        facts.os_pretty_name = os_pretty
-        facts.binaries = parse_binaries_present(facts.raw.get("binaries", ""))
-        facts.listening_ports = parse_listening_ports(facts.raw.get("ports", ""))
-    except Exception as exc:  # noqa: BLE001
-        facts.error = f"{type(exc).__name__}: {exc}"
+        if not facts.os_id and os_id:
+            facts.os_id = os_id
+        if not facts.os_version_id and os_ver:
+            facts.os_version_id = os_ver
+        if not facts.os_pretty_name and os_pretty:
+            facts.os_pretty_name = os_pretty
+
+    if not facts.binaries:
+        facts.binaries = parse_binaries_present(
+            blob_map.get("binaries", "") or combined
+        )
+    if not facts.listening_ports:
+        facts.listening_ports = parse_listening_ports(
+            blob_map.get("ports", "") or combined
+        )
+
+    if not facts.disk and blob_map.get("disk"):
+        facts.disk = blob_map["disk"].strip()
+    elif not facts.disk and "Filesystem" in combined:
+        # Keep a short df-like slice when present in tool dumps
+        disk_lines = [
+            ln
+            for ln in combined.splitlines()
+            if ln.strip().startswith("Filesystem") or re.match(r"^/\S*", ln.strip())
+        ]
+        if disk_lines:
+            facts.disk = "\n".join(disk_lines[:20]).strip()
+
+    if not facts.ram:
+        ram_src = blob_map.get("ram", "")
+        if ram_src:
+            ram_lines = [
+                ln
+                for ln in ram_src.splitlines()
+                if ln.strip() and not ln.lower().startswith("exit_code")
+            ]
+            facts.ram = " | ".join(ram_lines[:4])
+        elif "MemTotal" in combined or "Mem:" in combined:
+            ram_lines = [
+                ln
+                for ln in combined.splitlines()
+                if "MemTotal" in ln or "MemAvailable" in ln or ln.strip().startswith("Mem:")
+            ]
+            facts.ram = " | ".join(ram_lines[:4])
+
+    if not facts.cpu:
+        cpu_src = blob_map.get("cpu", "")
+        if cpu_src:
+            cpu_lines = [
+                ln
+                for ln in cpu_src.splitlines()
+                if ln.strip() and not ln.lower().startswith("exit_code")
+            ]
+            facts.cpu = " | ".join(cpu_lines[:4])
+        elif "Model name" in combined or "nproc" in combined.lower():
+            cpu_lines = [
+                ln
+                for ln in combined.splitlines()
+                if "Model name" in ln or "CPU(s)" in ln or re.match(r"^\d+$", ln.strip())
+            ]
+            facts.cpu = " | ".join(cpu_lines[:4])
+
+    if not facts.error and "ssh error" in combined.lower():
+        for line in combined.splitlines():
+            if "ssh error" in line.lower():
+                facts.error = line.strip()
+                break
+
     return facts
 
 

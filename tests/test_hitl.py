@@ -11,7 +11,9 @@ from auditor.hitl import (
     build_hitl_prompt,
     extract_hitl_thread_id,
     format_hitl_assistant_message,
+    interpret_hitl_decision,
     parse_hitl_decision,
+    resolve_pause_resume,
 )
 from auditor.state import Finding
 
@@ -20,8 +22,58 @@ def test_parse_hitl_decision_variants():
     assert parse_hitl_decision("skip").action == "skip"
     assert parse_hitl_decision("Please retry").action == "retry"
     assert parse_hitl_decision("skip all").action == "skip_all"
+    assert parse_hitl_decision("**skip all**").action == "skip_all"
     assert parse_hitl_decision("retry all failed checks").action == "retry_all"
     assert parse_hitl_decision("maybe later").action == "unknown"
+
+
+def test_resolve_pause_resume_prefers_newest_hitl_over_old_intake():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "[AUDIT_INTAKE:audit-1:intake]\n_Paused for intake._",
+        },
+        {
+            "role": "assistant",
+            "content": format_hitl_assistant_message(
+                "Could not audit REQ-003", "audit-1:10.0.0.1:postgres_cis"
+            ),
+        },
+        {"role": "user", "content": "**skip all**"},
+    ]
+    assert resolve_pause_resume(messages) == (
+        "hitl",
+        "audit-1:10.0.0.1:postgres_cis",
+    )
+    assert extract_hitl_thread_id(messages) == "audit-1:10.0.0.1:postgres_cis"
+
+
+@pytest.mark.asyncio
+async def test_interpret_hitl_decision_uses_llm_when_unclear():
+    mock_llm = AsyncMock()
+    mock_llm.ainvoke = AsyncMock(
+        return_value=AIMessage(content="skip_all")
+    )
+    decision = await interpret_hitl_decision(
+        "продолжай без этих проверок",
+        llm=mock_llm,
+        requirement_id="REQ-003",
+        requirement_title="Local peer/trust",
+        why="hba_file missing",
+        candidates=["REQ-003", "REQ-005"],
+    )
+    assert decision.action == "skip_all"
+    assert decision.source == "llm"
+    mock_llm.ainvoke.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_interpret_hitl_decision_skips_llm_for_clear_skip():
+    mock_llm = AsyncMock()
+    decision = await interpret_hitl_decision("skip all", llm=mock_llm)
+    assert decision.action == "skip_all"
+    assert decision.source == "regex"
+    mock_llm.ainvoke.assert_not_called()
 
 
 def test_extract_hitl_thread_id_from_history():
@@ -114,6 +166,7 @@ async def test_hitl_skip_then_finalize(tmp_path: Path):
         max_parallel_assessments=2,
     )
     graph = AuditorGraph(settings=settings)
+    await graph.ensure_async_checkpointer()
 
     async def fake_fill(req_id, requirement, user_request, framework_id="", store=None):
         return Finding(
@@ -136,17 +189,17 @@ async def test_hitl_skip_then_finalize(tmp_path: Path):
         patch.object(graph, "fill_model", mock_llm),
     ):
         paused = await graph.arun_one(
-            "Audit Ubuntu CIS",
-            framework_id="ubuntu_cis",
-            thread_id="test-hitl-ubuntu",
+            "Audit PostgreSQL CIS",
+            framework_id="postgres_cis",
+            thread_id="test-hitl-postgres",
         )
 
         assert paused.get("awaiting_hitl") is True
         assert "Could not audit" in (paused.get("report") or "")
-        assert "[AUDIT_HITL:test-hitl-ubuntu]" in (paused.get("report") or "")
+        assert "[AUDIT_HITL:test-hitl-postgres]" in (paused.get("report") or "")
 
         # Skip all remaining failures in one HITL reply.
-        resumed = await graph.aresume("test-hitl-ubuntu", "skip all")
+        resumed = await graph.aresume("test-hitl-postgres", "skip all")
 
     assert resumed.get("awaiting_hitl") is False
     report = resumed.get("report") or ""

@@ -113,6 +113,10 @@ class Settings(BaseSettings):
     memory_learn: bool = True
     # Per-requirement command execution artifacts
     evidence_dir: Path = Field(default=Path("artifacts"))
+    # Durable LangGraph checkpointer (Sqlite) — survives agent restarts
+    checkpoint_path: Path = Field(
+        default=Path("artifacts/.checkpoints/auditor.sqlite")
+    )
     # Human-in-the-loop pause on failed REQs (skip / retry)
     hitl_enabled: bool = True
     # Zip report+evidence and link it in Open WebUI chat

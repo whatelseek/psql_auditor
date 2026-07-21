@@ -138,3 +138,128 @@ ADHOC_FORCE_PROMPT = """Tool budget exhausted. Summarize results already gathere
 Do not call more tools. Reply in Markdown.
 {language_instruction}
 """
+
+# --- Host facts discovery (SSH tools only → structured HostFacts JSON) ---
+
+HOST_FACTS_SYSTEM_PROMPT = """You gather live host inventory facts via SSH for framework selection.
+
+Rules:
+- Use ONLY ssh_run / ssh_read_file (Linux/Ubuntu; on Windows prefer powershell/pwsh).
+- Collect: hostname, OS identity (/etc/os-release or Windows equivalent), IPs,
+  CPU, RAM, disk summary, binaries relevant to audits (postgres, psql, docker,
+  nginx, apache2, httpd, …), and listening TCP ports.
+- Prefer 3–6 focused tool calls. Avoid huge dumps.
+- Do not invent values. If SSH fails, include "SSH error" in the summary.
+- When done, reply with compact plain-text evidence (key=value or short bullets).
+  Do NOT choose frameworks and do NOT write recommendations.
+"""
+
+HOST_FACTS_PROMPT = """Discover inventory facts on the current SSH target.
+
+Operator context (may be truncated):
+{user_request}
+
+SSH target hint: {ssh_host}
+
+After tools, reply with compact evidence only (key=value lines preferred).
+"""
+
+HOST_FACTS_FORCE_PROMPT = """Tool budget exhausted. Summarize host facts already gathered
+as compact key=value lines. Do not call tools.
+"""
+
+HOST_FACTS_FILL_SYSTEM_PROMPT = """You extract structured host inventory from tool evidence.
+
+Output ONLY a JSON object with these keys — nothing else:
+
+{{
+  "hostname": "",
+  "ips": [],
+  "os_id": "",
+  "os_version_id": "",
+  "os_pretty_name": "",
+  "binaries": [],
+  "listening_ports": [],
+  "cpu": "",
+  "ram": "",
+  "disk": "",
+  "error": ""
+}}
+
+Rules:
+- Do not invent facts not present in evidence.
+- os_id must be lowercase (e.g. ubuntu, debian, windows, rhel).
+- binaries: short names present on PATH (postgres, psql, docker, …), not full paths.
+- listening_ports: integers only.
+- If SSH/evidence failed, put the failure in "error" and leave other fields empty/default.
+"""
+
+HOST_FACTS_FILL_PROMPT = """Fill HostFacts JSON from this evidence.
+
+SSH target: {ssh_host}
+
+### Evidence (from tools; may be truncated)
+{evidence}
+
+Return JSON only with the HostFacts keys listed in the system prompt.
+"""
+
+# --- Intake answer interpretation (no tools; free-text → structured) ---
+
+INTAKE_INTERPRET_YES_NO_SYSTEM = """You interpret an operator's yes/no reply for a pre-audit questionnaire.
+
+Output ONLY JSON:
+{{"answer":"yes"}} or {{"answer":"no"}} or {{"answer":"unknown"}}
+
+Rules:
+- Map clear affirmatives (yes, y, да, есть, sure, ok, affirmative, …) → yes
+- Map clear negatives (no, n, nay, nope, нет, нету, negative, …) including typos
+  like "nayn" → no
+- If the reply is empty or genuinely ambiguous → unknown
+- Do not invent facts beyond the reply.
+"""
+
+INTAKE_INTERPRET_YES_NO_PROMPT = """Question context: {question_hint}
+
+Operator reply:
+{reply}
+
+Return JSON with key answer = yes|no|unknown.
+"""
+
+INTAKE_INTERPRET_CLIENT_SYSTEM = """You extract the client / organization name from an operator reply.
+
+Output ONLY JSON:
+{{"client_name":"..."}} or {{"client_name":""}}
+
+Rules:
+- Strip prefixes like "Client:", "клиент:", etc.
+- Return the organization/engagement name only.
+- Empty string if the reply has no usable name.
+"""
+
+INTAKE_INTERPRET_CLIENT_PROMPT = """Operator reply:
+{reply}
+
+Return JSON with key client_name.
+"""
+
+INTAKE_INTERPRET_AUDIT_TYPE_SYSTEM = """You map an operator reply to an audit domain.
+
+Output ONLY JSON:
+{{"audit_type":"it"}} or {{"audit_type":"cybersecurity"}} or {{"audit_type":"both"}}
+or {{"audit_type":null}}
+
+Rules:
+- IT / inventory / ит → it
+- CIS / cyber / cybersecurity / кибер → cybersecurity
+- both / оба / cis+it → both
+- Numbers: 1 or cyber → cybersecurity; 2 or it → it; 3 → both
+- null if unclear
+"""
+
+INTAKE_INTERPRET_AUDIT_TYPE_PROMPT = """Operator reply:
+{reply}
+
+Return JSON with key audit_type = it|cybersecurity|both|null.
+"""

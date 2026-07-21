@@ -93,6 +93,8 @@ class AuditorState(TypedDict, total=False):
     # Zip archive of report + evidence for chat download.
     archive_path: str
     archive_url: str
+    # LangGraph thread id (for interrupt / continue markers).
+    thread_id: str
 
 
 def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:

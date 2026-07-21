@@ -55,6 +55,8 @@ When a requirement fails after automatic session retries, the agent replies with
 
 Reply in the same chat. A marker `[AUDIT_HITL:<thread>]` ties the resume to the paused run. Set `HITL_ENABLED=false` to auto-finalize with `error` statuses instead.
 
+During long audits Open WebUI streams **live tool calls** and phase/reasoning deltas (SSH/MCP). If the chat disconnects mid-run, reply **continue** (or use `[AUDIT_CONTINUE:<thread>]`) — checkpoints live under `CHECKPOINT_PATH` (default `artifacts/.checkpoints/auditor.sqlite`) and survive agent container restarts.
+
 ### Audit ZIP in chat
 
 When the audit finishes, the agent:

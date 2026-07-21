@@ -177,5 +177,6 @@ container). Those keys must not appear in `docker-compose.yml`.
 ## Related
 
 - Framework drop-ins: [`agents/`](../agents/)
+- Import CIS Nessus `.audit`: [`cis-audit-import.md`](cis-audit-import.md) (`ubuntu_cis_24_l2`)
 - Evidence layout & ZIP delivery: [README — Evidence on disk](../README.md#evidence-on-disk)
 - Config keys: [`.env.example`](../.env.example) (`OPEN_WEBUI_*`, `PUBLIC_BASE_URL`, `SSH_*`, `PG_*`, …)
