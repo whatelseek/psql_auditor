@@ -9,7 +9,88 @@ Evidence files (tool stdout, `finding.json`, reports) stay on disk under
 gets a monotonic **session number** per client, and every stored check is tagged
 with that number.
 
-## Sessions
+## Sessions vs LangGraph checkpoints
+
+| Concept | Where | What it is |
+|---------|--------|------------|
+| **Audit session** (`#1`, `#2`, …) | Results Postgres (`RESULTS_DB_*`) | Operator-facing run id per client; used to list interrupted audits across many clients |
+| **LangGraph checkpoint** | Sqlite under `CHECKPOINT_PATH` | Internal graph state so **continue** can resume mid-assess / HITL after disconnect |
+
+You list and pick sessions in chat via the warehouse. You resume work with
+**continue** (which loads the checkpoint for that session’s thread). Asking
+about a “checkpoint” in free text is **not** a separate query — use session
+phrases below, then **continue**.
+
+## Chat phrases (Open WebUI)
+
+Intent matching is **phrase-based** (EN/RU patterns), not full free-form LLM
+routing. Prefer the examples below.
+
+### List sessions / which need continue
+
+Works when the message clearly mentions sessions (or “need continue”):
+
+```text
+Which sessions need continue?
+List audit sessions
+Show me sessions
+Show me audit sessions for Acme
+Interrupted sessions
+Какие сессии прерваны?
+Список сессий
+Сессии для продолжения
+Нужно продолжить
+```
+
+Optional client filter: add `for <Client>` / `для <Client>` (also used when
+continuing a numbered session).
+
+The reply is a markdown table (session #, client, status, framework, pending
+REQs, continue thread) plus copy-paste `[AUDIT_CONTINUE:…]` markers for
+interrupted rows.
+
+Requires `RESULTS_DB_ENABLED=true`. If the warehouse is off, the agent explains
+how to enable it.
+
+### Resume (same session — does not allocate a new number)
+
+```text
+continue
+resume
+продолжи
+далее
+continue session 3 for Acme
+продолжи сессию 3 для Acme
+```
+
+Or paste the marker from an interrupt / list-sessions reply:
+
+```text
+[AUDIT_CONTINUE:<thread_id>]
+```
+
+Resolution order for bare **continue**:
+
+1. Explicit `continue session N for Client` (warehouse)
+2. Newest **interrupted** warehouse session among known client folders
+3. Newest interrupted run on disk (`artifacts/*/meta.json` with `status=interrupted`)
+
+### What does **not** work today
+
+These fall through to a **new audit** (or other intents) because they are not
+matched as session-list / continue:
+
+```text
+What's the latest checkpoint?
+Show last checkpoint for Acme
+Where did we leave off?
+Статус чекпоинта
+```
+
+Use **List audit sessions** / **Which sessions need continue?** instead, then
+**continue** (or `continue session N for Client`).
+
+## Session lifecycle
 
 | Event | Warehouse action |
 |-------|------------------|
@@ -17,15 +98,6 @@ with that number.
 | Chat disconnect / cancel | status → `interrupted` (+ pending REQ ids, continue thread) |
 | Finalize / update report | host results + requirement cells written; status → `completed` |
 | Continue | resumes the **same** session (does not allocate a new number) |
-
-Ask in Open WebUI:
-
-```text
-Which sessions need continue?
-List audit sessions
-Какие сессии прерваны?
-continue session 3 for Acme
-```
 
 ## Layout
 
