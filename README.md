@@ -182,8 +182,9 @@ See [`docs/post-audit-followup.md`](docs/post-audit-followup.md).
 
 ## Results PostgreSQL warehouse
 
-Optionally dual-write filled checklist cells (status / observation / recommendation)
-to a per-client Postgres database. Evidence files stay on disk. See
+Optionally dual-write filled checklist cells to a per-client Postgres database and
+track **numbered audit sessions** (`#1`, `#2`, …). Evidence files stay on disk.
+Ask *which sessions need continue?* to list interrupted audits. See
 [`docs/results-database.md`](docs/results-database.md) (`RESULTS_DB_*`).
 
 ## Config

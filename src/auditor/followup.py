@@ -657,6 +657,13 @@ async def run_update_report(
         except ValueError:
             evidence_rel = str(store.root)
         client = str(meta.get("client_name") or store.run_id or "")
+        session_number = None
+        raw_sess = meta.get("results_session_number")
+        if raw_sess is not None:
+            try:
+                session_number = int(raw_sess)
+            except (TypeError, ValueError):
+                session_number = None
         await record_results_safe(
             settings,
             client_name=client,
@@ -668,6 +675,7 @@ async def run_update_report(
             evidence_relpath=evidence_rel,
             source="update_report",
             report_language=report_lang_code or None,
+            session_number=session_number,
         )
 
     if not completed:

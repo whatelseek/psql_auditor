@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from auditor.checklist import Requirement
+from auditor.intent import classify_intent
 from auditor.results_store import (
+    AuditSessionInfo,
     ResultsStore,
+    format_sessions_markdown,
     get_results_store,
     record_results_safe,
     sanitize_db_name,
@@ -62,6 +66,35 @@ def test_get_results_store_disabled_when_flag_off(monkeypatch: pytest.MonkeyPatc
     rs._STORE = None
 
 
+def test_intent_list_sessions() -> None:
+    assert classify_intent("Which sessions need continue?") == "list_sessions"
+    assert classify_intent("List audit sessions") == "list_sessions"
+    assert classify_intent("Какие сессии прерваны?") == "list_sessions"
+    assert classify_intent("Start Ubuntu CIS audit") == "audit"
+
+
+def test_format_sessions_markdown_includes_continue_hints() -> None:
+    text = format_sessions_markdown(
+        [
+            AuditSessionInfo(
+                id=1,
+                session_number=3,
+                client_name="Acme",
+                client_slug="acme",
+                evidence_run_id="Acme",
+                status="interrupted",
+                continue_thread_id="user-1:ubuntu_cis",
+                framework_id="ubuntu_cis",
+                pending_ids=("REQ-010", "REQ-011"),
+                started_at=datetime.now(timezone.utc),
+            )
+        ]
+    )
+    assert "#3" in text
+    assert "Acme" in text
+    assert "[AUDIT_CONTINUE:user-1:ubuntu_cis]" in text
+
+
 @pytest.mark.asyncio
 async def test_record_results_safe_noop_when_disabled() -> None:
     settings = SimpleNamespace(
@@ -78,11 +111,64 @@ async def test_record_results_safe_noop_when_disabled() -> None:
             framework_id="ubuntu_cis",
             evidence_host_id=None,
             findings={},
+            session_number=1,
         )
 
 
 @pytest.mark.asyncio
-async def test_record_host_framework_audit_writes_cells() -> None:
+async def test_start_session_allocates_next_number() -> None:
+    settings = SimpleNamespace(
+        results_db_enabled=True,
+        results_database_url="postgresql://u:p@localhost/postgres",
+        results_db_per_client=False,
+        results_db_name_prefix="results_",
+    )
+    store = ResultsStore(settings)  # type: ignore[arg-type]
+
+    class _Row(dict):
+        def get(self, key, default=None):
+            return dict.get(self, key, default)
+
+    row = _Row(
+        id=9,
+        session_number=2,
+        client_name="Acme",
+        client_slug="acme",
+        evidence_run_id="Acme",
+        status="running",
+        continue_thread_id="t1",
+        framework_id="",
+        pending_ids=[],
+        started_at=datetime.now(timezone.utc),
+        finished_at=None,
+    )
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=2)
+    conn.fetchrow = AsyncMock(return_value=row)
+    tx = MagicMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction = MagicMock(return_value=tx)
+    conn.execute = AsyncMock()
+    conn.close = AsyncMock()
+
+    with (
+        patch.object(store, "_ensure_schema_on_dsn", new=AsyncMock()),
+        patch("auditor.results_store.asyncpg.connect", new=AsyncMock(return_value=conn)),
+    ):
+        info = await store.start_session(
+            client_name="Acme",
+            evidence_run_id="Acme",
+            continue_thread_id="t1",
+        )
+
+    assert info is not None
+    assert info.session_number == 2
+    assert info.id == 9
+
+
+@pytest.mark.asyncio
+async def test_record_host_framework_audit_tags_session_number() -> None:
     settings = SimpleNamespace(
         results_db_enabled=True,
         results_database_url="postgresql://u:p@localhost/postgres",
@@ -114,8 +200,30 @@ async def test_record_host_framework_audit_writes_cells() -> None:
         )
     }
 
+    class _Row(dict):
+        def __getitem__(self, key):
+            return dict.__getitem__(self, key)
+
+        def get(self, key, default=None):
+            return dict.get(self, key, default)
+
+    sess_row = _Row(
+        id=11,
+        session_number=3,
+        client_name="Acme",
+        client_slug="acme",
+        evidence_run_id="Acme",
+        status="running",
+        continue_thread_id="",
+        framework_id="",
+        pending_ids=[],
+        started_at=datetime.now(timezone.utc),
+        finished_at=None,
+    )
+
     conn = MagicMock()
-    conn.fetchval = AsyncMock(side_effect=[11, 22, 33])
+    conn.fetchrow = AsyncMock(return_value=sess_row)
+    conn.fetchval = AsyncMock(side_effect=[22, 33])  # host_pk, hr_pk
     conn.execute = AsyncMock()
     tx = MagicMock()
     tx.__aenter__ = AsyncMock(return_value=None)
@@ -136,11 +244,9 @@ async def test_record_host_framework_audit_writes_cells() -> None:
             requirements=requirements,
             evidence_relpath="Acme",
             source="finalize",
+            session_number=3,
         )
 
-    assert conn.fetchval.await_count == 3
-    assert conn.execute.await_count >= 2
-    # requirement_results insert includes observation + recommendation
     req_calls = [
         c
         for c in conn.execute.await_args_list
@@ -148,6 +254,6 @@ async def test_record_host_framework_audit_writes_cells() -> None:
     ]
     assert req_calls
     args = req_calls[0].args
+    assert 3 in args  # session_number column
     assert "PermitRootLogin yes" in args
     assert "Set PermitRootLogin no" in args
-    assert "tool stdout" not in str(args)

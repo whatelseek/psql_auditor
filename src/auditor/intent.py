@@ -12,6 +12,7 @@ IntentKind = Literal[
     "revise_req",
     "refill_finding",
     "update_report",
+    "list_sessions",
 ]
 
 # Deterministic playbook / freeform command path (not REQ evidence-gather revise).
@@ -69,6 +70,20 @@ _UPDATE_REPORT = (
     re.compile(r"\bобнов(и|ить)\s+отч[её]т\b", re.I),
     re.compile(r"\bпересобер(и|ить)\s+отч[её]т\b", re.I),
     re.compile(r"\bобнов(и|ить)\s+отч[её]т\s+по\s+новым\s+данным\b", re.I),
+)
+
+# Which warehouse sessions exist / need continue (Postgres tracker).
+_LIST_SESSIONS = (
+    re.compile(r"\bwhich\s+sessions?\b", re.I),
+    re.compile(r"\blist\s+(audit\s+)?sessions?\b", re.I),
+    re.compile(r"\bsessions?\s+need\s+continue\b", re.I),
+    re.compile(r"\binterrupted\s+sessions?\b", re.I),
+    re.compile(r"\bshow\s+(me\s+)?(audit\s+)?sessions?\b", re.I),
+    re.compile(r"\bкакие\s+сессии\b", re.I),
+    re.compile(r"\bсписок\s+сессий\b", re.I),
+    re.compile(r"\bсессии\s+(для\s+продолж|прерван)", re.I),
+    re.compile(r"\bпрерванн\w*\s+сессии\b", re.I),
+    re.compile(r"\bнужно\s+продолжить\b", re.I),
 )
 
 # Prepare / rewrite observation + recommendation from already collected evidence.
@@ -153,6 +168,9 @@ def classify_intent(text: str, *, agents_dir: Path | None = None) -> IntentKind:
     raw = (text or "").strip()
     if not raw:
         return "audit"
+
+    if any(pat.search(raw) for pat in _LIST_SESSIONS):
+        return "list_sessions"
 
     # Prefer cell refill over report rebuild when both phrases appear.
     if any(pat.search(raw) for pat in _REFILL_FINDING):
