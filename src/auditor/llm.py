@@ -10,6 +10,7 @@ that LiteLLM fronts.
 
 from __future__ import annotations
 
+import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
@@ -24,6 +25,9 @@ def build_chat_model(settings: Settings | None = None) -> BaseChatModel:
     Open WebUI SSE progress / token delivery works when wired through the API
     layer (graph nodes themselves mostly use ``ainvoke``).
 
+    When ``litellm_ssl_verify`` is ``False``, TLS certificate verification is
+    disabled (needed for InfraAx LAN HTTPS with a self-signed cert on IP).
+
     Args:
         settings: Optional settings override; defaults to ``get_settings()``.
 
@@ -37,10 +41,15 @@ def build_chat_model(settings: Settings | None = None) -> BaseChatModel:
     if not base.endswith("/v1"):
         base = f"{base}/v1"
 
-    return ChatOpenAI(
-        model=settings.litellm_model,
-        api_key=settings.litellm_api_key,
-        base_url=base,
-        temperature=0,  # deterministic audit judgments
-        streaming=True,
-    )
+    kwargs: dict = {
+        "model": settings.litellm_model,
+        "api_key": settings.litellm_api_key,
+        "base_url": base,
+        "temperature": 0,  # deterministic audit judgments
+        "streaming": True,
+    }
+    if not settings.litellm_ssl_verify:
+        kwargs["http_client"] = httpx.Client(verify=False, timeout=120.0)
+        kwargs["http_async_client"] = httpx.AsyncClient(verify=False, timeout=120.0)
+
+    return ChatOpenAI(**kwargs)

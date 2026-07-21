@@ -5,6 +5,7 @@ backend. Two endpoints matter:
 
 * ``GET /v1/models`` — advertises ``Settings.model_id`` (default ``auditor``)
 * ``POST /v1/chat/completions`` — runs the LangGraph audit and returns the report
+* ``POST /v1/responses`` — thin OpenAI Responses API shim (newer Open WebUI)
 
 Human-in-the-loop: when a requirement fails, the graph interrupts and the
 assistant asks **skip** / **retry**. The next user message resumes the same
@@ -51,6 +52,92 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     temperature: float | None = None
     user: str | None = None
+
+
+class ResponsesRequest(BaseModel):
+    """Minimal OpenAI Responses API request (Open WebUI ``api_type=responses``)."""
+
+    model: str | None = None
+    input: Any = None
+    instructions: str | None = None
+    stream: bool = False
+    temperature: float | None = None
+    user: str | None = None
+    max_output_tokens: int | None = None
+
+
+def _text_from_content_parts(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                if part.get("type") in {"input_text", "output_text", "text"}:
+                    parts.append(str(part.get("text") or ""))
+                elif "text" in part:
+                    parts.append(str(part.get("text") or ""))
+        return "\n".join(p for p in parts if p)
+    return str(content)
+
+
+def _messages_from_responses_input(
+    payload: ResponsesRequest,
+) -> list[ChatMessage]:
+    """Convert Responses ``input`` (+ optional instructions) to chat messages."""
+    messages: list[ChatMessage] = []
+    if payload.instructions:
+        messages.append(ChatMessage(role="system", content=payload.instructions))
+
+    raw = payload.input
+    if isinstance(raw, str):
+        messages.append(ChatMessage(role="user", content=raw))
+        return messages
+
+    if not isinstance(raw, list):
+        return messages
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type") or "message"
+        if item_type != "message":
+            continue
+        role = item.get("role") or "user"
+        if role not in ("system", "user", "assistant", "tool"):
+            role = "user"
+        text = _text_from_content_parts(item.get("content"))
+        if text:
+            messages.append(ChatMessage(role=role, content=text))  # type: ignore[arg-type]
+    return messages
+
+
+def _responses_payload(content: str, model: str, response_id: str) -> dict[str, Any]:
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": int(time.time()),
+        "model": model,
+        "status": "completed",
+        "output": [
+            {
+                "id": f"msg_{uuid.uuid4().hex[:20]}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": content}],
+            }
+        ],
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        },
+    }
 
 
 def _check_api_key(authorization: str | None) -> None:
@@ -233,6 +320,39 @@ async def chat_completions(
     result = await _run_or_resume(auditor, body)
     content = result.get("report") or _last_ai_text(result.get("messages") or [])
     return JSONResponse(_completion_payload(content, model, completion_id))
+
+
+@router.post("/responses")
+async def responses_api(
+    body: ResponsesRequest,
+    authorization: str | None = Header(default=None),
+):
+    """OpenAI Responses API shim used by newer Open WebUI connections.
+
+    Converts ``input`` → chat messages, runs the same audit path as
+    ``/v1/chat/completions``, and returns a Responses-shaped payload.
+    Streaming Responses events are not implemented; callers should use
+    non-stream or prefer ``/v1/chat/completions``.
+    """
+    _check_api_key(authorization)
+    settings = get_settings()
+    model = body.model or settings.model_id
+    messages = _messages_from_responses_input(body)
+    if not messages:
+        raise HTTPException(status_code=400, detail="Responses input is empty")
+
+    chat_body = ChatCompletionRequest(
+        model=model,
+        messages=messages,
+        stream=False,
+        temperature=body.temperature,
+        user=body.user,
+    )
+    auditor = get_auditor_graph()
+    result = await _run_or_resume(auditor, chat_body)
+    content = result.get("report") or _last_ai_text(result.get("messages") or [])
+    response_id = f"resp_{uuid.uuid4().hex[:24]}"
+    return JSONResponse(_responses_payload(content, model, response_id))
 
 
 def _last_ai_text(messages: list) -> str:

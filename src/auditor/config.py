@@ -93,6 +93,8 @@ class Settings(BaseSettings):
     litellm_base_url: str = "http://localhost:4000"
     litellm_api_key: str = "sk-litellm-local"
     litellm_model: str = "gpt-4o-mini"
+    # False for LAN HTTPS gateways with self-signed certs (e.g. 10.200.29.36:4443)
+    litellm_ssl_verify: bool = True
 
     # --- Agent HTTP API (Open WebUI → agent) ---
     api_key: str | None = None

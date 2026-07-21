@@ -1,5 +1,8 @@
 services:
+  # Optional local LiteLLM. Default uses InfraAx gateway from .env.
+  #   docker compose --profile local-llm up --build
   litellm:
+    profiles: ["local-llm"]
     image: ghcr.io/berriai/litellm:main-latest
     ports:
       - "4000:4000"
@@ -14,13 +17,14 @@ services:
   agent:
     build: .
     ports:
-      - "8000:8000"
+      - "${AGENT_HOST_PORT:-8001}:8000"
     env_file:
       - .env
     environment:
-      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-https://10.200.29.36:4443}
       LITELLM_API_KEY: ${LITELLM_API_KEY:-sk-litellm-local}
-      LITELLM_MODEL: ${LITELLM_MODEL:-gpt-4o-mini}
+      LITELLM_MODEL: ${LITELLM_MODEL:-openai/gpt-oss-120b}
+      LITELLM_SSL_VERIFY: ${LITELLM_SSL_VERIFY:-false}
       AGENTS_DIR: /app/agents
       PLAYBOOKS_DIR: /app/agents/playbooks
       MEMORY_DIR: /app/memory
@@ -29,13 +33,12 @@ services:
       EVIDENCE_DIR: /app/artifacts
       HITL_ENABLED: ${HITL_ENABLED:-true}
       ARCHIVE_ENABLED: ${ARCHIVE_ENABLED:-true}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8001}
       OPEN_WEBUI_URL: ${OPEN_WEBUI_URL:-http://open-webui:8080}
-      OPEN_WEBUI_PUBLIC_URL: ${OPEN_WEBUI_PUBLIC_URL:-http://localhost:3000}
+      OPEN_WEBUI_PUBLIC_URL: ${OPEN_WEBUI_PUBLIC_URL:-http://localhost:3001}
       OPEN_WEBUI_API_KEY: ${OPEN_WEBUI_API_KEY:-}
       MAX_SESSION_RETRIES: ${MAX_SESSION_RETRIES:-2}
       API_KEY: ${API_KEY:-sk-auditor-local}
-      # Mount or inject SSH key path inside the container as needed:
       SSH_HOST: ${SSH_HOST:-}
       SSH_PORT: ${SSH_PORT:-22}
       SSH_USER: ${SSH_USER:-postgres}
@@ -47,25 +50,20 @@ services:
       PG_USER: ${PG_USER:-postgres}
       PG_PASSWORD: ${PG_PASSWORD:-}
       PG_DATABASE: ${PG_DATABASE:-postgres}
-      # antonorlov/mcp-postgres-server (agent queries DB only via this MCP)
       MCP_POSTGRES_COMMAND: ${MCP_POSTGRES_COMMAND:-npx}
       MCP_POSTGRES_ARGS: ${MCP_POSTGRES_ARGS:-"-y mcp-postgres-server"}
     volumes:
       - ./agents:/app/agents:ro
       - ./memory:/app/memory
       - ./artifacts:/app/artifacts
-      # Optional: mount SSH private key, e.g. ./secrets/id_rsa:/keys/id_rsa:ro
       - ${SSH_KEY_HOST_PATH:-./.keys}:/keys:ro
-    depends_on:
-      - litellm
     restart: unless-stopped
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     ports:
-      - "3000:8080"
+      - "${WEBUI_HOST_PORT:-3001}:8080"
     environment:
-      # Pre-wire Open WebUI to the auditor OpenAI-compatible API
       ENABLE_OPENAI_API: "true"
       ENABLE_OLLAMA_API: "false"
       OPENAI_API_BASE_URL: http://agent:8000/v1

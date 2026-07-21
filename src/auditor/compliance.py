@@ -6,6 +6,7 @@ computes compliance percentage by severity (and overall).
 
 from __future__ import annotations
 
+import base64
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -294,6 +295,12 @@ def render_compliance_bar_chart_svg(
     return "\n".join(parts)
 
 
+def svg_as_markdown_image(svg: str, *, alt: str = "CIS compliance chart") -> str:
+    """Embed SVG as Markdown image for Open WebUI / common Markdown viewers."""
+    b64 = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"![{alt}](data:image/svg+xml;base64,{b64})"
+
+
 def _xml(text: str) -> str:
     return (
         (text or "")
@@ -339,6 +346,7 @@ def format_compliance_markdown(
         *by_sev,
     ]
     svg = render_compliance_bar_chart_svg(chart_stats, title=title)
+    image = svg_as_markdown_image(svg, alt=title)
 
     if language.startswith("ru"):
         lines = [
@@ -373,5 +381,5 @@ def format_compliance_markdown(
             f"{s.failed} | {s.errors} | {s.skipped} | {s.total} |"
         )
 
-    lines.extend(["", svg, ""])
+    lines.extend(["", image, ""])
     return "\n".join(lines)

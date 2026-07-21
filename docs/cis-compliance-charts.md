@@ -11,10 +11,20 @@ Visualize auditor CIS results as **compliance % bar charts by severity**.
 
 ## Install in Open WebUI
 
+Important: current Open WebUI splits **Tools** and **Functions**.
+
+| File | Install where | Required class |
+|------|---------------|----------------|
+| `cis_compliance_charts.py` | **Workspace → Tools** (not Functions) | `class Tools` |
+| `cis_compliance_charts_filter.py` | **Workspace → Functions** | `class Filter` |
+
+Pasting the Tools file into Functions fails with:
+`No Function class found in the module`.
+
 ### A) Tool (call from chat)
 
-1. Open WebUI → **Workspace → Functions** (or Admin → Functions)
-2. Create function → paste  
+1. Open WebUI → **Workspace → Tools**
+2. Create tool → paste  
    [`openwebui/functions/cis_compliance_charts.py`](../openwebui/functions/cis_compliance_charts.py)
 3. Enable it and grant the tool to model `auditor` (or your chat)
 4. After an audit, ask:
@@ -24,11 +34,12 @@ Visualize auditor CIS results as **compliance % bar charts by severity**.
 
 ### B) Filter (auto-append)
 
-1. Create another function → paste  
+1. Create a function → paste  
    [`openwebui/functions/cis_compliance_charts_filter.py`](../openwebui/functions/cis_compliance_charts_filter.py)
-2. Set type **Filter**, enable **Outlet**
-3. Attach the filter to the model / chat
-4. Every auditor reply that contains a Summary table gets charts appended automatically
+2. Confirm type **Filter** (auto-detected from `class Filter`)
+3. Enable the function **and turn on Global** (required for auto-run on every chat)
+4. Optionally also attach it under the model’s Filters
+5. Every auditor reply that contains a Summary table / `REQ-*` rows gets charts appended automatically
 
 ## Agent-side charts
 

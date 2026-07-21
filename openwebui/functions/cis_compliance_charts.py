@@ -11,6 +11,7 @@ required_open_webui_version: 0.4.0
 
 from __future__ import annotations
 
+import base64
 import re
 from collections import defaultdict
 from typing import Any, Iterable
@@ -256,6 +257,12 @@ def render_svg(stats: list[dict[str, Any]], title: str) -> str:
     return "\n".join(parts)
 
 
+def svg_as_markdown_image(svg: str, *, alt: str = "CIS compliance chart") -> str:
+    """Embed SVG as Markdown image (Open WebUI often skips raw ``<svg>`` tags)."""
+    b64 = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"![{alt}](data:image/svg+xml;base64,{b64})"
+
+
 def build_visualization(report_markdown: str, *, language: str = "en") -> str:
     rows = parse_findings(report_markdown)
     if not rows:
@@ -273,6 +280,7 @@ def build_visualization(report_markdown: str, *, language: str = "en") -> str:
         else "CIS compliance by severity (%)"
     )
     svg = render_svg(chart_stats, title)
+    image = svg_as_markdown_image(svg, alt=title)
     if language.startswith("ru"):
         lines = [
             "## Визуализация соответствия CIS",
@@ -298,7 +306,7 @@ def build_visualization(report_markdown: str, *, language: str = "en") -> str:
             f"| {s['severity']} | {s['percent']:.1f}% | {s['passed']} | {s['partial']} | "
             f"{s['failed']} | {s['errors']} | {s['skipped']} | {s['total']} |"
         )
-    lines.extend(["", svg, ""])
+    lines.extend(["", image, ""])
     return "\n".join(lines)
 
 

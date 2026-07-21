@@ -12,6 +12,7 @@ from __future__ import annotations
 # Re-use the same module logic by importing sibling Tools file content is duplicated
 # minimally here so the filter can be installed independently in Open WebUI.
 
+import base64
 import re
 from collections import defaultdict
 from typing import Any, Iterable, Optional
@@ -192,6 +193,16 @@ def render_svg(stats: list[dict[str, Any]], title: str) -> str:
     return "\n".join(parts)
 
 
+def svg_as_markdown_image(svg: str, *, alt: str = "CIS compliance chart") -> str:
+    """Embed SVG as a Markdown image.
+
+    Open WebUI's Markdown path often does not render raw ``<svg>`` tags; a
+    ``data:image/svg+xml;base64,...`` image is displayed reliably.
+    """
+    b64 = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"![{alt}](data:image/svg+xml;base64,{b64})"
+
+
 def build_visualization(report_markdown: str, *, language: str = "en") -> str:
     rows = parse_findings(report_markdown)
     if not rows:
@@ -205,6 +216,8 @@ def build_visualization(report_markdown: str, *, language: str = "en") -> str:
         else "CIS compliance by severity (%)"
     )
     svg = render_svg(chart_stats, title)
+    alt = title
+    image = svg_as_markdown_image(svg, alt=alt)
     if language.startswith("ru"):
         lines = [
             "## Визуализация соответствия CIS",
@@ -228,8 +241,28 @@ def build_visualization(report_markdown: str, *, language: str = "en") -> str:
             f"| {s['severity']} | {s['percent']:.1f}% | {s['passed']} | {s['partial']} | "
             f"{s['failed']} | {s['errors']} | {s['skipped']} | {s['total']} |"
         )
-    lines.extend(["", svg, ""])
+    lines.extend(["", image, ""])
     return "\n".join(lines)
+
+
+def _message_text(content: Any) -> str:
+    """Normalize Open WebUI message content (str or content-parts list) to text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if item.get("type") == "text" and item.get("text"):
+                    parts.append(str(item["text"]))
+                elif "content" in item:
+                    parts.append(str(item.get("content") or ""))
+        return "\n".join(parts)
+    return str(content)
 
 
 class Filter:
@@ -241,7 +274,7 @@ class Filter:
     def __init__(self) -> None:
         self.valves = self.Valves()
 
-    def outlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
+    async def outlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
         if not self.valves.AUTO_APPEND:
             return body
         messages = body.get("messages") or []
@@ -249,12 +282,17 @@ class Filter:
             msg = messages[i]
             if msg.get("role") != "assistant":
                 continue
-            content = msg.get("content") or ""
-            if not re.search(r"\|\s*Severity\s*\|\s*Status", content, re.I) and not re.search(
-                r"##\s+Summary table", content, re.I
-            ):
-                break
+            content = _message_text(msg.get("content"))
+            looks_like_report = bool(
+                re.search(r"\|\s*Severity\s*\|\s*Status", content, re.I)
+                or re.search(r"##\s+Summary table", content, re.I)
+                or re.search(r"^\|\s*REQ-\d+\s*\|", content, re.I | re.M)
+            )
+            if not looks_like_report:
+                continue
             if "CIS compliance visualization" in content or "Визуализация соответствия CIS" in content:
+                break
+            if "data:image/svg+xml;base64," in content and "compliance" in content.lower():
                 break
             lang = self.valves.LANGUAGE
             if lang in {"", "auto"}:
