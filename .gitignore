@@ -3,7 +3,6 @@
 venv/
 artifacts/
 memory/learned_playbooks.json
-memory/benchmark.jsonl
 __pycache__/
 *.py[cod]
 *.egg-info/

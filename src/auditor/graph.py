@@ -52,7 +52,6 @@ from langgraph.types import Command, interrupt
 
 from auditor.access_probe import probe_access_services
 from auditor.adhoc import run_adhoc_commands
-from auditor.benchmark_store import BenchmarkStore
 from auditor.checklist import Requirement
 from auditor.compliance import format_compliance_markdown
 from auditor.config import Settings, get_settings
@@ -334,13 +333,6 @@ class AuditorGraph:
             get_ssh_tools()
         )
         self.fill_model = build_chat_model(self.settings)
-        self.benchmark = (
-            BenchmarkStore(self.settings.resolve_benchmark_path())
-            if self.settings.benchmark_enabled
-            else None
-        )
-        if self.benchmark is not None:
-            self.benchmark.ensure_file()
         self.graph = self._build()
         self.intake_graph = self._build_intake()
 
@@ -1978,25 +1970,6 @@ class AuditorGraph:
                 store.host_segment = host_id
             store.write_report(fw or "framework", f"{summary}\n\n---\n\n{full_report}")
             evidence_note = f" | evidence: `{store.root}`"
-
-        if self.benchmark is not None and findings and fw:
-            try:
-                evidence_rel = ""
-                if store is not None:
-                    try:
-                        evidence_rel = str(
-                            store.root.relative_to(Path(self.settings.evidence_dir).resolve())
-                        )
-                    except ValueError:
-                        evidence_rel = str(store.root)
-                self.benchmark.append_from_findings(
-                    run_id=state.get("evidence_run_id") or (store.run_id if store else ""),
-                    framework_id=fw,
-                    findings=findings,
-                    evidence_relpath=evidence_rel,
-                )
-            except Exception:  # noqa: BLE001
-                pass
 
         if findings or requirements:
             evidence_rel = ""

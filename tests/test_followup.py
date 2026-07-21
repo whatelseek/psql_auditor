@@ -83,7 +83,6 @@ async def test_revise_req_writes_into_existing_folder(tmp_path: Path):
         evidence_dir=tmp_path,
         memory_enabled=False,
         memory_learn=False,
-        benchmark_enabled=False,
         litellm_base_url="http://localhost:9",
     )
     graph = AuditorGraph(settings=settings)
@@ -143,7 +142,6 @@ async def test_evaluate_req_gathers_evidence_only(tmp_path: Path):
         evidence_dir=tmp_path,
         memory_enabled=False,
         memory_learn=False,
-        benchmark_enabled=False,
         litellm_base_url="http://localhost:9",
     )
     graph = AuditorGraph(settings=settings)
@@ -190,7 +188,6 @@ async def test_refill_without_req_requires_revised_or_named(tmp_path: Path):
         evidence_dir=tmp_path,
         memory_enabled=False,
         memory_learn=False,
-        benchmark_enabled=False,
         litellm_base_url="http://localhost:9",
     )
     graph = AuditorGraph(settings=settings)
@@ -227,7 +224,6 @@ async def test_refill_finding_from_stored_evidence(tmp_path: Path):
         evidence_dir=tmp_path,
         memory_enabled=False,
         memory_learn=False,
-        benchmark_enabled=False,
         litellm_base_url="http://localhost:9",
     )
     graph = AuditorGraph(settings=settings)
@@ -282,7 +278,6 @@ async def test_update_report_from_disk_findings(tmp_path: Path):
         memory_enabled=False,
         archive_enabled=False,
         compliance_charts_in_report=False,
-        benchmark_enabled=False,
         litellm_base_url="http://localhost:9",
     )
     graph = AuditorGraph(settings=settings)
@@ -370,7 +365,6 @@ async def test_revise_req_multi_host_path(tmp_path: Path):
         inventory_dir=tmp_path / "inventory",
         memory_enabled=False,
         memory_learn=False,
-        benchmark_enabled=False,
         litellm_base_url="http://localhost:9",
     )
     graph = AuditorGraph(settings=settings)

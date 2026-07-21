@@ -130,7 +130,6 @@ async def test_sqlite_checkpointer_survives_new_graph(tmp_path: Path):
         hitl_enabled=True,
         max_parallel_assessments=2,
         memory_enabled=False,
-        benchmark_enabled=False,
         intake_enabled=False,
         archive_enabled=False,
     )

@@ -38,7 +38,7 @@ from urllib.parse import urlparse, urlunparse
 
 import asyncpg
 
-from auditor.benchmark_store import findings_to_benchmark_metrics
+from auditor.compliance import findings_to_compliance_metrics
 from auditor.checklist import Requirement
 from auditor.config import Settings, get_settings
 from auditor.intake import client_slug as make_client_slug
@@ -588,7 +588,7 @@ class ResultsStore:
         slug = make_client_slug(client)
 
         dsn = await self._connect_dsn_for_client(slug)
-        metrics = findings_to_benchmark_metrics(findings) if findings else {
+        metrics = findings_to_compliance_metrics(findings) if findings else {
             "pass": 0,
             "fail": 0,
             "partial": 0,

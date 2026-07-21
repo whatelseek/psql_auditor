@@ -16,9 +16,10 @@ import base64
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 from auditor.language import ReportLanguage, report_ui
+from auditor.state import Finding, aggregate_findings
 
 _SEVERITY_ORDER = ("Critical", "High", "Medium", "Low", "Info", "Unknown")
 _STATUS_PASS = {"pass", "passed", "ok", "compliant"}
@@ -66,6 +67,43 @@ class SeverityCompliance:
     errors: int
     skipped: int
     percent: float  # 0–100, based on assessed (non-skipped) rows
+
+
+def findings_to_compliance_metrics(
+    findings: Mapping[str, Finding],
+) -> dict[str, Any]:
+    """Derive status counts + overall compliance % from filled findings.
+
+    Used by the results Postgres warehouse when upserting ``host_results``.
+
+    Args:
+        findings: Mapping of requirement id to :class:`~auditor.state.Finding`.
+
+    Returns:
+        Dict with keys ``pass``, ``fail``, ``partial``, ``error``, ``skipped``,
+        ``assessed``, and ``compliance_pct``.
+    """
+    counts = aggregate_findings(dict(findings))
+    rows = [
+        FindingRow(
+            req_id=f.requirement_id,
+            title=f.title or "",
+            severity=f.severity or "Unknown",
+            status=f.status,
+        )
+        for f in findings.values()
+    ]
+    overall = overall_compliance(rows)
+    assessed = max(0, overall.total - overall.skipped)
+    return {
+        "pass": counts.get("pass", 0),
+        "fail": counts.get("fail", 0),
+        "partial": counts.get("partial", 0),
+        "error": counts.get("error", 0),
+        "skipped": counts.get("skipped", 0),
+        "assessed": assessed,
+        "compliance_pct": float(overall.percent),
+    }
 
 
 def normalize_severity(raw: str) -> str:
