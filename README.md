@@ -154,6 +154,13 @@ Bar charts of **compliance % by severity** (Overall / Critical / High / …):
 - Open WebUI **Tool** + auto **Filter**: [`docs/cis-compliance-charts.md`](docs/cis-compliance-charts.md)
 - Also appended in the agent report when `COMPLIANCE_CHARTS_IN_REPORT=true`
 
+## Inline Visualizer v2 (Open WebUI)
+
+Vendored from [Classic298/open-webui-plugins](https://github.com/Classic298/open-webui-plugins/tree/main/inline-visualizer-v2):
+streaming HTML/SVG canvases in chat (`@@@VIZ-START` / `@@@VIZ-END`).
+
+Install from [`openwebui/inline-visualizer-v2/`](openwebui/inline-visualizer-v2/) — see [`INSTALL.md`](openwebui/inline-visualizer-v2/INSTALL.md). Attach to a general chat model; enable **Allow iframe same origin**.
+
 ## Audit benchmark history
 
 Every completed checklist audit appends aggregate scores to [`memory/benchmark.md`](memory/benchmark.md) (pass/fail/compliance % by framework). See [`docs/audit-benchmark.md`](docs/audit-benchmark.md).
