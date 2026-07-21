@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import json
 import logging
-import secrets
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -254,8 +253,3 @@ async def package_and_publish_archive(
         "chat_section": section,
         "run_id": run_id,
     }
-
-
-def new_ephemeral_token() -> str:
-    """Unused helper kept for tests / future one-time links."""
-    return secrets.token_urlsafe(16)

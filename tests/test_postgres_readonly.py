@@ -1,15 +1,17 @@
-from auditor.tools.postgres import _is_readonly
+"""Unit tests for the shared read-only SQL gate."""
+
+from auditor.tools.postgres import is_readonly_sql
 
 
 def test_allows_select_and_show():
-    assert _is_readonly("SHOW ssl;")
-    assert _is_readonly("SELECT rolname FROM pg_roles")
-    assert _is_readonly("WITH x AS (SELECT 1) SELECT * FROM x")
-    assert _is_readonly("-- comment\nSHOW password_encryption")
+    assert is_readonly_sql("SHOW ssl;")
+    assert is_readonly_sql("SELECT rolname FROM pg_roles")
+    assert is_readonly_sql("WITH x AS (SELECT 1) SELECT * FROM x")
+    assert is_readonly_sql("-- comment\nSHOW password_encryption")
 
 
 def test_rejects_mutating_sql():
-    assert not _is_readonly("DELETE FROM pg_roles")
-    assert not _is_readonly("DROP EXTENSION dblink")
-    assert not _is_readonly("SELECT 1; DELETE FROM t")
-    assert not _is_readonly("UPDATE pg_settings SET setting='x'")
+    assert not is_readonly_sql("DELETE FROM pg_roles")
+    assert not is_readonly_sql("DROP EXTENSION dblink")
+    assert not is_readonly_sql("SELECT 1; DELETE FROM t")
+    assert not is_readonly_sql("UPDATE pg_settings SET setting='x'")

@@ -564,9 +564,3 @@ def resolve_client_inventory(
         False,
     )
 
-
-def read_inventory_scope(inventory_dir: Path, client_slug_name: str = "") -> str:
-    """Return client inventory contents, or a missing-file message (no example dump)."""
-    _path, text, _found = resolve_client_inventory(inventory_dir, client_slug_name)
-    return text
-

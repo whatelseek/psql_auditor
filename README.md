@@ -25,7 +25,7 @@ description: Ubuntu CIS host hardening
 
 No code changes required — new files are discovered from `AGENTS_DIR`.
 
-Bundled examples: `postgres_cis`, `ubuntu_cis`, `windows_cis`.
+Bundled examples: `postgres_cis`, `ubuntu_cis_24_l2`, `it_audit`.
 
 ## Graph (cyclic + HITL)
 

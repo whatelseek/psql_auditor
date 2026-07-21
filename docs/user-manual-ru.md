@@ -202,7 +202,7 @@ postgres:
 
 frameworks:
   - postgres_cis
-  - ubuntu_cis
+  - ubuntu_cis_24_l2
 ```
 
 Сообщение в чате:
@@ -449,8 +449,8 @@ requirements:
 | id | Файл | Типичные aliases |
 |----|------|------------------|
 | `postgres_cis` | `agents/postgres_cis.md` | postgres, postgresql, psql, database |
-| `ubuntu_cis` | `agents/ubuntu_cis.md` | ubuntu, linux, debian, host |
-| `windows_cis` | `agents/windows_cis.md` | windows, win, server |
+| `ubuntu_cis_24_l2` | `agents/ubuntu_cis_24_l2.md` | ubuntu, ubuntu24, ubuntu cis, … |
+| `it_audit` | `agents/it_audit.md` | it, inventory, baseline, … |
 
 Это **scaffold**-чек-листы: расширяйте под вашу версию CIS / внутренний стандарт.
 

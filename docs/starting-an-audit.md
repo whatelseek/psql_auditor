@@ -83,7 +83,8 @@ postgres:
 # Optional — otherwise inferred from the chat message
 frameworks:
   - postgres_cis
-  - ubuntu_cis
+  - ubuntu_cis_24_l2
+  - it_audit
 ```
 
 A copy of this template lives at [`examples/target.example.yaml`](examples/target.example.yaml).
@@ -109,7 +110,7 @@ A copy of this template lives at [`examples/target.example.yaml`](examples/targe
     "password": "changeme",
     "database": "postgres"
   },
-  "frameworks": ["postgres_cis", "ubuntu_cis"]
+  "frameworks": ["postgres_cis", "ubuntu_cis_24_l2"]
 }
 ```
 
@@ -124,7 +125,7 @@ A copy of this template lives at [`examples/target.example.yaml`](examples/targe
 | `ssh` | `port` | no | Default `22` |
 | `ssh` | `password` / `private_key` / `private_key_path` | one | Prefer keys over passwords |
 | `postgres` | `host`/`port`/`user`/`password`/`database` | for DB checks | Used by antonorlov MCP (`PG_*`) |
-| `frameworks` | list of ids | no | e.g. `postgres_cis`, `ubuntu_cis`, `windows_cis` |
+| `frameworks` | list of ids | no | e.g. `postgres_cis`, `ubuntu_cis_24_l2`, `it_audit` |
 
 Framework ids match drop-in files under [`agents/`](../agents/) (filename stem or YAML frontmatter `id`).
 
@@ -162,9 +163,9 @@ container). Those keys must not appear in `docker-compose.yml`.
 |--------------|------------------|
 | `Start audit using the attached target` | Frameworks from file, or default/postgres if unspecified |
 | `Run PostgreSQL CIS on this host` | `postgres_cis` |
-| `Ubuntu CIS only` | `ubuntu_cis` |
-| `PostgreSQL and Ubuntu CIS please` | `postgres_cis` + `ubuntu_cis` (separate graphs) |
-| `Windows Server hardening check` | `windows_cis` |
+| `Ubuntu CIS only` | `ubuntu_cis_24_l2` |
+| `PostgreSQL and Ubuntu CIS please` | `postgres_cis` + `ubuntu_cis_24_l2` (separate graphs) |
+| `IT inventory baseline` | `it_audit` |
 
 ## Security practices
 

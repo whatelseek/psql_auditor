@@ -41,7 +41,7 @@ PostgresMcpPool  (MCP_POSTGRES_POOL_SIZE workers, default 3)
 | stdio transport | `postgres_mcp_connection()` → `command`/`args`/`env` |
 | Stateful `client.session(name)` | `PostgresMcpSession._ensure_session` |
 | `handle_tool_errors=True` (≥0.3.0) | Set on `MultiServerMCPClient` / `load_mcp_tools` |
-| `load_mcp_tools(session)` | Diagnostics only (`load_adapted_tools`) |
+| `load_mcp_tools(session)` | Not used in production (curated ``mcp_*`` only) |
 | Parallel tool use | `PostgresMcpPool` (one stdio process per worker) |
 
 Why not raw `client.get_tools()` for production? Remote tool names are `query`,

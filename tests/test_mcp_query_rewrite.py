@@ -1,6 +1,6 @@
 from auditor.config import Settings
 from auditor.tools.mcp_client import (
-    mcp_call_tool,
+    PostgresMcpSession,
     postgres_mcp_connection,
     rewrite_show_to_select,
 )
@@ -75,7 +75,8 @@ def test_postgres_mcp_connection_shape():
     assert conn["env"]["PG_HOST"] == "db.example"
 
 
-async def test_mcp_call_tool_blocks_execute():
-    result = await mcp_call_tool("execute", '{"sql": "DELETE FROM t"}')
+async def test_session_call_tool_blocks_execute():
+    session = PostgresMcpSession()
+    result = await session.call_tool("execute", {"sql": "DELETE FROM t"})
     assert "MCP error" in result
     assert "disabled" in result.lower() or "execute" in result.lower()

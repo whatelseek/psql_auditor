@@ -17,14 +17,13 @@ import json
 import logging
 import threading
 from datetime import datetime, timezone
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import yaml
 from langgraph.store.memory import InMemoryStore
 
-from auditor.config import Settings, get_settings
+from auditor.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -311,19 +310,3 @@ class PlaybookMemory:
             self.persist()
         except OSError as exc:
             logger.warning("Failed to persist learned playbooks: %s", exc)
-
-
-@lru_cache
-def get_playbook_memory() -> PlaybookMemory:
-    """Process-wide playbook memory (seed + learned overlay)."""
-    settings = get_settings()
-    return PlaybookMemory(
-        playbooks_dir=settings.playbooks_dir,
-        memory_dir=settings.memory_dir,
-        learn=settings.memory_learn,
-    )
-
-
-def reset_playbook_memory_cache() -> None:
-    """Test helper: clear the cached singleton."""
-    get_playbook_memory.cache_clear()

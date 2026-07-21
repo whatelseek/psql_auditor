@@ -26,7 +26,7 @@ import shlex
 from contextlib import AsyncExitStack
 from typing import Any
 
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from auditor.config import Settings, get_settings
@@ -182,30 +182,6 @@ class PostgresMcpSession:
                     await self._reset_unlocked()
                 return f"MCP error: {type(exc).__name__}: {exc}"
 
-    async def load_adapted_tools(
-        self, settings: Settings | None = None
-    ) -> list[BaseTool]:
-        """Load LangChain tools from the live MCP session via adapters.
-
-        Prefer curated ``get_mcp_tools()`` for playbook-stable names; this helper
-        is for diagnostics / future expansion.
-        """
-        from langchain_mcp_adapters.tools import load_mcp_tools
-
-        settings = settings or get_settings()
-        async with self._lock:
-            session = await self._ensure_session(settings)
-            tools = await load_mcp_tools(
-                session,
-                server_name=_SERVER_NAME,
-                handle_tool_errors=True,
-            )
-            return [
-                t
-                for t in tools
-                if getattr(t, "name", "") not in _BLOCKED_REMOTE_TOOLS
-            ]
-
     async def _reset_unlocked(self) -> None:
         if self._stack is not None:
             try:
@@ -307,19 +283,6 @@ class PostgresMcpPool:
         finally:
             self._queue.put_nowait(session)
 
-    async def load_adapted_tools(
-        self, settings: Settings | None = None
-    ) -> list[BaseTool]:
-        """Load adapted tools via one pooled session (diagnostics)."""
-        settings = settings or get_settings()
-        await self._ensure(settings)
-        assert self._queue is not None
-        session = await self._queue.get()
-        try:
-            return await session.load_adapted_tools(settings=settings)
-        finally:
-            self._queue.put_nowait(session)
-
     async def close(self) -> None:
         """Close every pooled MCP subprocess."""
         async with self._init_lock:
@@ -348,11 +311,6 @@ class PostgresMcpPool:
 
 
 _POOL = PostgresMcpPool()
-
-
-def get_mcp_session() -> PostgresMcpPool:
-    """Return the process-wide Postgres MCP **pool** (API name kept for compat)."""
-    return _POOL
 
 
 def get_mcp_pool() -> PostgresMcpPool:
@@ -544,25 +502,3 @@ def get_mcp_tools() -> list:
         mcp_describe_table,
         mcp_list_tools,
     ]
-
-
-async def mcp_call_tool(tool_name: str, arguments_json: str = "{}") -> str:
-    """Generic MCP tool caller (prefer ``mcp_query`` / ``mcp_*`` helpers)."""
-    try:
-        arguments = json.loads(arguments_json) if arguments_json else {}
-        if not isinstance(arguments, dict):
-            return "MCP error: arguments_json must be a JSON object"
-    except json.JSONDecodeError as exc:
-        return f"MCP error: invalid arguments_json: {exc}"
-    if tool_name in _BLOCKED_REMOTE_TOOLS:
-        return (
-            "MCP error: mutating execute is disabled for the auditor. "
-            "Use mcp_query for SELECT evidence."
-        )
-    if tool_name == "query" and "sql" in arguments:
-        rewritten = rewrite_show_to_select(str(arguments["sql"]))
-        rejected = _reject_if_not_readonly(rewritten)
-        if rejected:
-            return rejected
-        arguments = {**arguments, "sql": rewritten}
-    return await _POOL.call_tool(tool_name, arguments)
