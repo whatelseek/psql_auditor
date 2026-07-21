@@ -1,7 +1,20 @@
 """Ad-hoc audit command execution (operator-requested SSH / SQL / playbooks).
 
-Unlike the checklist graph, this path does **not** load a framework report.
-It runs tools the operator asked for and returns a Markdown result block.
+This module implements the **freeform command** path in the auditor pipeline.
+Unlike the checklist graph, it does **not** load a framework report or iterate
+over requirements. Instead it runs tools the operator explicitly asked for
+and returns a Markdown result block suitable for chat UIs.
+
+Pipeline role:
+    Invoked when the operator issues a one-off command request (e.g. "run
+    ``cat /etc/ssh/sshd_config`` on the host") rather than a full CIS audit.
+    Evidence is written under ``<evidence_dir>/<run_id>/<framework>/CMD-*/`` or
+    appended to an existing checklist run when one is found on disk.
+
+Key entry points:
+    :func:`run_adhoc_commands` — main async handler; chooses playbook vs LLM path.
+    :func:`_playbook_hint` — resolves REQ-* ids to stored playbook tool recipes.
+    :func:`_format_adhoc_report` — wraps tool output in a chat-ready Markdown block.
 """
 
 from __future__ import annotations
@@ -27,10 +40,21 @@ _CODE_FENCE = re.compile(r"```(?:bash|sh|shell|sql|powershell)?\s*\n(.*?)```", r
 
 
 def _playbook_hint(graph: AuditorGraph, user_text: str) -> tuple[str, str, list[str]]:
-    """If the request names REQ-* (+ optional framework), return playbook hint text.
+    """Build playbook guidance when the operator names REQ-* requirement ids.
+
+    Extracts requirement ids from ``user_text``, routes to a framework when
+    possible, and formats stored playbook tool blocks for the LLM or for
+    deterministic execution in :func:`run_adhoc_commands`.
+
+    Args:
+        graph: Active auditor graph; supplies playbooks registry and settings.
+        user_text: Raw operator message (may contain ``REQ-001`` etc.).
 
     Returns:
-        ``(hint_markdown, framework_id, req_ids)``.
+        A 3-tuple ``(hint_markdown, framework_id, req_ids)`` where
+        ``hint_markdown`` is Markdown for the prompt (or empty when no playbooks
+        apply), ``framework_id`` is the routed framework id (or ``""``), and
+        ``req_ids`` is the list of extracted requirement ids (possibly empty).
     """
     req_ids = extract_req_ids(user_text)
     if not req_ids or graph.playbooks is None:
@@ -67,8 +91,22 @@ def _playbook_hint(graph: AuditorGraph, user_text: str) -> tuple[str, str, list[
 async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, Any]:
     """Execute operator-requested tools and return a chat-ready result dict.
 
-    Prefer deterministic playbook tool calls when REQ-* ids are present and
-    recipes exist; otherwise use a short tool-calling LLM loop.
+    Resolves or creates an evidence run (preferring attachment to the latest
+    checklist audit when present), then either:
+
+    1. **Playbook path** — when REQ-* ids map to stored playbook tools, runs
+       those tools deterministically and asks the fill model for a summary.
+    2. **Freeform path** — otherwise uses the evidence model in a short
+       tool-calling loop guided by :mod:`auditor.prompts` ad-hoc templates.
+
+    Args:
+        graph: Auditor graph with models, tools, and settings.
+        user_text: Operator command request (may include REQ ids or fenced code).
+
+    Returns:
+        Dict with keys ``report``, ``messages``, ``framework_id``,
+        ``evidence_run_id``, ``evidence_run_dir``, ``awaiting_hitl``,
+        ``adhoc``, and ``mode`` (``"playbook"`` or ``"freeform"``).
     """
     settings = graph.settings
     user_request = truncate_text(
@@ -317,6 +355,19 @@ def _format_adhoc_report(
     framework_id: str = "adhoc",
     req_label: str = "CMD-001",
 ) -> str:
+    """Wrap ad-hoc command output in a standard Markdown report section.
+
+    Args:
+        user_request: Original operator text (truncated in the header).
+        body: Main result content (tool output or LLM summary).
+        run_id: Evidence run folder id.
+        attached_to_prior: When True, note that evidence was appended to a prior run.
+        framework_id: Framework or host/framework key under the run.
+        req_label: Requirement or CMD bucket label (e.g. ``CMD-001``).
+
+    Returns:
+        Markdown string with heading, request echo, body, and evidence location.
+    """
     where = (
         f"Appended to prior audit run `{run_id}` → "
         f"`{framework_id}/{req_label}/`"

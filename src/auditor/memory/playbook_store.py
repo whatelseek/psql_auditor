@@ -6,9 +6,13 @@ Implements LangGraph long-term memory as a **procedural playbook collection**:
 * Key: requirement id (``REQ-001``) or ``_framework`` for general tips
 * Value: tools to prefer, notes, source (``seed`` / ``learned``)
 
-Seed YAML files under ``agents/playbooks/<framework_id>.yaml`` are loaded at
-startup into an ``InMemoryStore``. Successful tool calls can be written back
-(hot-path learning) and flushed to ``MEMORY_DIR`` so they survive restarts.
+Pipeline role:
+    Injected into evidence prompts via ``format_prompt_block`` and updated
+    after successful tool calls in ``remember_tool``. Survives restarts via
+    ``MEMORY_DIR/learned_playbooks.json``.
+
+Key entry point:
+    ``PlaybookMemory`` — ``InMemoryStore`` + YAML seeds + disk overlay.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ MAX_LEARNED_TOOLS_PER_REQ = 6
 
 
 def _utc_now() -> str:
+    """Return current UTC time as ISO-8601 string for playbook timestamps."""
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -47,11 +52,23 @@ def _memory_framework_id(framework_id: str) -> str:
 
 
 def _ns(framework_id: str) -> tuple[str, ...]:
+    """Build LangGraph store namespace tuple for a framework id.
+
+    Args:
+        framework_id: Checklist or evidence key (may include host prefix).
+
+    Returns:
+        ``("playbooks", <sanitized_framework_id>)``.
+    """
     return ("playbooks", _memory_framework_id(framework_id))
 
 
 class PlaybookMemory:
-    """Procedural long-term memory backed by LangGraph ``InMemoryStore`` + disk."""
+    """Procedural long-term memory backed by LangGraph ``InMemoryStore`` + disk.
+
+    Loads seed YAML from ``playbooks_dir``, overlays learned JSON from
+    ``memory_dir``, and optionally persists new recipes after successful audits.
+    """
 
     def __init__(
         self,
@@ -60,6 +77,13 @@ class PlaybookMemory:
         memory_dir: Path | str,
         learn: bool = True,
     ) -> None:
+        """Create memory and load seeds + learned entries from disk.
+
+        Args:
+            playbooks_dir: Directory of ``*.yaml`` / ``*.yml`` seed playbooks.
+            memory_dir: Writable directory for ``learned_playbooks.json``.
+            learn: When ``False``, skip hot-path learning and persistence.
+        """
         self.playbooks_dir = Path(playbooks_dir)
         self.memory_dir = Path(memory_dir)
         self.learn = learn
@@ -70,10 +94,14 @@ class PlaybookMemory:
 
     @property
     def store(self) -> InMemoryStore:
+        """Underlying LangGraph in-memory key-value store."""
         return self._store
 
     def reload(self) -> None:
-        """Load seed YAML then overlay learned JSON from ``memory_dir``."""
+        """Load seed YAML then overlay learned JSON from ``memory_dir``.
+
+        Replaces the in-memory store and clears the dirty flag.
+        """
         with self._lock:
             self._store = InMemoryStore()
             self._load_seeds()
@@ -81,6 +109,7 @@ class PlaybookMemory:
             self._dirty = False
 
     def _load_seeds(self) -> None:
+        """Ingest all ``*.yaml`` / ``*.yml`` files from ``playbooks_dir``."""
         if not self.playbooks_dir.is_dir():
             return
         for path in sorted(self.playbooks_dir.glob("*.yaml")):
@@ -89,6 +118,12 @@ class PlaybookMemory:
             self._ingest_yaml_file(path, source="seed")
 
     def _ingest_yaml_file(self, path: Path, *, source: str) -> None:
+        """Parse one playbook YAML file into store entries.
+
+        Args:
+            path: Seed playbook file path.
+            source: Provenance label (typically ``seed``).
+        """
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError) as exc:
@@ -129,6 +164,7 @@ class PlaybookMemory:
             )
 
     def _load_learned(self) -> None:
+        """Overlay ``memory_dir/learned_playbooks.json`` onto the store."""
         path = self.memory_dir / "learned_playbooks.json"
         if not path.is_file():
             return
@@ -150,7 +186,11 @@ class PlaybookMemory:
                 self._store.put(_ns(str(framework_id)), str(key), value)
 
     def persist(self) -> Path | None:
-        """Flush learned entries to ``MEMORY_DIR/learned_playbooks.json``."""
+        """Flush learned entries to ``MEMORY_DIR/learned_playbooks.json``.
+
+        Returns:
+            Path written, or ``None`` when nothing to persist or learning off.
+        """
         with self._lock:
             if not self._dirty and not self.learn:
                 return None
@@ -183,6 +223,7 @@ class PlaybookMemory:
             return path
 
     def _known_framework_ids(self) -> set[str]:
+        """Collect framework ids from seed filenames and learned JSON keys."""
         ids: set[str] = set()
         if self.playbooks_dir.is_dir():
             for path in self.playbooks_dir.glob("*.y*ml"):
@@ -197,12 +238,29 @@ class PlaybookMemory:
         return ids
 
     def get_entry(self, framework_id: str, req_id: str) -> dict[str, Any] | None:
+        """Return the stored playbook dict for one requirement, if any.
+
+        Args:
+            framework_id: Framework or host/framework key.
+            req_id: Requirement id (e.g. ``REQ-001``).
+
+        Returns:
+            Value dict with ``tools``, ``notes``, ``source``, etc., or ``None``.
+        """
         item = self._store.get(_ns(framework_id), req_id)
         if item is None:
             return None
         return dict(item.value or {})
 
     def get_framework_tips(self, framework_id: str) -> list[str]:
+        """Return framework-level tips from the ``_framework`` store key.
+
+        Args:
+            framework_id: Framework id.
+
+        Returns:
+            List of tip strings (may be empty).
+        """
         item = self._store.get(_ns(framework_id), "_framework")
         if item is None:
             return []
@@ -210,7 +268,15 @@ class PlaybookMemory:
         return [str(t) for t in tips]
 
     def format_prompt_block(self, framework_id: str, req_id: str) -> str:
-        """Render procedural memory for injection into the evidence prompt."""
+        """Render procedural memory for injection into the evidence prompt.
+
+        Args:
+            framework_id: Active checklist framework id.
+            req_id: Requirement being assessed.
+
+        Returns:
+            Markdown block with tips, notes, and preferred tool recipes.
+        """
         lines: list[str] = [
             "### Long-term playbook memory (prefer these tools/commands)",
         ]
@@ -254,7 +320,19 @@ class PlaybookMemory:
         *,
         success: bool,
     ) -> None:
-        """Hot-path learning: remember a successful tool recipe for this REQ."""
+        """Hot-path learning: remember a successful tool recipe for this REQ.
+
+        Skips when learning is disabled, the call failed, or the tool is a
+        diagnostic list (``mcp_list*``). Arguments are redacted and truncated
+        before storage; duplicates are deduplicated by name+args signature.
+
+        Args:
+            framework_id: Framework id for namespace.
+            req_id: Requirement id.
+            tool_name: LangChain tool name.
+            arguments: Tool arguments (secrets redacted).
+            success: Only successful calls are remembered.
+        """
         if not self.learn or not success or not framework_id or not req_id:
             return
         if not tool_name or tool_name.startswith("mcp_list"):

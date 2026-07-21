@@ -1,11 +1,26 @@
 #!/usr/bin/env python3
-"""Convert a Nessus/CIS WorkBench .audit file into auditor checklist + playbook.
+"""Convert a Nessus/CIS WorkBench ``.audit`` file into auditor artifacts.
 
-Usage:
-  python scripts/convert_cis_audit.py agents/vendor/CIS_....audit \\
-      --framework-id ubuntu_cis_24_l2 \\
-      --out-md agents/ubuntu_cis_24_l2.md \\
-      --out-playbook agents/playbooks/ubuntu_cis_24_l2.yaml
+This script parses CIS benchmark audit definitions (Nessus ``.audit`` format)
+and emits two downstream files used by the auditor agent:
+
+* **Markdown checklist** — ``## REQ-NNN`` sections with category, severity,
+  verification steps, pass criteria, and CIS remediation text.
+* **YAML playbook** — per-requirement ``ssh_run`` commands for automated probes.
+
+The parser handles both standalone ``<custom_item>`` controls and composite
+``<report>`` blocks that aggregate helper probes from preceding items.
+
+Usage::
+
+    python scripts/convert_cis_audit.py agents/vendor/CIS_....audit \\
+        --framework-id ubuntu_cis_24_l2 \\
+        --out-md agents/ubuntu_cis_24_l2.md \\
+        --out-playbook agents/playbooks/ubuntu_cis_24_l2.yaml
+
+Notes:
+    Control IDs must match ``<major>.<minor>…`` (e.g. ``1.1.1``). Titles that
+  are distribution metadata or non-control descriptions are skipped.
 """
 
 from __future__ import annotations
@@ -33,6 +48,24 @@ _SKIP_TITLES = {
 
 @dataclass
 class Control:
+    """A single CIS benchmark control extracted from an ``.audit`` file.
+
+    Attributes:
+        cis_id: Dotted CIS control identifier (e.g. ``"1.1.1"``).
+        title: Human-readable control title from the audit ``description`` field.
+        check_type: Nessus probe type (e.g. ``CMD_EXEC``, ``FILE_CONTENT``) or
+            ``COMPOSITE`` when assembled from multiple helpers.
+        info: Background / rationale text from the audit ``info`` field.
+        solution: Remediation guidance from the audit ``solution`` field.
+        expect: Expected probe output or pattern from the audit ``expect`` field.
+        cmds: Shell commands or scripts to run during verification (may be
+            multiple for composite controls).
+        file: Target file path for file-content checks.
+        regex: Regular expression applied to ``file`` content when present.
+        reference: CIS benchmark reference string (used to infer severity).
+        see_also: External documentation URL from the audit ``see_also`` field.
+    """
+
     cis_id: str
     title: str
     check_type: str = ""
@@ -47,11 +80,24 @@ class Control:
 
     @property
     def heading(self) -> str:
+        """Return the display heading ``"<cis_id> <title>"``.
+
+        Returns:
+            Combined CIS id and title, stripped of leading/trailing whitespace.
+            Used as the ``## REQ-NNN:`` subtitle in generated Markdown.
+        """
         return f"{self.cis_id} {self.title}".strip()
 
 
 def _unescape_audit_string(value: str) -> str:
-    """Decode Nessus-style quoted string escapes."""
+    """Decode Nessus-style backslash escapes inside quoted audit field values.
+
+    Args:
+        value: Raw string content *without* surrounding quotes (already stripped).
+
+    Returns:
+        Decoded string with ``\\n``, ``\\t``, and escaped quotes expanded.
+    """
     out: list[str] = []
     i = 0
     while i < len(value):
@@ -74,7 +120,20 @@ def _unescape_audit_string(value: str) -> str:
 
 
 def _parse_quoted_or_bare(rest: str, lines: list[str], idx: int) -> tuple[str, int]:
-    """Parse a field value that may be a quoted multi-line string."""
+    """Parse a field value that may be a quoted multi-line string.
+
+    Audit fields use either a bare token on one line or a double-quoted string
+    that can span multiple lines until an unescaped closing ``"``.
+
+    Args:
+        rest: Remainder of the ``key:`` line after the colon (may start with ``"``).
+        lines: Full audit file split into lines (for multi-line continuation).
+        idx: Current line index in ``lines`` (updated as continuation lines are consumed).
+
+    Returns:
+        A tuple of ``(decoded_value, new_line_index)`` where ``new_line_index`` is
+        the index of the line containing the closing quote (or EOF).
+    """
     rest = rest.strip()
     if not rest.startswith('"'):
         # Bare token until end of line (rare)
@@ -99,7 +158,23 @@ def _parse_quoted_or_bare(rest: str, lines: list[str], idx: int) -> tuple[str, i
         buf += "\n" + lines[idx]
 
 
-def _parse_block_fields(lines: list[str], start: int, end_pat: re.Pattern[str]) -> tuple[dict[str, str], int]:
+def _parse_block_fields(
+    lines: list[str], start: int, end_pat: re.Pattern[str]
+) -> tuple[dict[str, str], int]:
+    """Parse ``key: value`` fields inside an XML-like audit block.
+
+    Reads from ``lines[start]`` until a line matching ``end_pat`` (e.g.
+    ``</custom_item>`` or ``</report>``).
+
+    Args:
+        lines: Full audit file split into lines.
+        start: Index of the first line *inside* the block (after the opening tag).
+        end_pat: Compiled regex that marks the end of the block.
+
+    Returns:
+        A tuple of ``(fields_dict, end_line_index)`` mapping lowercase keys to
+        decoded string values.
+    """
     fields: dict[str, str] = {}
     i = start
     while i < len(lines):
@@ -116,6 +191,15 @@ def _parse_block_fields(lines: list[str], start: int, end_pat: re.Pattern[str]) 
 
 
 def _category_for(cis_id: str) -> str:
+    """Map a CIS control id to a high-level benchmark chapter name.
+
+    Args:
+        cis_id: Dotted control id (e.g. ``"5.2.3"``).
+
+    Returns:
+        Chapter label such as ``"Access Authentication Authorization"`` for
+        major section ``5``, or ``"CIS Control"`` when the major number is unknown.
+    """
     major = cis_id.split(".", 1)[0]
     return {
         "1": "Initial Setup",
@@ -129,6 +213,15 @@ def _category_for(cis_id: str) -> str:
 
 
 def _severity_for(reference: str) -> str:
+    """Infer auditor severity from the CIS ``reference`` metadata string.
+
+    Args:
+        reference: Raw ``reference`` field from the audit item (may be empty).
+
+    Returns:
+        ``"Medium"`` for Level 1-only controls, ``"High"`` for Level 2 or when
+        the reference does not specify a level.
+    """
     ref = (reference or "").upper()
     if "LEVEL|1" in ref and "LEVEL|2" not in ref:
         return "Medium"
@@ -138,6 +231,16 @@ def _severity_for(reference: str) -> str:
 
 
 def _is_control_description(desc: str) -> re.Match[str] | None:
+    """Return a regex match if ``desc`` looks like a CIS control title line.
+
+    Args:
+        desc: Value of an audit ``description`` field.
+
+    Returns:
+        A :class:`re.Match` with groups ``cid`` and ``title`` when the text
+        matches ``"<id> <title>"`` (e.g. ``"1.1.1 Ensure …"``); otherwise ``None``
+        for skipped titles, empty strings, or distribution metadata lines.
+    """
     desc = (desc or "").strip()
     if not desc or desc.lower() in _SKIP_TITLES:
         return None
@@ -147,11 +250,26 @@ def _is_control_description(desc: str) -> re.Match[str] | None:
 
 
 def parse_audit(text: str) -> list[Control]:
+    """Parse raw ``.audit`` text into an ordered list of :class:`Control` objects.
+
+    Walks the file for ``<custom_item>`` and ``<report>`` blocks. Standalone
+    items become controls directly; ``<report>`` blocks merge preceding helper
+    probes into a composite control. Duplicate CIS ids are merged, keeping the
+    richest metadata.
+
+    Args:
+        text: Full contents of a Nessus/CIS WorkBench ``.audit`` file.
+
+    Returns:
+        Controls in first-seen document order. May be empty if no valid control
+        descriptions are found.
+    """
     lines = text.splitlines()
     controls: dict[str, Control] = {}
     order: list[str] = []
 
     def upsert(ctrl: Control) -> None:
+        """Insert or merge ``ctrl`` into ``controls`` by ``cis_id``."""
         key = ctrl.cis_id
         if key not in controls:
             controls[key] = ctrl
@@ -253,6 +371,15 @@ def parse_audit(text: str) -> list[Control]:
 
 
 def _truncate(text: str, limit: int = 1200) -> str:
+    """Collapse excessive newlines and cap string length for Markdown output.
+
+    Args:
+        text: Source text (may be ``None`` or empty).
+        limit: Maximum character count before truncation.
+
+    Returns:
+        Normalized text, with an ellipsis appended when truncated.
+    """
     text = re.sub(r"\n{3,}", "\n\n", (text or "").strip())
     if len(text) <= limit:
         return text
@@ -260,6 +387,17 @@ def _truncate(text: str, limit: int = 1200) -> str:
 
 
 def _cmd_for_playbook(ctrl: Control) -> str:
+    """Choose the primary SSH command string for a playbook requirement entry.
+
+    Prefers the first extracted ``cmd``; falls back to ``grep``/``cat`` on
+    ``file``/``regex``; returns a no-op placeholder when nothing is available.
+
+    Args:
+        ctrl: Parsed CIS control.
+
+    Returns:
+        Shell command suitable for the playbook ``ssh_run`` tool argument.
+    """
     if ctrl.cmds:
         # Prefer first command; collapse extreme scripts for playbook hint
         cmd = ctrl.cmds[0].strip()
@@ -279,6 +417,15 @@ def _cmd_for_playbook(ctrl: Control) -> str:
 
 
 def _how_to_verify(ctrl: Control) -> str:
+    """Build the ``**How to verify:**`` Markdown section for a control.
+
+    Args:
+        ctrl: Parsed CIS control with probe metadata.
+
+    Returns:
+        Markdown instructions (inline or bullet list) describing how an auditor
+        should run checks over SSH, including command previews when short enough.
+    """
     parts: list[str] = []
     if ctrl.check_type:
         parts.append(f"Check type: `{ctrl.check_type}`.")
@@ -309,7 +456,21 @@ def _how_to_verify(ctrl: Control) -> str:
     return " ".join(parts) if len(parts) == 1 else "\n".join(f"- {p}" if not p.startswith("```") and not p.startswith("SSH run") and not p.startswith("-") else p for p in parts)
 
 
-def render_markdown(controls: list[Control], *, framework_id: str, title: str, see_also: str) -> str:
+def render_markdown(
+    controls: list[Control], *, framework_id: str, title: str, see_also: str
+) -> str:
+    """Render auditor checklist Markdown from parsed controls.
+
+    Args:
+        controls: Ordered list of CIS controls (become ``REQ-001`` … ``REQ-NNN``).
+        framework_id: YAML front-matter ``id`` (e.g. ``ubuntu_cis_24_l2``).
+        title: Document H1 title.
+        see_also: Benchmark source URL or label for the intro paragraph.
+
+    Returns:
+        Complete Markdown document with YAML front matter and one ``## REQ-NNN``
+        section per control.
+    """
     lines = [
         "---",
         f"id: {framework_id}",
@@ -358,6 +519,15 @@ def render_markdown(controls: list[Control], *, framework_id: str, title: str, s
 
 
 def render_playbook(controls: list[Control], *, framework_id: str) -> str:
+    """Render auditor playbook YAML mapping REQ ids to ``ssh_run`` commands.
+
+    Args:
+        controls: Ordered list of CIS controls (same order as Markdown output).
+        framework_id: Top-level ``framework_id`` key stored in the playbook.
+
+    Returns:
+        YAML string with ``requirements.REQ-NNN.tools[0].arguments.command`` entries.
+    """
     data: dict = {
         "framework_id": framework_id,
         "framework_tips": [
@@ -379,6 +549,17 @@ def render_playbook(controls: list[Control], *, framework_id: str) -> str:
 
 
 def main() -> int:
+    """CLI entry point: parse ``.audit`` file and write checklist + playbook.
+
+    Reads positional ``audit`` path, parses controls, and writes ``--out-md`` and
+    ``--out-playbook``. Creates parent directories as needed.
+
+    Returns:
+        Exit code ``0`` on success.
+
+    Raises:
+        SystemExit: When no controls are parsed from the input file.
+    """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("audit", type=Path)
     ap.add_argument("--framework-id", default="ubuntu_cis_24_l2")

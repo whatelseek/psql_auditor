@@ -1,5 +1,10 @@
 """PostgreSQL warehouse for numbered audit sessions (evidence stays on disk).
 
+This module optionally persists **structured audit results** to PostgreSQL:
+numbered sessions per client, host/framework result rows, checklist snapshots,
+and filled requirement cells. Raw tool stdout remains on disk under
+``artifacts/<client>/``.
+
 Layout (when ``RESULTS_DB_PER_CLIENT=true``)::
 
     results_<client_slug>
@@ -9,11 +14,15 @@ Layout (when ``RESULTS_DB_PER_CLIENT=true``)::
       framework_requirements   -- checklist snapshot for the session/framework
       requirement_results      -- filled cells (status/obs/rec)
 
-A **new audit** (after intake) allocates the next ``session_number`` and inserts
-``audit_sessions``. Every check written later references that session.
-``continue`` resumes the same session; it does not allocate a new number.
+Pipeline role:
+    :func:`start_session_safe` allocates session numbers at intake; finalize and
+    :func:`~auditor.followup.run_update_report` call :func:`record_results_safe`
+    to upsert findings. ``continue`` resumes the same session without a new number.
 
-Tool stdout remains under ``artifacts/<client>/<host>/<framework>/REQ-*/``.
+Key entry points:
+    :class:`ResultsStore` — async PostgreSQL access and schema management.
+    :func:`get_results_store` — singleton when ``RESULTS_DB_ENABLED``.
+    :func:`resolve_continue_target` — map continue commands to thread/run/session.
 """
 
 from __future__ import annotations
@@ -137,7 +146,21 @@ CREATE INDEX IF NOT EXISTS requirement_results_session_idx
 
 @dataclass(frozen=True)
 class AuditSessionInfo:
-    """Allocated or loaded audit session in the results warehouse."""
+    """Allocated or loaded audit session in the results warehouse.
+
+    Attributes:
+        id: Primary key in ``audit_sessions``.
+        session_number: Per-client monotonic session number (1, 2, 3…).
+        client_name: Display client name.
+        client_slug: Filesystem-safe client slug.
+        evidence_run_id: Linked evidence folder name on disk.
+        status: ``running``, ``interrupted``, or ``completed``.
+        continue_thread_id: LangGraph thread for resume.
+        framework_id: Active or last framework id.
+        pending_ids: Remaining REQ ids when interrupted.
+        started_at: Session start timestamp.
+        finished_at: Set when status becomes terminal.
+    """
 
     id: int
     session_number: int
@@ -161,7 +184,15 @@ def sanitize_db_name(prefix: str, client_slug: str) -> str:
 
 
 def _swap_database(dsn: str, database: str) -> str:
-    """Return ``dsn`` with the path/database component replaced."""
+    """Return ``dsn`` with the path/database component replaced.
+
+    Args:
+        dsn: PostgreSQL connection URL.
+        database: Target database name.
+
+    Returns:
+        DSN pointing at ``database``.
+    """
     parsed = urlparse(dsn)
     return urlunparse(
         (
@@ -176,11 +207,26 @@ def _swap_database(dsn: str, database: str) -> str:
 
 
 def _maintenance_dsn(dsn: str) -> str:
-    """Connect to the server's maintenance DB (``postgres``) for CREATE DATABASE."""
+    """Connect to the server's maintenance DB (``postgres``) for CREATE DATABASE.
+
+    Args:
+        dsn: Base PostgreSQL connection URL.
+
+    Returns:
+        DSN with database set to ``postgres``.
+    """
     return _swap_database(dsn, "postgres")
 
 
 def _row_to_session(row: asyncpg.Record) -> AuditSessionInfo:
+    """Convert an ``audit_sessions`` database row to :class:`AuditSessionInfo`.
+
+    Args:
+        row: asyncpg record from a session query.
+
+    Returns:
+        Populated :class:`AuditSessionInfo` instance.
+    """
     pending_raw = row.get("pending_ids")
     pending: list[str] = []
     if isinstance(pending_raw, list):
@@ -203,19 +249,40 @@ def _row_to_session(row: asyncpg.Record) -> AuditSessionInfo:
 
 
 class ResultsStore:
-    """Write numbered audit sessions + checklist cells into a results database."""
+    """Write numbered audit sessions + checklist cells into a results database.
+
+    Creates per-client databases when ``RESULTS_DB_PER_CLIENT`` is enabled and
+    ensures schema via :data:`_SCHEMA_SQL` on first connect.
+
+    Attributes:
+        settings: Auditor settings (DSN, feature flags, name prefix).
+    """
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Initialize store with settings (defaults to :func:`~auditor.config.get_settings`).
+
+        Args:
+            settings: Optional settings override.
+        """
         self.settings = settings or get_settings()
 
     @property
     def enabled(self) -> bool:
+        """Return True when results DB is configured and enabled."""
         return bool(
             self.settings.results_db_enabled
             and (self.settings.results_database_url or "").strip()
         )
 
     def client_database_name(self, client_name: str) -> str:
+        """Return PostgreSQL database name for a client.
+
+        Args:
+            client_name: Display client name.
+
+        Returns:
+            Sanitized ``{prefix}_{slug}`` name (max 63 chars).
+        """
         slug = make_client_slug(client_name) or "client"
         return sanitize_db_name(self.settings.results_db_name_prefix, slug)
 
@@ -229,7 +296,22 @@ class ResultsStore:
         report_language: str | None = None,
         evidence_path: str = "",
     ) -> AuditSessionInfo | None:
-        """Allocate the next ``session_number`` for this client (new audit)."""
+        """Allocate the next ``session_number`` for this client (new audit).
+
+        Inserts a row with status ``running`` and returns the allocated session.
+        Does not run when the results DB is disabled.
+
+        Args:
+            client_name: Display client name.
+            evidence_run_id: Linked evidence folder on disk.
+            continue_thread_id: Initial LangGraph thread id.
+            framework_id: First framework id when known.
+            report_language: Report language code.
+            evidence_path: Relative evidence path for the session.
+
+        Returns:
+            New :class:`AuditSessionInfo`, or ``None`` when disabled.
+        """
         if not self.enabled:
             return None
         client = (client_name or evidence_run_id or "client").strip()
@@ -290,7 +372,19 @@ class ResultsStore:
         pending_ids: Sequence[str] | None = None,
         framework_id: str | None = None,
     ) -> None:
-        """Update lifecycle fields for an existing session (running/interrupted/completed)."""
+        """Update lifecycle fields for an existing session (running/interrupted/completed).
+
+        Sets ``finished_at`` when status becomes ``completed`` or ``interrupted``;
+        clears it when returning to ``running``.
+
+        Args:
+            client_name: Client display name (slug derived internally).
+            session_number: Per-client session number to update.
+            status: New status value.
+            continue_thread_id: Optional new continue thread id.
+            pending_ids: Optional replacement pending REQ id list.
+            framework_id: Optional active framework id update.
+        """
         if not self.enabled:
             return
         slug = make_client_slug(client_name) or "client"
@@ -334,6 +428,15 @@ class ResultsStore:
         client_name: str,
         session_number: int,
     ) -> AuditSessionInfo | None:
+        """Load one audit session by client slug and session number.
+
+        Args:
+            client_name: Client display name (slug derived internally).
+            session_number: Per-client session number.
+
+        Returns:
+            :class:`AuditSessionInfo` or ``None`` when not found or disabled.
+        """
         if not self.enabled:
             return None
         slug = make_client_slug(client_name) or "client"
@@ -451,7 +554,24 @@ class ResultsStore:
         report_language: str | None = None,
         session_number: int | None = None,
     ) -> None:
-        """Insert timestamped host results + cells for a known session number."""
+        """Insert timestamped host results + cells for a known session number.
+
+        Upserts host row, framework requirement snapshots, per-REQ results,
+        and aggregate metrics. Marks session completed when ``source`` is
+        ``finalize`` or ``update_report``.
+
+        Args:
+            client_name: Client display name.
+            evidence_run_id: Evidence folder name on disk.
+            framework_id: Framework key (may be ``host/fw``).
+            evidence_host_id: Host slug for multi-host runs.
+            findings: Filled findings keyed by requirement id.
+            requirements: Optional checklist snapshot.
+            evidence_relpath: Relative path to evidence root.
+            source: Write origin (``finalize``, ``update_report``, …).
+            report_language: Report language code.
+            session_number: Explicit session from run meta when known.
+        """
         if not self.enabled:
             return
         if not findings and not requirements:
@@ -637,6 +757,24 @@ class ResultsStore:
         evidence_path: str,
         framework_id: str,
     ) -> asyncpg.Record:
+        """Resolve or create ``audit_sessions`` row for a results write.
+
+        Prefers explicit ``session_number``, then latest running/interrupted
+        session, then creates session #1 as last resort.
+
+        Args:
+            conn: Open database connection (within transaction).
+            slug: Client slug.
+            client: Display client name.
+            run_id: Evidence run id on disk.
+            session_number: Explicit session from run meta, if any.
+            report_language: Report language code.
+            evidence_path: Relative evidence path.
+            framework_id: Framework being recorded.
+
+        Returns:
+            asyncpg record for the resolved session row.
+        """
         if session_number is not None:
             row = await conn.fetchrow(
                 """
@@ -685,6 +823,19 @@ class ResultsStore:
         )
 
     async def _connect_dsn_for_client(self, client_slug: str) -> str:
+        """Return connection DSN for shared or per-client results database.
+
+        Creates the client database and schema when needed.
+
+        Args:
+            client_slug: Client slug for per-client DB naming.
+
+        Returns:
+            Connection URL ready for :func:`asyncpg.connect`.
+
+        Raises:
+            RuntimeError: When ``RESULTS_DATABASE_URL`` is empty.
+        """
         base = (self.settings.results_database_url or "").strip()
         if not base:
             raise RuntimeError("RESULTS_DATABASE_URL is empty")
@@ -698,6 +849,12 @@ class ResultsStore:
         return client_dsn
 
     async def _ensure_database_exists(self, admin_dsn: str, db_name: str) -> None:
+        """Create per-client results database if it does not exist.
+
+        Args:
+            admin_dsn: Connection URL to maintenance ``postgres`` database.
+            db_name: Target database name to create.
+        """
         maint = _maintenance_dsn(admin_dsn)
         conn = await asyncpg.connect(maint)
         try:
@@ -711,6 +868,11 @@ class ResultsStore:
             await conn.close()
 
     async def _ensure_schema_on_dsn(self, dsn: str) -> None:
+        """Apply :data:`_SCHEMA_SQL` on the given DSN if not already present.
+
+        Args:
+            dsn: Target database connection URL.
+        """
         conn = await asyncpg.connect(dsn)
         try:
             await self._ensure_schema(conn)
@@ -718,6 +880,11 @@ class ResultsStore:
             await conn.close()
 
     async def _ensure_schema(self, conn: asyncpg.Connection) -> None:
+        """Execute schema DDL on an open connection.
+
+        Args:
+            conn: asyncpg connection with execute privileges.
+        """
         await conn.execute(_SCHEMA_SQL)
 
 
@@ -725,7 +892,16 @@ _STORE: ResultsStore | None = None
 
 
 def get_results_store(settings: Settings | None = None) -> ResultsStore | None:
-    """Return a process ResultsStore when enabled, else ``None``."""
+    """Return a process-wide :class:`ResultsStore` when enabled, else ``None``.
+
+    Caches a singleton per settings instance.
+
+    Args:
+        settings: Optional settings override.
+
+    Returns:
+        Enabled store instance, or ``None`` when results DB is disabled.
+    """
     global _STORE
     settings = settings or get_settings()
     store = _STORE
@@ -736,7 +912,15 @@ def get_results_store(settings: Settings | None = None) -> ResultsStore | None:
 
 
 async def start_session_safe(settings: Settings, **kwargs: Any) -> AuditSessionInfo | None:
-    """Best-effort session allocation; returns None when disabled or on error."""
+    """Best-effort session allocation; returns None when disabled or on error.
+
+    Args:
+        settings: Auditor settings.
+        **kwargs: Forwarded to :meth:`ResultsStore.start_session`.
+
+    Returns:
+        New :class:`AuditSessionInfo`, or ``None`` on failure/disabled.
+    """
     store = get_results_store(settings)
     if store is None:
         return None
@@ -753,7 +937,12 @@ async def record_results_safe(
     settings: Settings,
     **kwargs: Any,
 ) -> None:
-    """Best-effort warehouse write; log errors without failing the audit."""
+    """Best-effort warehouse write; log errors without failing the audit.
+
+    Args:
+        settings: Auditor settings.
+        **kwargs: Forwarded to :meth:`ResultsStore.record_host_framework_audit`.
+    """
     store = get_results_store(settings)
     if store is None:
         return
@@ -809,7 +998,14 @@ def format_sessions_markdown(sessions: Sequence[AuditSessionInfo]) -> str:
 
 
 def discover_evidence_client_names(evidence_dir: Path | str) -> list[str]:
-    """Return artifact folder names that look like client runs (have meta.json)."""
+    """Return artifact folder names that look like client runs (have meta.json).
+
+    Args:
+        evidence_dir: Root evidence/artifacts directory.
+
+    Returns:
+        Sorted list of run folder names with ``meta.json`` present.
+    """
     root = Path(evidence_dir)
     if not root.is_dir():
         return []
@@ -937,7 +1133,19 @@ async def sync_session_status_from_run_meta(
     pending_ids: Sequence[str] | None = None,
     framework_id: str = "",
 ) -> None:
-    """Update warehouse session using ``results_session_number`` from disk meta."""
+    """Update warehouse session using ``results_session_number`` from disk meta.
+
+    Reads ``meta.json`` from the evidence run and calls
+    :meth:`ResultsStore.update_session_status` when a session number is stored.
+
+    Args:
+        settings: Auditor settings.
+        run_id: Evidence run folder name.
+        status: New session status.
+        thread_id: Continue thread id for interrupted runs.
+        pending_ids: Remaining requirement ids.
+        framework_id: Active framework id.
+    """
     store = get_results_store(settings)
     if store is None:
         return

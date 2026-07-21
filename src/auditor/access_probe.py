@@ -1,4 +1,13 @@
-"""Probe SSH / Postgres / WinRM reachability for intake step 3."""
+"""Probe SSH, PostgreSQL, and WinRM reachability for pre-audit intake.
+
+Runs during intake step 3 ("access verification") before the main audit graph
+assesses checklist requirements. :func:`probe_access_services` performs lightweight
+live checks against configured endpoints and returns a structured status dict
+for the operator and for :func:`auditor.host_facts.upsert_inventory_md`.
+
+Does not mutate audit state; results inform whether ``has_access`` can be set and
+which tools (SSH, MCP Postgres) are expected to succeed during evidence gathering.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +17,26 @@ from auditor.config import Settings, get_settings
 
 
 async def probe_access_services(settings: Settings | None = None) -> dict[str, Any]:
-    """Return a structured list of reachable vs failed services."""
+    """Probe configured access channels and return structured reachability results.
+
+  Checks, in order:
+
+  * **SSH** — runs ``echo auditor_access_ok && hostname`` via :mod:`auditor.tools.ssh`.
+  * **PostgreSQL (MCP)** — runs ``SELECT current_database(), current_user`` via MCP.
+  * **WinRM** — always reported as ``not_configured`` (not bundled in this release).
+
+  Each service entry includes ``name``, ``status`` (``ok``, ``failed``,
+  ``not_configured``), and a truncated ``detail`` string.
+
+  Args:
+      settings: Optional settings override; defaults to :func:`get_settings`.
+
+  Returns:
+      Dict with keys:
+
+      * ``services``: list of per-service status dicts.
+      * ``any_ok``: ``True`` if at least one service returned ``ok``.
+  """
     settings = settings or get_settings()
     services: list[dict[str, Any]] = []
 

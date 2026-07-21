@@ -4,6 +4,15 @@ Creates the ASGI app that Open WebUI (or curl / the OpenAI SDK) talks to.
 The OpenAI-compatible routes live under ``/v1``; ``/healthz`` is a simple
 liveness probe for Compose / orchestrators.
 
+Pipeline role:
+    Boots the HTTP server that receives chat requests, authenticates API keys,
+    and delegates audit work to ``auditor.graph`` through ``openai_compat``.
+
+Key entry points:
+    * ``create_app()`` — Factory that builds a configured ``FastAPI`` instance.
+    * ``app`` — Module-level ASGI app for ``uvicorn auditor.api.app:app``.
+    * ``main()`` — Console-script entry invoked by the ``auditor`` command.
+
 Run via::
 
     uvicorn auditor.api.app:app --host 0.0.0.0 --port 8000
@@ -24,12 +33,12 @@ from auditor.config import get_settings
 def create_app() -> FastAPI:
     """Build and configure the FastAPI application.
 
-    Mounts the OpenAI-compatible router and registers a health endpoint.
-    Kept as a factory (rather than only a module-level ``app``) so tests can
-    create isolated instances if needed.
+    Mounts the OpenAI-compatible ``/v1`` router and registers a ``/healthz``
+    liveness endpoint. Kept as a factory (rather than only a module-level
+    ``app``) so tests can create isolated instances with different settings.
 
     Returns:
-        Configured ``FastAPI`` instance.
+        Configured ``FastAPI`` instance with title, version, and routers.
     """
     app = FastAPI(
         title="LangGraph Auditor",
@@ -43,10 +52,11 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
-        """Liveness probe used by Docker / load balancers.
+        """Liveness probe used by Docker Compose and load balancers.
 
         Returns:
-            JSON ``{"status": "ok", "version": "<pkg version>"}``.
+            JSON object with ``status`` (always ``"ok"``) and ``version``
+            (the installed ``auditor`` package version).
         """
         return {"status": "ok", "version": __version__}
 
@@ -60,7 +70,9 @@ app = create_app()
 def main() -> None:
     """CLI entrypoint: start uvicorn with host/port from settings.
 
-    Invoked by the ``auditor`` console script defined in ``pyproject.toml``.
+    Reads ``Settings.host`` and ``Settings.port`` (environment-driven) and
+    runs the module-level ``app`` without auto-reload. Invoked by the
+    ``auditor`` console script defined in ``pyproject.toml``.
     """
     settings = get_settings()
     uvicorn.run(

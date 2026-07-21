@@ -1,6 +1,15 @@
 """Persist per-requirement command execution artifacts on disk.
 
-Every audit run creates::
+This module implements the **on-disk evidence layer** for every audit run.
+Tool stdout, requirement snapshots, filled findings, and reports are written
+under a hierarchical folder layout keyed by run id, framework, and REQ id.
+
+Pipeline role:
+    :class:`EvidenceStore` is the single write path for checklist audits,
+    ad-hoc commands, and follow-up evidence. The graph, follow-up handlers,
+    and report rebuild logic all read/write through this API.
+
+Layout (after intake, run folder is typically the **client name**)::
 
     <EVIDENCE_DIR>/<client_name>/
       meta.json
@@ -14,8 +23,11 @@ Every audit run creates::
         REQ-002/
           ...
 
-After intake, the run folder is named after the **client** (not a timestamp).
 Tool outputs written here are **full** (not truncated for the LLM context).
+
+Key entry points:
+    :func:`new_run_id` — allocate a temporary run folder name.
+    :class:`EvidenceStore` — create/open runs, write tool results and findings.
 """
 
 from __future__ import annotations
@@ -36,25 +48,62 @@ _SEQ_FILE = re.compile(r"^(\d{3})_.+\.(txt|json)$", re.IGNORECASE)
 
 
 def new_run_id() -> str:
-    """Return a temporary filesystem-safe run id (renamed to client name after intake)."""
+    """Return a temporary filesystem-safe run id (renamed to client name after intake).
+
+    Format: ``YYYYMMDDTHHMMSSZ_<8-hex>`` UTC timestamp plus short uuid suffix.
+
+    Returns:
+        New run id string suitable as an evidence folder name.
+    """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{stamp}_{uuid4().hex[:8]}"
 
 
 def client_artifacts_id(client_name: str) -> str:
-    """Filesystem-safe artifacts folder name from a client display name."""
+    """Derive filesystem-safe artifacts folder name from a client display name.
+
+    Args:
+        client_name: Human-readable client or organization name.
+
+    Returns:
+        Sanitized lowercase slug (falls back to ``"client"``).
+    """
     return _safe_segment(client_name, "client")
 
 
 def _safe_segment(value: str, fallback: str = "unknown") -> str:
+    """Sanitize a path segment for evidence folder names.
+
+    Args:
+        value: Raw segment (framework id, REQ id, host slug).
+        fallback: Value when cleaning yields empty string.
+
+    Returns:
+        Alphanumeric/``._-`` only segment safe for filesystem paths.
+    """
     cleaned = _SAFE.sub("_", (value or "").strip()).strip("._-")
     return cleaned or fallback
 
 
 class EvidenceStore:
-    """Create run / requirement folders and write command results."""
+    """Create run / requirement folders and write command results.
+
+    Thread-safe for concurrent tool writes within one run via an internal lock
+    and per-requirement sequence counters for ``NNN_<tool>.txt`` filenames.
+
+    Attributes:
+        run_id: Current run folder name (may be renamed via :meth:`rebind_run_id`).
+        root: Absolute path to ``<evidence_dir>/<run_id>/``.
+        host_segment: Optional active host slug for multi-host layout.
+    """
 
     def __init__(self, root: Path | str, run_id: str | None = None) -> None:
+        """Initialize store and create the run directory if needed.
+
+        Args:
+            root: Evidence root directory (parent of run folders).
+            run_id: Existing or new run id; generated when omitted.
+        """
         self.run_id = run_id or new_run_id()
         self.root = Path(root) / self.run_id
         self.root.mkdir(parents=True, exist_ok=True)
@@ -65,7 +114,14 @@ class EvidenceStore:
         self.seed_counters_from_disk()
 
     def host_root(self, host_id: str | None = None) -> Path:
-        """Return evidence root for a host (or run root when no host)."""
+        """Return evidence root for a host (or run root when no host).
+
+        Args:
+            host_id: Explicit host slug; defaults to :attr:`host_segment`.
+
+        Returns:
+            ``<run_root>/<host>/`` when a host is set, else ``<run_root>``.
+        """
         segment = host_id if host_id is not None else self.host_segment
         if segment:
             path = self.root / _safe_segment(segment, "host")
@@ -74,6 +130,15 @@ class EvidenceStore:
         return self.root
 
     def _framework_root(self, framework_id: str, host_id: str | None = None) -> Path:
+        """Resolve directory for a framework key (supports ``host/fw`` paths).
+
+        Args:
+            framework_id: Bare or composite framework key.
+            host_id: Optional host override for multi-host layout.
+
+        Returns:
+            Path to framework directory under the run (created on write).
+        """
         parts = [p for p in str(framework_id).replace("\\", "/").split("/") if p]
         # Explicit ``host/framework`` key (no active host_segment)
         if (
@@ -91,6 +156,12 @@ class EvidenceStore:
 
         If the target folder already exists, merges contents into it and removes
         the temporary source folder.
+
+        Args:
+            new_run_id: Desired folder name (sanitized).
+
+        Returns:
+            Final sanitized ``run_id`` after rename/merge.
         """
         new_id = _safe_segment(new_run_id, "client")
         base = self.root.parent
@@ -125,7 +196,18 @@ class EvidenceStore:
 
     @classmethod
     def open_existing(cls, evidence_dir: Path | str, run_id: str) -> EvidenceStore:
-        """Open an existing run folder (does not create a new run id)."""
+        """Open an existing run folder (does not create a new run id).
+
+        Args:
+            evidence_dir: Root evidence directory.
+            run_id: Existing run folder name.
+
+        Returns:
+            Store instance with counters seeded from on-disk tool files.
+
+        Raises:
+            FileNotFoundError: When ``<evidence_dir>/<run_id>`` does not exist.
+        """
         base = Path(evidence_dir)
         path = base / run_id
         if not path.is_dir():
@@ -137,12 +219,19 @@ class EvidenceStore:
         """Initialize tool sequence counters from existing ``NNN_*.txt`` files.
 
         Required when reopening a finished audit so follow-up commands append
-        (``003_…``) instead of overwriting ``001_…``.
+        (``003_…``) instead of overwriting ``001_…``. Scans both legacy
+        single-host and ``host/framework`` nested layouts.
         """
         if not self.root.is_dir():
             return
 
         def _scan_fw_dir(fw_dir: Path, prefix: str = "") -> None:
+            """Update ``_counters`` from the highest numbered evidence files under ``fw_dir``.
+
+            Args:
+                fw_dir: Framework evidence directory containing REQ-* subfolders.
+                prefix: Optional ``host/`` prefix for nested multi-host layouts.
+            """
             for req_dir in fw_dir.iterdir():
                 if not req_dir.is_dir():
                     continue
@@ -179,7 +268,11 @@ class EvidenceStore:
                         _scan_fw_dir(fw_dir, prefix=f"{child.name}/")
 
     def read_run_meta(self) -> dict[str, Any]:
-        """Load ``meta.json`` or return an empty dict."""
+        """Load ``meta.json`` or return an empty dict.
+
+        Returns:
+            Parsed meta dict, or ``{}`` when missing or invalid.
+        """
         path = self.root / "meta.json"
         if not path.is_file():
             return {}
@@ -190,13 +283,27 @@ class EvidenceStore:
             return {}
 
     def list_framework_ids(self) -> list[str]:
-        """Return framework folder names (``fw`` or ``host/fw``)."""
+        """Return framework folder names (``fw`` or ``host/fw``).
+
+        Detects framework directories by presence of ``report.md`` or REQ-* subfolders.
+
+        Returns:
+            Sorted list of evidence framework keys under this run.
+        """
         if not self.root.is_dir():
             return []
         skip = {"__pycache__"}
         out: list[str] = []
 
         def _is_fw(path: Path) -> bool:
+            """Return True when ``path`` looks like a framework evidence folder.
+
+            A framework folder contains ``report.md`` and/or REQ-* requirement
+            subdirectories.
+
+            Args:
+                path: Candidate directory under the run root or a host folder.
+            """
             if not path.is_dir() or path.name in skip or path.name.startswith("."):
                 return False
             if (path / "report.md").is_file():
@@ -220,7 +327,14 @@ class EvidenceStore:
         return out
 
     def list_requirement_ids(self, framework_id: str) -> list[str]:
-        """Return REQ folder names for a framework."""
+        """Return REQ folder names for a framework.
+
+        Args:
+            framework_id: Evidence framework key.
+
+        Returns:
+            Sorted list of requirement ids (e.g. ``REQ-001``).
+        """
         fw_dir = self._framework_root(framework_id)
         if not fw_dir.is_dir():
             return []
@@ -231,7 +345,15 @@ class EvidenceStore:
         )
 
     def load_finding(self, framework_id: str, req_id: str) -> dict[str, Any] | None:
-        """Load ``finding.json`` for a requirement, if present."""
+        """Load ``finding.json`` for a requirement, if present.
+
+        Args:
+            framework_id: Evidence framework key.
+            req_id: Requirement id.
+
+        Returns:
+            Parsed finding dict, or ``None`` when missing or invalid.
+        """
         path = (
             self._framework_root(framework_id)
             / _safe_segment(req_id, "REQ")
@@ -246,7 +368,14 @@ class EvidenceStore:
             return None
 
     def load_findings(self, framework_id: str) -> dict[str, dict[str, Any]]:
-        """Load all findings for a framework keyed by REQ id."""
+        """Load all findings for a framework keyed by REQ id.
+
+        Args:
+            framework_id: Evidence framework key.
+
+        Returns:
+            Dict mapping requirement id to finding payload.
+        """
         out: dict[str, dict[str, Any]] = {}
         for req_id in self.list_requirement_ids(framework_id):
             finding = self.load_finding(framework_id, req_id)
@@ -255,7 +384,16 @@ class EvidenceStore:
         return out
 
     def write_run_meta(self, **meta: Any) -> Path:
-        """Write/merge ``meta.json`` at the run root."""
+        """Write/merge ``meta.json`` at the run root.
+
+        Merges with existing keys, sets ``run_id`` and ``updated_at`` UTC.
+
+        Args:
+            **meta: Arbitrary metadata fields (client, frameworks, language, …).
+
+        Returns:
+            Path to written ``meta.json``.
+        """
         path = self.root / "meta.json"
         existing: dict[str, Any] = {}
         if path.exists():
@@ -275,7 +413,15 @@ class EvidenceStore:
         return path
 
     def requirement_dir(self, framework_id: str, req_id: str) -> Path:
-        """Return (and create) the folder for one requirement."""
+        """Return (and create) the folder for one requirement.
+
+        Args:
+            framework_id: Evidence framework key.
+            req_id: Requirement id.
+
+        Returns:
+            Path to ``<framework>/<req_id>/`` directory.
+        """
         path = self._framework_root(framework_id) / _safe_segment(req_id, "REQ")
         path.mkdir(parents=True, exist_ok=True)
         return path
@@ -286,7 +432,16 @@ class EvidenceStore:
         req_id: str,
         payload: dict[str, Any],
     ) -> Path:
-        """Write the checklist requirement snapshot for the folder."""
+        """Write the checklist requirement snapshot for the folder.
+
+        Args:
+            framework_id: Evidence framework key.
+            req_id: Requirement id.
+            payload: Checklist fields (id, title, severity, pass_criteria, …).
+
+        Returns:
+            Path to ``requirement.json``.
+        """
         path = self.requirement_dir(framework_id, req_id) / "requirement.json"
         path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
@@ -307,7 +462,18 @@ class EvidenceStore:
         """Append one command/tool execution result under the requirement folder.
 
         Files are named ``NNN_<tool>.txt`` with a human-readable header plus
-        the full stdout/result body.
+        the full stdout/result body. A JSON sidecar is written alongside.
+
+        Args:
+            framework_id: Evidence framework key.
+            req_id: Requirement id.
+            tool_name: Tool identifier (e.g. ``ssh_run``).
+            arguments: Tool call arguments (secrets redacted).
+            result: Full tool output text.
+            error: Optional error message when the call failed.
+
+        Returns:
+            Path to the ``.txt`` evidence file.
         """
         req_dir = self.requirement_dir(framework_id, req_id)
         host = self.host_segment or ""
@@ -354,7 +520,16 @@ class EvidenceStore:
         req_id: str,
         finding: dict[str, Any],
     ) -> Path:
-        """Write the filled finding cells for the requirement."""
+        """Write the filled finding cells for the requirement.
+
+        Args:
+            framework_id: Evidence framework key.
+            req_id: Requirement id.
+            finding: Status, observation, recommendation, and metadata.
+
+        Returns:
+            Path to ``finding.json``.
+        """
         path = self.requirement_dir(framework_id, req_id) / "finding.json"
         path.write_text(
             json.dumps(finding, indent=2, ensure_ascii=False) + "\n",
@@ -363,7 +538,15 @@ class EvidenceStore:
         return path
 
     def list_tool_result_files(self, framework_id: str, req_id: str) -> list[Path]:
-        """Return ordered ``NNN_<tool>.txt`` evidence files for a requirement."""
+        """Return ordered ``NNN_<tool>.txt`` evidence files for a requirement.
+
+        Args:
+            framework_id: Evidence framework key.
+            req_id: Requirement id.
+
+        Returns:
+            Sorted list of ``.txt`` tool log paths (empty when folder missing).
+        """
         req_dir = self._framework_root(framework_id) / _safe_segment(req_id, "REQ")
         if not req_dir.is_dir():
             return []
@@ -383,7 +566,16 @@ class EvidenceStore:
         *,
         max_chars: int = 12000,
     ) -> str:
-        """Concatenate stored tool logs for refill / observation updates."""
+        """Concatenate stored tool logs for refill / observation updates.
+
+        Args:
+            framework_id: Evidence framework key.
+            req_id: Requirement id.
+            max_chars: Maximum total characters (truncates last file with ellipsis).
+
+        Returns:
+            Markdown-ish concatenation of tool log bodies.
+        """
         chunks: list[str] = []
         total = 0
         for path in self.list_tool_result_files(framework_id, req_id):
@@ -406,6 +598,13 @@ class EvidenceStore:
 
         Does **not** overwrite the run-root ``report.md`` — multi-framework
         merges (or a single-framework publish step) own that file.
+
+        Args:
+            framework_id: Evidence framework key.
+            report: Full Markdown report body.
+
+        Returns:
+            Path to ``<framework>/report.md``.
         """
         fw_dir = self._framework_root(framework_id)
         fw_dir.mkdir(parents=True, exist_ok=True)
@@ -414,13 +613,24 @@ class EvidenceStore:
         return path
 
     def write_root_report(self, report: str) -> Path:
-        """Write the combined (or single-framework) report at the run root."""
+        """Write the combined (or single-framework) report at the run root.
+
+        Args:
+            report: Full Markdown report (possibly multi-framework merge).
+
+        Returns:
+            Path to ``<run_root>/report.md``.
+        """
         path = self.root / "report.md"
         path.write_text(report if report.endswith("\n") else report + "\n", encoding="utf-8")
         return path
 
     def framework_report_paths(self) -> list[Path]:
-        """Return existing ``…/report.md`` files (root frameworks or host/fw)."""
+        """Return existing ``…/report.md`` files (root frameworks or host/fw).
+
+        Returns:
+            Sorted list of per-framework report paths under this run.
+        """
         if not self.root.is_dir():
             return []
         out: list[Path] = []

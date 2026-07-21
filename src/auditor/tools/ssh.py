@@ -145,6 +145,7 @@ def get_ssh_tools() -> list:
     """Return LangChain tools for SSH host inspection.
 
     Returns:
-        ``[ssh_run, ssh_read_file]`` for binding into the assess model.
+        A list containing ``ssh_run`` and ``ssh_read_file``, suitable for
+        binding into the evidence-gathering chat model via ``bind_tools``.
     """
     return [ssh_run, ssh_read_file]

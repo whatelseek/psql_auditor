@@ -1,7 +1,13 @@
 """CIS / auditor report compliance metrics and SVG bar charts.
 
-Parses the fixed Markdown summary table produced by ``render_report`` and
-computes compliance percentage by severity (and overall).
+Post-processing stage run at finalize time when
+``Settings.compliance_charts_in_report`` is enabled. Parses the fixed Markdown
+summary table produced by :func:`auditor.state.render_report`, computes
+compliance percentage by severity (and overall), and appends a table plus
+embedded SVG chart via :func:`format_compliance_markdown`.
+
+Skipped requirements are excluded from the compliance denominator by default.
+Partial findings count as half-compliant in the percentage formula.
 """
 
 from __future__ import annotations
@@ -22,6 +28,15 @@ _STATUS_PARTIAL = {"partial", "warning", "warn"}
 
 @dataclass(frozen=True, slots=True)
 class FindingRow:
+    """One parsed row from an audit report summary or detail block.
+
+  Attributes:
+      req_id: Requirement id (``REQ-NNN``).
+      title: Requirement title from the report table.
+      severity: Normalized severity bucket (Critical, High, …).
+      status: Normalized status token (pass, fail, partial, error, skipped).
+  """
+
     req_id: str
     title: str
     severity: str
@@ -30,6 +45,19 @@ class FindingRow:
 
 @dataclass(frozen=True, slots=True)
 class SeverityCompliance:
+    """Aggregated compliance statistics for one severity bucket.
+
+  Attributes:
+      severity: Severity label or ``Overall`` for the rollup row.
+      total: Total findings in this bucket (including skipped).
+      passed: Count with status ``pass``.
+      partial: Count with status ``partial``.
+      failed: Count with status ``fail``.
+      errors: Count with status ``error``.
+      skipped: Count with status ``skipped``.
+      percent: Compliance percentage 0–100 based on assessed (non-skipped) rows.
+  """
+
     severity: str
     total: int
     passed: int
@@ -41,6 +69,14 @@ class SeverityCompliance:
 
 
 def normalize_severity(raw: str) -> str:
+    """Map free-form severity text to a canonical bucket name.
+
+  Args:
+      raw: Severity string from a report table cell.
+
+  Returns:
+      One of Critical, High, Medium, Low, Info, Unknown, or title-cased input.
+  """
     text = (raw or "").strip()
     if not text:
         return "Unknown"
@@ -62,6 +98,18 @@ def normalize_severity(raw: str) -> str:
 
 
 def normalize_status(raw: str) -> str:
+    """Map free-form status text to a canonical assessment token.
+
+  Strips Markdown bold markers and recognizes common synonyms (e.g. ``ok`` →
+  ``pass``, ``non-compliant`` → ``fail``).
+
+  Args:
+      raw: Status string from a report table or detail block.
+
+  Returns:
+      One of ``pass``, ``partial``, ``fail``, ``error``, ``skipped``, or the
+      lowercased input (defaulting empty to ``error``).
+  """
     text = (raw or "").strip().lower()
     text = text.replace("**", "").strip()
     if text in _STATUS_PASS:
@@ -84,7 +132,18 @@ _SUMMARY_ROW = re.compile(
 
 
 def parse_report_findings(markdown: str) -> list[FindingRow]:
-    """Extract finding rows from an auditor Markdown report summary table."""
+    """Extract finding rows from an auditor Markdown report summary table.
+
+  Primary path: regex-scan the summary table pipe rows. Fallback: parse per-
+  requirement detail blocks (``### REQ-NNN``) when the summary table is absent
+  or unparsable. Supports English and Russian column headers in detail blocks.
+
+  Args:
+      markdown: Full audit report Markdown from :func:`render_report`.
+
+  Returns:
+      Deduplicated list of :class:`FindingRow` in document order.
+  """
     text = markdown or ""
     rows: list[FindingRow] = []
     seen: set[str] = set()
@@ -140,6 +199,19 @@ def parse_report_findings(markdown: str) -> list[FindingRow]:
 
 
 def _compliance_percent(passed: int, partial: int, assessed: int) -> float:
+    """Compute weighted compliance percentage for one bucket.
+
+  Partial findings contribute half a point. Returns ``0.0`` when ``assessed`` is
+  zero to avoid division by zero.
+
+  Args:
+      passed: Count of passing requirements.
+      partial: Count of partially compliant requirements.
+      assessed: Denominator (total minus skipped).
+
+  Returns:
+      Rounded percentage in the range 0.0–100.0.
+  """
     if assessed <= 0:
         return 0.0
     # partial counts as half-compliant
@@ -150,7 +222,18 @@ def _compliance_percent(passed: int, partial: int, assessed: int) -> float:
 def compliance_by_severity(
     rows: Iterable[FindingRow],
 ) -> list[SeverityCompliance]:
-    """Aggregate compliance % per severity bucket."""
+    """Aggregate compliance percentage per severity bucket.
+
+  Buckets are emitted in canonical severity order (Critical → Info), then any
+  unknown severities alphabetically. Skipped rows are counted but excluded from
+  the percent denominator.
+
+  Args:
+      rows: Parsed finding rows from :func:`parse_report_findings`.
+
+  Returns:
+      Ordered list of :class:`SeverityCompliance` statistics.
+  """
     buckets: dict[str, dict[str, int]] = defaultdict(
         lambda: {
             "total": 0,
@@ -215,7 +298,17 @@ def compliance_by_severity(
 
 
 def overall_compliance(rows: list[FindingRow]) -> SeverityCompliance:
-    """Single overall compliance metric across all severities."""
+    """Compute a single overall compliance metric across all severities.
+
+  Reuses :func:`compliance_by_severity` by assigning every row the synthetic
+  severity label ``Overall``.
+
+  Args:
+      rows: All parsed finding rows for the report.
+
+  Returns:
+      One :class:`SeverityCompliance` rollup, or zeros when ``rows`` is empty.
+  """
     fake = [FindingRow(r.req_id, r.title, "Overall", r.status) for r in rows]
     stats = compliance_by_severity(fake)
     return stats[0] if stats else SeverityCompliance(
@@ -242,7 +335,21 @@ def render_compliance_bar_chart_svg(
     bar_height: int = 28,
     gap: int = 14,
 ) -> str:
-    """Render a horizontal SVG bar chart (0–100%)."""
+    """Render a horizontal SVG bar chart (0–100%) for compliance stats.
+
+  Produces a dark-theme chart with grid lines at 25% intervals and per-row
+  labels showing percent and pass/partial/assessed counts.
+
+  Args:
+      stats: Rows to chart (typically Overall plus each severity).
+      title: Chart heading embedded in the SVG.
+      width: Total SVG width in pixels.
+      bar_height: Height of each horizontal bar.
+      gap: Vertical gap between bars.
+
+  Returns:
+      Complete SVG document as a string. Empty input yields a placeholder SVG.
+  """
     if not stats:
         return (
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="80">'
@@ -306,12 +413,28 @@ def render_compliance_bar_chart_svg(
 
 
 def svg_as_markdown_image(svg: str, *, alt: str = "CIS compliance chart") -> str:
-    """Embed SVG as Markdown image for Open WebUI / common Markdown viewers."""
+    """Embed SVG as a base64 Markdown image for Open WebUI and viewers.
+
+  Args:
+      svg: Raw SVG markup.
+      alt: Image alt text for accessibility.
+
+  Returns:
+      Markdown ``![alt](data:image/svg+xml;base64,…)`` string.
+  """
     b64 = base64.b64encode(svg.encode("utf-8")).decode("ascii")
     return f"![{alt}](data:image/svg+xml;base64,{b64})"
 
 
 def _xml(text: str) -> str:
+    """Escape a string for safe inclusion in SVG/XML text nodes.
+
+  Args:
+      text: Raw user- or data-derived string.
+
+  Returns:
+      XML-escaped string (`&`, `<`, `>`, `"` replaced).
+  """
     return (
         (text or "")
         .replace("&", "&amp;")
@@ -327,7 +450,19 @@ def format_compliance_markdown(
     title: str | None = None,
     language: str | ReportLanguage | None = "en",
 ) -> str:
-    """Parse report → markdown section with table + SVG chart."""
+    """Append a compliance section (table + SVG chart) to an audit report.
+
+  End-to-end helper: parse findings, compute per-severity and overall stats,
+  render chart, and return Markdown to concatenate after the main report body.
+
+  Args:
+      markdown_report: Existing report Markdown from :func:`render_report`.
+      title: Optional chart title override; defaults to localized UI string.
+      language: Report language for table/chart labels.
+
+  Returns:
+      Markdown fragment (leading ``---`` separator) or a parse-failure message.
+  """
     ui = report_ui(language)
     chart_title = title or ui["chart_title"]
     rows = parse_report_findings(markdown_report)

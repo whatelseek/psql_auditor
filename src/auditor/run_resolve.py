@@ -1,4 +1,21 @@
-"""Resolve prior audit run / framework from chat text, history, or disk."""
+"""Resolve prior audit run / framework from chat text, history, or disk.
+
+This module centralizes **target resolution** for post-audit follow-up,
+ad-hoc attachment, and report rebuild flows. It extracts run ids, host hints,
+and framework keys from operator messages and maps them to an open
+:class:`~auditor.evidence_store.EvidenceStore`.
+
+Pipeline role:
+    Bridges natural-language operator requests ("Evaluate REQ-001 on ubuntu_cis
+    for host 10.0.0.1") to concrete ``(run_id, framework_id, req_ids)`` tuples
+    used by :mod:`auditor.followup` and :mod:`auditor.adhoc`.
+
+Key entry points:
+    :func:`resolve_target` — full resolution for follow-up commands.
+    :func:`latest_run_id` — newest evidence folder on disk.
+    :func:`extract_run_id` / :func:`extract_run_id_from_messages` — run id from text/history.
+    :func:`split_evidence_framework_key` — parse ``host/framework`` evidence keys.
+"""
 
 from __future__ import annotations
 
@@ -43,6 +60,17 @@ _HOST_FW_PATH = re.compile(
 
 @dataclass(frozen=True, slots=True)
 class ResolvedTarget:
+    """Fully resolved evidence target for a follow-up or ad-hoc operation.
+
+    Attributes:
+        run_id: Evidence run folder name (timestamp or client slug).
+        framework_id: Evidence key — bare ``ubuntu_cis`` or ``10.0.0.1/ubuntu_cis``.
+        req_ids: Requirement ids extracted from operator text (may be empty).
+        store: Open :class:`~auditor.evidence_store.EvidenceStore` for the run.
+        source: How ``run_id`` was resolved: ``explicit``, ``history``, or ``disk``.
+        host_id: Host segment from ``framework_id``, or ``None`` for single-host runs.
+    """
+
     run_id: str
     framework_id: str  # evidence key: ``ubuntu_cis`` or ``10.200.29.78/ubuntu_cis``
     req_ids: list[str]
@@ -52,7 +80,15 @@ class ResolvedTarget:
 
 
 def split_evidence_framework_key(key: str) -> tuple[str | None, str]:
-    """Split ``host/fw`` evidence keys into ``(host_id, checklist_id)``."""
+    """Split ``host/fw`` evidence keys into ``(host_id, checklist_id)``.
+
+    Args:
+        key: Framework folder name under the evidence run.
+
+    Returns:
+        Tuple of optional host prefix and bare framework id. For a plain
+        ``ubuntu_cis`` key, host is ``None``.
+    """
     parts = [p for p in str(key or "").replace("\\", "/").split("/") if p]
     if len(parts) >= 2:
         return parts[0], parts[-1]
@@ -62,18 +98,42 @@ def split_evidence_framework_key(key: str) -> tuple[str | None, str]:
 
 
 def checklist_framework_id(framework_key: str) -> str:
-    """Bare checklist id for ``get_framework`` (strips host prefix)."""
+    """Return bare checklist id for :func:`~auditor.frameworks.get_framework`.
+
+    Strips any host prefix from a multi-host evidence key.
+
+    Args:
+        framework_key: Evidence folder key (may include host prefix).
+
+    Returns:
+        Framework id suitable for loading checklist YAML under ``agents/``.
+    """
     _host, fw = split_evidence_framework_key(framework_key)
     return fw
 
 
 def extract_host_hints(text: str) -> list[str]:
-    """Host IPs / names mentioned in operator text (order preserved)."""
+    """Extract host IPs and names mentioned in operator text (order preserved).
+
+    Scans for ``host/fw`` path patterns, IPv4 addresses, and ``host|on|for|@``
+    prefixed tokens while filtering framework-like noise.
+
+    Args:
+        text: Operator message.
+
+    Returns:
+        Deduplicated list of host hint strings in discovery order.
+    """
     raw = text or ""
     seen: set[str] = set()
     out: list[str] = []
 
     def _add(value: str) -> None:
+        """Append a unique host hint, skipping framework ids and stop-words.
+
+        Args:
+            value: Raw host token extracted from the operator message.
+        """
         hint = (value or "").strip().rstrip("/\\")
         if not hint or hint.lower() in seen:
             return
@@ -110,7 +170,15 @@ def extract_host_hints(text: str) -> list[str]:
 
 
 def _key_matches_framework(evidence_key: str, framework_id: str) -> bool:
-    """True when evidence key is ``fw`` or ``host/fw`` for ``framework_id``."""
+    """Return True when evidence key is ``fw`` or ``host/fw`` for ``framework_id``.
+
+    Args:
+        evidence_key: On-disk framework folder name.
+        framework_id: Bare framework id from routing.
+
+    Returns:
+        ``True`` on exact match or suffix ``/framework_id``.
+    """
     if not framework_id:
         return False
     if evidence_key == framework_id:
@@ -119,6 +187,15 @@ def _key_matches_framework(evidence_key: str, framework_id: str) -> bool:
 
 
 def _key_matches_host(evidence_key: str, host_hint: str) -> bool:
+    """Return True when evidence key's host segment matches ``host_hint``.
+
+    Args:
+        evidence_key: On-disk framework folder (may be ``host/fw``).
+        host_hint: Operator-provided host IP, name, or slug.
+
+    Returns:
+        ``True`` on exact or substring host match.
+    """
     host_id, _fw = split_evidence_framework_key(evidence_key)
     if not host_hint:
         return False
@@ -129,7 +206,17 @@ def _key_matches_host(evidence_key: str, host_hint: str) -> bool:
 
 
 def extract_run_id(text: str) -> str | None:
-    """Pull a run id (timestamp or client folder name) from free text."""
+    """Pull a run id (timestamp or client folder name) from free text.
+
+    Matches ISO timestamp run ids, explicit evidence paths, artifact folder
+    names, and Open WebUI download URL segments.
+
+    Args:
+        text: Operator or assistant message content.
+
+    Returns:
+        Run id string, or ``None`` when not found.
+    """
     if not text:
         return None
     match = _RUN_ID.search(text)
@@ -150,7 +237,14 @@ def extract_run_id(text: str) -> str | None:
 
 
 def extract_run_id_from_messages(messages: Sequence[Any]) -> str | None:
-    """Scan chat messages (newest first) for an evidence run id."""
+    """Scan chat messages (newest first) for an evidence run id.
+
+    Args:
+        messages: Chat history (dicts or LangChain messages).
+
+    Returns:
+        First run id found in assistant/user/system content, or ``None``.
+    """
     for msg in reversed(list(messages or [])):
         content = getattr(msg, "content", None)
         if content is None and isinstance(msg, dict):
@@ -167,7 +261,17 @@ def extract_run_id_from_messages(messages: Sequence[Any]) -> str | None:
 
 
 def latest_run_id(evidence_dir: Path | str) -> str | None:
-    """Return the newest run folder under ``evidence_dir`` (by meta/mtime)."""
+    """Return the newest run folder under ``evidence_dir`` (by meta/mtime).
+
+    Skips empty placeholder directories without ``meta.json``. Prefers
+    ``updated_at`` / ``created_at`` from meta when present.
+
+    Args:
+        evidence_dir: Root artifacts/evidence directory.
+
+    Returns:
+        Newest run folder name, or ``None`` when no candidates exist.
+    """
     root = Path(evidence_dir)
     if not root.is_dir():
         return None
@@ -202,7 +306,20 @@ def _disambiguate_framework_matches(
     agents_dir: Path,
     req_id: str,
 ) -> str:
-    """Narrow ``host/fw`` (or plain fw) matches using host + framework hints."""
+    """Narrow ``host/fw`` (or plain fw) matches using host + framework hints.
+
+    Args:
+        matches: Candidate evidence framework keys containing the REQ.
+        user_text: Operator message for host/framework disambiguation.
+        agents_dir: Path to ``agents/`` for :func:`~auditor.frameworks.route_framework`.
+        req_id: Requirement id (used in error messages).
+
+    Returns:
+        Single chosen evidence framework key.
+
+    Raises:
+        ValueError: When multiple matches remain after narrowing.
+    """
     if len(matches) == 1:
         return matches[0]
     if not matches:
@@ -257,7 +374,20 @@ def resolve_framework_for_req(
 ) -> str:
     """Pick a framework folder that contains ``req_id`` (or from routing).
 
-    Returns an evidence key: bare ``ubuntu_cis`` or ``10.200.29.78/ubuntu_cis``.
+    Resolution order: on-disk REQ folders, routed framework from text,
+    single-framework run fallback, or explicit error when ambiguous.
+
+    Args:
+        user_text: Operator message (framework aliases and host hints).
+        store: Open evidence store for the target run.
+        req_id: Requirement id to locate (may be empty for framework-only).
+        agents_dir: Path to framework definitions.
+
+    Returns:
+        Evidence key: bare ``ubuntu_cis`` or ``10.200.29.78/ubuntu_cis``.
+
+    Raises:
+        ValueError: When framework cannot be determined or is ambiguous.
     """
     frameworks = store.list_framework_ids()
     if not frameworks:
@@ -322,7 +452,22 @@ def resolve_target(
     messages: Sequence[Any] | None = None,
     require_req: bool = True,
 ) -> ResolvedTarget:
-    """Resolve run + framework (+ optional REQ ids) for post-audit follow-up."""
+    """Resolve run + framework (+ optional REQ ids) for post-audit follow-up.
+
+    Args:
+        user_text: Operator message.
+        evidence_dir: Root evidence/artifacts directory.
+        agents_dir: Framework definitions directory.
+        messages: Optional chat history for run-id fallback.
+        require_req: When True, raises if no REQ-* id is present in text.
+
+    Returns:
+        :class:`ResolvedTarget` with open store and resolved framework key.
+
+    Raises:
+        ValueError: When REQ is required but missing, or framework is ambiguous.
+        FileNotFoundError: When no evidence run exists on disk.
+    """
     req_ids = extract_req_ids(user_text)
     if require_req and not req_ids:
         raise ValueError("Name at least one requirement id, e.g. `REQ-002`.")

@@ -1,12 +1,17 @@
 """Application settings loaded from environment variables.
 
-All runtime configuration for the auditor (LiteLLM gateway, API auth, SSH target,
-PostgreSQL DSN, MCP server, checklist path) is centralized here via
+Central configuration for the auditor process. Loaded once per process via
+:func:`get_settings` (cached) and consulted by the API layer, LangGraph nodes,
+SSH/MCP tools, and results warehouse writers.
+
+All runtime configuration (LiteLLM gateway, API auth, SSH target, PostgreSQL
+DSN, MCP server, checklist path) is defined on :class:`Settings` via
 ``pydantic-settings``. Values are typically provided through a ``.env`` file or
 process environment; see ``.env.example`` for the full key list.
 
 Environment variable names map from field names in SCREAMING_SNAKE_CASE
-(e.g. ``litellm_base_url`` ← ``LITELLM_BASE_URL``).
+(e.g. ``litellm_base_url`` ← ``LITELLM_BASE_URL``). Connection secrets in
+``secrets/connection.md`` are merged before the first settings read.
 """
 
 from __future__ import annotations

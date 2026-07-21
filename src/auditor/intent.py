@@ -1,4 +1,15 @@
-"""Classify chat intents: audit, ad-hoc, post-audit revise, refill, report update."""
+"""Deterministic chat-intent classification for the Open WebUI entry point.
+
+Runs on every incoming operator message **before** the LangGraph audit graph is
+invoked. The API layer calls :func:`classify_intent` to decide which handler
+path to take: a full checklist audit, ad-hoc command execution, REQ re-evaluation,
+finding cell refill, report rebuild, or session listing.
+
+This module is intentionally regex-based (no LLM) so routing is fast, reproducible,
+and safe for production. English and Russian operator phrases are supported.
+Default intent is ``audit`` so existing "start an audit" flows remain unchanged
+unless the message clearly signals another mode.
+"""
 
 from __future__ import annotations
 
@@ -141,7 +152,18 @@ _REQ_ID = re.compile(r"\bREQ[-\s]?(\d{1,4})\b", re.I)
 
 
 def extract_req_ids(text: str) -> list[str]:
-    """Return normalized ``REQ-NNN`` ids mentioned in ``text`` (order preserved)."""
+    """Extract and normalize checklist requirement ids from free-form text.
+
+    Scans ``text`` for patterns like ``REQ-1``, ``REQ 42``, or ``req-003`` and
+    returns canonical ``REQ-NNN`` strings (three-digit zero padding). Duplicates
+    are removed while preserving first-seen order.
+
+    Args:
+        text: Operator message or command payload. ``None`` is treated as empty.
+
+    Returns:
+        Ordered list of unique requirement ids, e.g. ``["REQ-001", "REQ-042"]``.
+    """
     seen: set[str] = set()
     out: list[str] = []
     for match in _REQ_ID.finditer(text or ""):
@@ -153,7 +175,19 @@ def extract_req_ids(text: str) -> list[str]:
 
 
 def wants_full_revise(text: str) -> bool:
-    """True when the operator wants evidence gather **and** new cells in one step."""
+    """Detect a "full revise" request that combines evidence and cell rewrite.
+
+    A full revise means the operator wants the agent to gather additional evidence
+    for one or more REQs **and** immediately regenerate observation/recommendation
+    cells in a single step (as opposed to evidence-only revision).
+
+    Args:
+        text: Operator message to inspect.
+
+    Returns:
+        ``True`` when strong full-revise phrases (e.g. "revise req", "reassess req")
+        appear in ``text``; otherwise ``False``.
+    """
     raw = text or ""
     return any(pat.search(raw) for pat in _FULL_REVISE)
 
@@ -161,8 +195,21 @@ def wants_full_revise(text: str) -> bool:
 def classify_intent(text: str, *, agents_dir: Path | None = None) -> IntentKind:
     """Classify the latest operator message into a chat intent.
 
+    Evaluates regex pattern groups in priority order: session listing, finding
+    refill, report update, playbook ad-hoc, REQ revision, general ad-hoc commands,
+    and finally full audit. REQ ids in the message can steer borderline cases
+    toward ``revise_req`` when the operator references a requirement without
+    starting a new audit.
+
     Defaults to ``audit`` so existing Open WebUI flows stay unchanged unless the
     operator clearly asks for commands, REQ revision, refill, or report rebuild.
+
+    Args:
+        text: Raw operator message from chat.
+        agents_dir: Reserved for future framework-aware routing; currently ignored.
+
+    Returns:
+        One of the :data:`IntentKind` literals describing the handler to invoke.
     """
     del agents_dir  # reserved
     raw = (text or "").strip()

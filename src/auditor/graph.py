@@ -1,11 +1,18 @@
 """LangGraph cyclic auditor: route → assess → reconnect / HITL → finalize.
 
-Drop-in frameworks live in ``agents/*.md``. The operator request selects one.
+Drop-in frameworks live in ``agents/*.md``. The operator request selects one
+or more checklists; evidence is gathered via SSH and MCP tools, then cells are
+filled and a fixed-format report is produced.
+
+Pipeline role:
+    Central orchestration layer between the HTTP API and tool adapters.
+    Compiles the main audit ``StateGraph``, optional intake subgraph, and
+    exposes async entry points (``arun``, ``aresume``, ``acontinue``).
 
 Control flow::
 
     START
-      → route_framework → load_framework → assess_parallel
+      → route_framework → load_framework → collect_host_facts → assess_parallel
       → route_after_assess
            ├─ recoverable errors & retries left → reconnect_session ─┐
            │                                                         │
@@ -15,6 +22,9 @@ Control flow::
            │         ├─ more failures → human_gate
            │         └─ done → finalize → END
            └─ else → finalize → END
+
+Key entry points:
+    ``AuditorGraph``, ``get_auditor_graph``, ``get_auditor_graph_ready``.
 
 ``human_gate`` asks the operator to **skip** or **retry** via Open WebUI chat.
 """
@@ -176,7 +186,14 @@ _RECOVERABLE_MARKERS = (
 
 
 def _all_tools(*, has_cmdb: bool = True) -> list:
-    """SSH + Postgres MCP tools; NetBox only when CMDB is in scope."""
+    """Collect LangChain tools for evidence gathering.
+
+    Args:
+        has_cmdb: When ``False``, omit NetBox tools (no CMDB in scope).
+
+    Returns:
+        SSH tools, Postgres MCP tools, and optionally NetBox MCP tools.
+    """
     tools = [*get_ssh_tools(), *get_mcp_tools()]
     if has_cmdb:
         tools.extend(get_netbox_tools())
@@ -184,6 +201,14 @@ def _all_tools(*, has_cmdb: bool = True) -> list:
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
+    """Parse a JSON object from model output (raw or embedded in prose).
+
+    Args:
+        text: LLM response text.
+
+    Returns:
+        First dict parsed from the string or a ``{…}`` regex match, or ``None``.
+    """
     text = text.strip()
     try:
         data = json.loads(text)
@@ -202,6 +227,15 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 
 def _normalize_status(value: str | None) -> str:
+    """Map arbitrary status text to a allowed finding status literal.
+
+    Args:
+        value: Raw status from model JSON.
+
+    Returns:
+        One of ``pass``, ``fail``, ``partial``, ``error``, ``skipped``;
+        defaults to ``error`` for unknown values.
+    """
     allowed = {"pass", "fail", "partial", "error", "skipped"}
     status = (value or "error").strip().lower()
     return status if status in allowed else "error"
@@ -216,6 +250,14 @@ def _is_recoverable_finding(finding: Finding) -> bool:
 
 
 def _as_finding(value: Finding | dict[str, Any]) -> Finding:
+    """Coerce graph state finding values to a ``Finding`` model.
+
+    Args:
+        value: ``Finding`` instance or dict from checkpoint/state.
+
+    Returns:
+        Validated ``Finding``.
+    """
     return value if isinstance(value, Finding) else Finding.model_validate(value)
 
 
@@ -247,9 +289,19 @@ def _tool_result_looks_failed(text: str) -> bool:
 
 
 class AuditorGraph:
-    """Compile and run the cyclic multi-framework audit StateGraph."""
+    """Compile and run the cyclic multi-framework audit StateGraph.
+
+    Owns tool-bound LLMs, evidence stores per run, procedural playbooks,
+    intake and main compiled graphs, and multi-framework session bookkeeping
+    across HITL pauses.
+    """
 
     def __init__(self, settings: Settings | None = None) -> None:
+        """Wire settings, models, tools, memory, and compile LangGraph workflows.
+
+        Args:
+            settings: Application settings; defaults to ``get_settings()``.
+        """
         self.settings = settings or get_settings()
         # Full tool set registered; NetBox calls are blocked when has_cmdb=false.
         self.tools = _all_tools(has_cmdb=True)
@@ -313,6 +365,12 @@ class AuditorGraph:
             self._async_cp_ready = True
 
     def _remember_multi_session(self, thread_id: str, session: dict[str, Any]) -> None:
+        """Store multi-framework orchestration state in memory and on disk.
+
+        Args:
+            thread_id: LangGraph checkpoint thread id for the active job.
+            session: Remaining jobs, completed reports, intake state, etc.
+        """
         self._multi_sessions[thread_id] = session
         run_id = str(session.get("run_id") or "")
         if run_id:
@@ -324,6 +382,14 @@ class AuditorGraph:
                 pass
 
     def _forget_multi_session(self, thread_id: str) -> dict[str, Any] | None:
+        """Remove multi-session state for ``thread_id`` and delete disk copy.
+
+        Args:
+            thread_id: Thread whose session record should be dropped.
+
+        Returns:
+            The removed session dict, or ``None`` if not tracked.
+        """
         session = self._multi_sessions.pop(thread_id, None)
         if session is None:
             return None
@@ -336,6 +402,11 @@ class AuditorGraph:
         return session
 
     def _reload_multi_sessions(self, run_id: str) -> None:
+        """Load persisted multi-session records for ``run_id`` into memory.
+
+        Args:
+            run_id: Evidence run id shared across parallel framework threads.
+        """
         if not run_id:
             return
         try:
@@ -347,9 +418,22 @@ class AuditorGraph:
                 self._multi_sessions[tid] = sess
 
     def _evidence_llm(self, *, has_cmdb: bool):
+        """Return the tool-bound chat model appropriate for CMDB scope.
+
+        Args:
+            has_cmdb: When ``False``, use the model without NetBox tools.
+
+        Returns:
+            LangChain runnable with SSH + MCP (+ optional NetBox) tools.
+        """
         return self.evidence_model if has_cmdb else self.evidence_model_no_netbox
 
     def _build(self):
+        """Compile the main audit StateGraph with reconnect and HITL cycles.
+
+        Returns:
+            Compiled graph: route → load → host facts → assess → finalize.
+        """
         graph = StateGraph(AuditorState)
         graph.add_node("route_framework", self.route_framework_node)
         graph.add_node("load_framework", self.load_framework)
@@ -387,6 +471,11 @@ class AuditorGraph:
         return graph.compile(checkpointer=self._checkpointer)
 
     def _build_intake(self):
+        """Compile the pre-audit intake questionnaire subgraph.
+
+        Returns:
+            Single-node graph ending at ``intake_gate`` (may interrupt).
+        """
         graph = StateGraph(AuditorState)
         graph.add_node("intake_gate", self.intake_gate)
         graph.add_edge(START, "intake_gate")
@@ -411,6 +500,15 @@ class AuditorGraph:
     async def _intake_resolve_yes_no(
         self, raw: str, *, question_hint: str
     ) -> str:
+        """Interpret a yes/no intake answer via LLM with rule fallback.
+
+        Args:
+            raw: Operator reply text.
+            question_hint: Context for the classifier prompt.
+
+        Returns:
+            ``yes``, ``no``, or ``unknown``.
+        """
         payload = await self._intake_llm_json(
             INTAKE_INTERPRET_YES_NO_SYSTEM,
             INTAKE_INTERPRET_YES_NO_PROMPT.format(
@@ -421,6 +519,14 @@ class AuditorGraph:
         return resolve_yes_no(str(raw or ""), payload)
 
     async def _intake_resolve_client_name(self, raw: str) -> str:
+        """Extract a normalized client name from free-text intake reply.
+
+        Args:
+            raw: Operator reply naming the audit client.
+
+        Returns:
+            Resolved client display name, or empty when unparseable.
+        """
         payload = await self._intake_llm_json(
             INTAKE_INTERPRET_CLIENT_SYSTEM,
             INTAKE_INTERPRET_CLIENT_PROMPT.format(
@@ -430,6 +536,14 @@ class AuditorGraph:
         return resolve_client_name(str(raw or ""), payload)
 
     async def _intake_resolve_audit_type(self, raw: str) -> str | None:
+        """Map intake reply to audit type (``it``, ``security``, ``both``, etc.).
+
+        Args:
+            raw: Operator reply describing desired audit scope.
+
+        Returns:
+            Canonical audit type string, or ``None`` when unclear.
+        """
         payload = await self._intake_llm_json(
             INTAKE_INTERPRET_AUDIT_TYPE_SYSTEM,
             INTAKE_INTERPRET_AUDIT_TYPE_PROMPT.format(
@@ -960,6 +1074,7 @@ class AuditorGraph:
         )
 
         async def _worker(req_id: str) -> Finding:
+            """Assess one requirement under the concurrency semaphore."""
             async with sem:
                 emit_req_status(
                     req_id, "started", framework_id=framework_id, text=f"Assessing `{req_id}`…"
@@ -1456,6 +1571,23 @@ class AuditorGraph:
         *,
         has_cmdb: bool = True,
     ) -> Finding:
+        """Run evidence gathering + fill model for one requirement cell.
+
+        Writes requirement metadata and finding JSON to the evidence store
+        when ``store`` is provided.
+
+        Args:
+            req_id: Requirement id.
+            requirement: Parsed checklist requirement.
+            user_request: Original operator request (context).
+            framework_id: Active framework id.
+            store: Optional evidence store for disk artifacts.
+            report_language: Language for fill prompts.
+            has_cmdb: Whether NetBox tools are in scope.
+
+        Returns:
+            Completed ``Finding`` for the requirement.
+        """
         if store is not None:
             store.write_requirement(
                 framework_id,
@@ -1520,6 +1652,22 @@ class AuditorGraph:
         *,
         has_cmdb: bool = True,
     ) -> str:
+        """Tool-calling loop: gather raw evidence text for one requirement.
+
+        Injects playbook memory, runs the evidence LLM with SSH/MCP tools,
+        and concatenates tool outputs and final narrative.
+
+        Args:
+            req_id: Requirement id (for progress and playbook lookup).
+            requirement: Checklist requirement being verified.
+            user_request: Original operator request.
+            framework_id: Active framework id.
+            store: Optional evidence store for tool call logging.
+            has_cmdb: Whether NetBox tools are bound.
+
+        Returns:
+            Combined evidence string for the fill model.
+        """
         playbook_block = ""
         if self.playbooks is not None and self.settings.memory_enabled:
             playbook_block = self.playbooks.format_prompt_block(framework_id, req_id)
@@ -1587,7 +1735,23 @@ class AuditorGraph:
         store: EvidenceStore | None = None,
         has_cmdb: bool = True,
     ) -> list[ToolMessage]:
+        """Execute parallel tool calls from the evidence model response.
+
+        Emits progress events, logs to the evidence store, blocks NetBox when
+        ``has_cmdb`` is false, and updates playbook memory on success.
+
+        Args:
+            tool_calls: LangChain tool call dicts from the model.
+            framework_id: Framework id for logging and memory.
+            req_id: Requirement id for logging and memory.
+            store: Optional evidence store.
+            has_cmdb: When ``False``, reject NetBox tool invocations.
+
+        Returns:
+            ``ToolMessage`` list in call order for appending to chat history.
+        """
         async def _one(tc: dict[str, Any]) -> ToolMessage:
+            """Invoke a single tool call and return its ``ToolMessage``."""
             name = tc.get("name") or ""
             args = tc.get("args") or {}
             call_id = tc.get("id") or name
@@ -1669,7 +1833,20 @@ class AuditorGraph:
         ai: AIMessage,
         fallback_evidence: str,
     ) -> Finding:
-        data = _extract_json(str(ai.content or "")) or {}
+        """Parse fill-model JSON into a ``Finding`` with status normalization.
+
+        Forces ``error`` status when evidence looks like a transport failure
+        even if the model returned pass/fail.
+
+        Args:
+            req_id: Requirement id.
+            req: Checklist requirement metadata.
+            ai: Fill model response message.
+            fallback_evidence: Raw evidence when JSON omits observation.
+
+        Returns:
+            Truncated ``Finding`` ready for state and disk.
+        """
         observation = str(
             data.get("observation")
             or data.get("evidence")
@@ -1720,7 +1897,15 @@ class AuditorGraph:
     def _report_language(
         self, state: AuditorState | None = None, user_request: str = ""
     ) -> ReportLanguage:
-        code = ""
+        """Resolve report language from state or user request text.
+
+        Args:
+            state: Optional graph state with ``report_language`` code.
+            user_request: Fallback text for ``detect_report_language``.
+
+        Returns:
+            ``ReportLanguage`` with code and display name.
+        """
         if state:
             code = str(state.get("report_language") or "").strip()
         if code:
@@ -1729,6 +1914,7 @@ class AuditorGraph:
         return detect_report_language(text)
 
     def _report_language_from_request(self, user_request: str) -> ReportLanguage:
+        """Detect report language from the operator request string only."""
         return detect_report_language(user_request)
 
     async def finalize(self, state: AuditorState) -> dict[str, Any]:
@@ -2059,6 +2245,7 @@ class AuditorGraph:
         config = {"configurable": {"thread_id": tid}}
 
         async def _invoke() -> dict[str, Any]:
+            """Run the main graph and decorate with HITL/intake messaging."""
             result = await self.graph.ainvoke(initial, config)
             return self._decorate_result(result, thread_id=tid, store=store)
 
@@ -2398,6 +2585,14 @@ class AuditorGraph:
         self,
         jobs: list[tuple[InventorySshTarget, HostFacts, Any]],
     ) -> str:
+        """Build markdown summary of host → framework routing plan.
+
+        Args:
+            jobs: List of ``(ssh_target, host_facts, framework)`` tuples.
+
+        Returns:
+            Markdown section listing each host and assigned frameworks.
+        """
         lines = [
             "## Host → framework selection",
             "",
@@ -2429,6 +2624,20 @@ class AuditorGraph:
         run_id: str,
         intake: dict[str, Any],
     ) -> dict[str, Any]:
+        """Discover hosts, select frameworks, and start sequential audit jobs.
+
+        Allocates a results-warehouse session, builds host-driven or NLP-routed
+        framework jobs, and delegates to ``_run_framework_jobs``.
+
+        Args:
+            user_text: Original operator request.
+            base_thread: Parent LangGraph thread id.
+            run_id: Shared evidence run id from intake.
+            intake: Completed intake answers dict.
+
+        Returns:
+            Single-framework result or merged multi-framework report.
+        """
         audit_type = str(intake.get("audit_types") or "both")
         domains = domains_for_audit_type(audit_type)
         has_access = bool(intake.get("has_access"))
@@ -2555,11 +2764,13 @@ class AuditorGraph:
             }
 
         def _job_key(target: InventorySshTarget | None, fw: Any) -> str:
+            """Stable key for a host/framework job (``host/fw`` or ``fw``)."""
             if target is None:
                 return fw.id
             return f"{target.slug}/{fw.id}"
 
         def _thread_id(target: InventorySshTarget | None, fw: Any) -> str:
+            """Derive LangGraph thread id for one host/framework job."""
             if target is None:
                 return f"{base_thread}:{fw.id}"
             return f"{base_thread}:{target.slug}:{fw.id}"
@@ -2648,6 +2859,18 @@ class AuditorGraph:
         thread_id: str,
         finished: dict[str, Any],
     ) -> dict[str, Any]:
+        """Advance a multi-framework queue after one graph thread finishes.
+
+        Pops session state for ``thread_id``, records the completed report,
+        and starts the next host/framework job or merges final output.
+
+        Args:
+            thread_id: LangGraph thread that just completed or paused.
+            finished: Result dict from the completed invocation.
+
+        Returns:
+            Next job result, merged multi-report, or ``finished`` unchanged.
+        """
         session = self._forget_multi_session(thread_id)
         if not session:
             return finished
@@ -2678,6 +2901,7 @@ class AuditorGraph:
             return merged
 
         def _target_from_job(job: dict[str, Any]) -> InventorySshTarget | None:
+            """Rebuild ``InventorySshTarget`` from serialized multi-session job."""
             host = str(job.get("ssh_host") or "").strip()
             if not host:
                 return None
@@ -2771,6 +2995,15 @@ class AuditorGraph:
         completed: list[tuple[str, str, str]],
         current_id: str,
     ) -> str:
+        """Build a short markdown header for multi-framework HITL pauses.
+
+        Args:
+            completed: ``(job_key, title, report)`` tuples finished so far.
+            current_id: Job key currently waiting on operator input.
+
+        Returns:
+            Preamble string, or empty when ``completed`` is empty.
+        """
         if not completed:
             return ""
         lines = [
@@ -2791,6 +3024,18 @@ class AuditorGraph:
         run_id: str,
         base_thread: str,
     ) -> dict[str, Any]:
+        """Combine per-framework reports, write root report, and package ZIP.
+
+        Prefers on-disk framework reports (survive HITL) over in-memory text.
+
+        Args:
+            completed: ``(framework_id, title, report)`` tuples in order.
+            run_id: Shared evidence run id.
+            base_thread: Parent thread id for the combined result.
+
+        Returns:
+            Result dict with merged ``report``, archive URLs, and metadata.
+        """
         store = self._evidence_by_run.get(run_id)
         # Prefer on-disk framework reports (survive HITL / mid-run zips).
         disk_reports: dict[str, str] = {}
@@ -3051,6 +3296,7 @@ _graph: AuditorGraph | None = None
 
 
 def get_auditor_graph() -> AuditorGraph:
+    """Return the process-wide singleton ``AuditorGraph`` (lazy-initialized)."""
     global _graph
     if _graph is None:
         _graph = AuditorGraph()

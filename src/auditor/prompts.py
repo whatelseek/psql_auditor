@@ -1,5 +1,9 @@
 """Prompt templates for evidence gathering and fixed report cell filling.
 
+This module holds **string constants** for LLM system/user prompts across the
+auditor pipeline. Templates use ``str.format`` placeholders; callers supply
+language instructions, requirement blocks, and evidence digests.
+
 Token / context strategy:
 
 1. **Evidence phase** (tools) — gather compact facts for one REQ only.
@@ -9,6 +13,13 @@ Token / context strategy:
    by the model; only the three cells above are filled.
 
 Finalize still uses a compact digest for a short executive summary.
+
+Key template groups:
+    ``EVIDENCE_*`` — per-requirement tool-calling during checklist audit.
+    ``FILL_*`` / ``FINALIZE_PROMPT`` — cell fill and executive summary.
+    ``ADHOC_*`` — operator-requested commands (:mod:`auditor.adhoc`).
+    ``HOST_FACTS_*`` — SSH inventory discovery for framework selection.
+    ``INTAKE_INTERPRET_*`` — structured parsing of intake questionnaire replies.
 """
 
 from __future__ import annotations

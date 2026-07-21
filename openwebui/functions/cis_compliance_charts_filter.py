@@ -38,6 +38,15 @@ _COLORS = {
 
 
 def _norm_sev(raw: str) -> str:
+    """Normalize a severity label to canonical title case.
+
+    Args:
+        raw: Raw severity string from a Markdown summary table cell.
+
+    Returns:
+        One of ``Critical``, ``High``, ``Medium``, ``Low``, ``Info``, or
+        ``Unknown``. Unrecognized values are stripped or default to ``Unknown``.
+    """
     key = (raw or "").strip().lower()
     return {
         "critical": "Critical",
@@ -49,6 +58,15 @@ def _norm_sev(raw: str) -> str:
 
 
 def _norm_status(raw: str) -> str:
+    """Normalize audit status text to a small internal vocabulary.
+
+    Args:
+        raw: Raw status cell from the summary table (may include Markdown bold).
+
+    Returns:
+        Lowercase token: ``pass``, ``partial``, ``fail``, ``error``, ``skipped``,
+        or the stripped original when unrecognized.
+    """
     text = (raw or "").strip().lower().replace("**", "").strip()
     if text in _STATUS_PASS:
         return "pass"
@@ -64,6 +82,18 @@ def _norm_status(raw: str) -> str:
 
 
 def parse_findings(markdown: str) -> list[dict[str, str]]:
+    """Extract requirement rows from the auditor summary table.
+
+    Parses ``| REQ-NNN | title | Severity | Status |`` rows only (no detail-
+    section fallback). Used by the outlet filter for fast detection.
+
+    Args:
+        markdown: Full audit report Markdown.
+
+    Returns:
+        List of dicts with keys ``req_id``, ``title``, ``severity``, and
+        ``status``. Duplicate ``req_id`` values are ignored (first wins).
+    """
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
     for m in _SUMMARY_ROW.finditer(markdown or ""):
@@ -83,12 +113,34 @@ def parse_findings(markdown: str) -> list[dict[str, str]]:
 
 
 def _pct(passed: int, partial: int, assessed: int) -> float:
+    """Compute weighted compliance percentage.
+
+    Partial passes count as half a pass: ``(passed + 0.5 * partial) / assessed``.
+
+    Args:
+        passed: Count of passing requirements.
+        partial: Count of partial/warning requirements.
+        assessed: Denominator (total minus skipped).
+
+    Returns:
+        Percentage rounded to one decimal place, or ``0.0`` when ``assessed <= 0``.
+    """
     if assessed <= 0:
         return 0.0
     return round(100.0 * (passed + 0.5 * partial) / assessed, 1)
 
 
 def compliance_stats(rows: Iterable[dict[str, str]]) -> list[dict[str, Any]]:
+    """Aggregate finding counts and compliance % per severity bucket.
+
+    Args:
+        rows: Parsed findings from :func:`parse_findings`.
+
+    Returns:
+        List of stat dicts ordered by :data:`_SEVERITY_ORDER`, each containing
+        ``severity``, count fields, and ``percent``. Skipped items are excluded
+        from the percent denominator.
+    """
     buckets: dict[str, dict[str, int]] = defaultdict(
         lambda: {
             "total": 0,
@@ -124,6 +176,15 @@ def compliance_stats(rows: Iterable[dict[str, str]]) -> list[dict[str, Any]]:
 
 
 def overall_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
+    """Compute a single overall compliance bucket across all severities.
+
+    Args:
+        rows: Parsed findings from :func:`parse_findings`.
+
+    Returns:
+        Stat dict with ``severity`` set to ``"Overall"`` and count / ``percent``
+        fields. Returns zeroed counts when ``rows`` is empty.
+    """
     fake = [{**r, "severity": "Overall"} for r in rows]
     stats = compliance_stats(fake)
     return stats[0] if stats else {
@@ -139,6 +200,14 @@ def overall_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
 
 
 def _xml(text: str) -> str:
+    """Escape text for safe inclusion in SVG ``<text>`` elements.
+
+    Args:
+        text: Raw label or title string.
+
+    Returns:
+        XML-escaped string (``&``, ``<``, ``>``, ``"``).
+    """
     return (
         (text or "")
         .replace("&", "&amp;")
@@ -149,6 +218,15 @@ def _xml(text: str) -> str:
 
 
 def render_svg(stats: list[dict[str, Any]], title: str) -> str:
+    """Render a horizontal bar chart as an inline SVG string.
+
+    Args:
+        stats: Per-severity stat dicts with ``severity`` and ``percent`` keys.
+        title: Chart heading displayed at the top.
+
+    Returns:
+        Complete SVG document with dark-theme horizontal bars.
+    """
     width, bar_h, gap = 640, 28, 14
     left, right, top = 110, 56, 44
     chart_w = width - left - right
@@ -194,16 +272,36 @@ def render_svg(stats: list[dict[str, Any]], title: str) -> str:
 
 
 def svg_as_markdown_image(svg: str, *, alt: str = "CIS compliance chart") -> str:
-    """Embed SVG as a Markdown image.
+    """Embed SVG as a base64 Markdown image for Open WebUI rendering.
 
     Open WebUI's Markdown path often does not render raw ``<svg>`` tags; a
     ``data:image/svg+xml;base64,...`` image is displayed reliably.
+
+    Args:
+        svg: Raw SVG document string.
+        alt: Alt text for the Markdown image.
+
+    Returns:
+        Markdown image line: ``![alt](data:image/svg+xml;base64,...)``.
     """
     b64 = base64.b64encode(svg.encode("utf-8")).decode("ascii")
     return f"![{alt}](data:image/svg+xml;base64,{b64})"
 
 
 def build_visualization(report_markdown: str, *, language: str = "en") -> str:
+    """Build the CIS compliance visualization Markdown block for outlet append.
+
+    Unlike the tool variant, returns an empty string when no REQ rows are found
+    (so the filter can skip appending).
+
+    Args:
+        report_markdown: Full auditor report Markdown.
+        language: ``"en"`` or ``"ru"`` for labels.
+
+    Returns:
+        Markdown section with heading, compliance table, and embedded chart, or
+        ``""`` when parsing yields no rows.
+    """
     rows = parse_findings(report_markdown)
     if not rows:
         return ""
@@ -246,7 +344,19 @@ def build_visualization(report_markdown: str, *, language: str = "en") -> str:
 
 
 def _message_text(content: Any) -> str:
-    """Normalize Open WebUI message content (str or content-parts list) to text."""
+    """Normalize Open WebUI message content to a plain text string.
+
+    Handles string content and OpenAI-style content-part lists (text blocks,
+    nested dict items).
+
+    Args:
+        content: Message ``content`` field from an Open WebUI chat body (may be
+            ``str``, ``list``, or other).
+
+    Returns:
+        Concatenated text suitable for regex parsing. Empty string for
+        ``None`` or unrecognised shapes.
+    """
     if content is None:
         return ""
     if isinstance(content, str):
@@ -266,15 +376,45 @@ def _message_text(content: Any) -> str:
 
 
 class Filter:
+    """Open WebUI outlet filter that auto-appends CIS compliance charts.
+
+    Scans the latest assistant message for auditor report markers and appends
+    a compliance visualization block when one is not already present.
+    """
+
     class Valves(BaseModel):
+        """User-configurable settings for the outlet filter.
+
+        Attributes:
+            priority: Open WebUI filter execution priority (lower runs earlier).
+            AUTO_APPEND: When ``False``, :meth:`outlet` is a no-op passthrough.
+            LANGUAGE: Chart labels — ``auto`` (detect from report), ``en``, or ``ru``.
+        """
+
         priority: int = Field(default=0)
         AUTO_APPEND: bool = Field(default=True)
         LANGUAGE: str = Field(default="auto", description="auto | en | ru")
 
     def __init__(self) -> None:
+        """Initialize filter instance with default :class:`Valves`."""
         self.valves = self.Valves()
 
     async def outlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
+        """Append CIS compliance charts to the latest assistant audit report.
+
+        Walks ``body["messages"]`` from the end, finds the most recent assistant
+        message that looks like an auditor report (summary table or REQ rows),
+        and appends :func:`build_visualization` output when charts are not already
+        present.
+
+        Args:
+            body: Open WebUI outlet request body with ``messages`` list.
+            __user__: Optional authenticated user dict (unused).
+
+        Returns:
+            The same ``body`` dict, possibly with the last matching assistant
+            ``content`` extended by the visualization block.
+        """
         if not self.valves.AUTO_APPEND:
             return body
         messages = body.get("messages") or []
