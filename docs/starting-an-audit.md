@@ -1,37 +1,53 @@
 # Starting an audit (Open WebUI)
 
-This document describes how an operator starts a security audit with **auditor** through Open WebUI: attach a **target file** (host, credentials, description), then ask the agent to run one or more frameworks.
+This document describes how an operator starts a security audit with **auditor**
+through Open WebUI. Full audits begin with a **pre-audit intake** questionnaire,
+then discover each inventory host and run matching **IT** and/or **Cybersecurity**
+frameworks.
 
 ## Operator flow
 
 ```text
 Open WebUI chat (model: auditor)
   │
-  ├─ 1. Attach target file (YAML / JSON preferred)
-  ├─ 2. Message: which frameworks to run
-  │      e.g. "Start PostgreSQL and Ubuntu CIS audit"
+  ├─ 1. Message: start an audit (optional: attach target file)
   │
   ▼
-Agent
-  ├─ Parse target (hostname/IP, SSH, Postgres, description)
-  ├─ Confirm target summary (secrets redacted)
-  ├─ Apply credentials for this run only
-  ├─ Route frameworks (from chat and/or file)
-  ├─ Assess (HITL skip/retry on failures)
-  └─ Finalize → ZIP report+evidence → Download link in chat
+Agent — intake (chat Q&A, marker [AUDIT_INTAKE:…])
+  ├─ Client name
+  ├─ Has CMDB / NetBox?
+  │     ├─ yes → probe NetBox MCP
+  │     └─ no  → inventory only (never call NetBox)
+  ├─ Access to servers/services? → probe SSH + Postgres MCP
+  └─ Domain: IT / Cybersecurity / both
+  │
+  ▼
+Agent — discovery & assessment
+  ├─ Load all SSH hosts from inventory/<Client>/INVENTORY.md
+  ├─ Per host: OS + software signals → match agents/*.md detect rules
+  ├─ Announce host → framework map
+  ├─ Assess each (host, framework) under artifacts/<Client>/<host>/…
+  └─ Finalize → combined report.md + ZIP
 ```
+
+Disable intake with `INTAKE_ENABLED=false` (Compose / `.env`).
 
 ### Step-by-step
 
-1. Open [Open WebUI](http://localhost:3000) and select model **`auditor`**.
-2. Attach a target file (see [Target file format](#target-file-format)).
-3. Send a clear start request naming the frameworks, for example:
-   - `Start PostgreSQL CIS audit on this host`
-   - `Audit Ubuntu CIS using the attached target`
-   - `Conduct PostgreSQL and Ubuntu audit` → separate graphs per framework, one combined report/ZIP
-4. Review the agent’s confirmation (host, OS/DB hints, frameworks). Secrets are never echoed in full.
-5. If something is missing (e.g. no SSH password/key), reply with the missing data or **skip** / **retry** when HITL prompts appear during the run.
-6. When finished, download the **audit ZIP** from the chat reply (report + per-requirement command outputs).
+1. Open Open WebUI and select model **`auditor`**.
+2. Send a start request, for example:
+   - `Start an audit`
+   - `Run IT audit`
+   - `Conduct cybersecurity audit`
+3. Answer intake questions (client name → CMDB → access → IT / Cybersecurity / both).
+4. If HITL prompts appear during the run, reply **skip** / **retry**.
+5. Download the **audit ZIP** from the chat reply.
+
+When CMDB = **no**, the agent uses **inventory only** (no NetBox tools). Host list
+and credentials come from the client `INVENTORY.md` credentials table.
+
+NetBox credentials (only when CMDB = yes): [`secrets/connection.md`](../secrets/connection.example.md)
+(`NETBOX_URL`, `NETBOX_TOKEN`). See [`netbox-mcp.md`](netbox-mcp.md).
 
 ## Target file format
 
@@ -126,15 +142,19 @@ Optional advanced path: the agent may also fetch file bytes from Open WebUI’s 
 ## How the agent uses the target
 
 1. **Parse** — Read attached / injected target; merge with the latest user message.
-2. **Route** — Choose framework(s) from `frameworks:` and/or phrases in the chat (`PostgreSQL`, `Ubuntu`, …).
-3. **Bind credentials (run-scoped)** — SSH and Postgres settings from the file apply to **this audit thread/run only**. They do not permanently rewrite the container `.env`.
-4. **Assess** — Checklist REQs run with SSH and/or MCP tools; evidence lands under `artifacts/<run_id>/…`.
+2. **Discover hosts** — After intake, SSH every inventory host; match frameworks via
+   `domain` + `detect` frontmatter on `agents/*.md` (filtered by IT / Cybersecurity / both).
+3. **Bind credentials (run-scoped)** — Per-host SSH from inventory; Postgres from the PG row.
+4. **Assess** — Checklist REQs run with SSH and/or MCP tools; evidence under
+   `artifacts/<client_name>/<host>/…`.
 5. **HITL** — On hard failures, ask skip / retry in chat (see [README](../README.md#human-in-the-loop-open-webui)).
 6. **Deliver** — Final chat message includes the report summary and a **Download ZIP** link.
 
 ### Fallback without a file
 
-If no target file is attached, the agent can still run using environment defaults (`SSH_*`, `PG_*` / `DATABASE_URL` in `.env`). That mode is suited to a single lab host wired in Compose, not multi-tenant targeting.
+If no target file is attached, the agent uses credentials from
+[`secrets/connection.md`](../secrets/connection.example.md) (mounted into the
+container). Those keys must not appear in `docker-compose.yml`.
 
 ## Chat message examples
 

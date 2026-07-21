@@ -2,6 +2,9 @@
 id: ubuntu_cis
 aliases: [ubuntu, linux, debian, host, os]
 description: Ubuntu CIS host hardening checklist
+domain: cybersecurity
+detect:
+  os_ids: [ubuntu, debian]
 ---
 # Ubuntu CIS Benchmark (scaffold)
 

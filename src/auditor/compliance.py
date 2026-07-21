@@ -12,6 +12,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable
 
+from auditor.language import ReportLanguage, report_ui
+
 _SEVERITY_ORDER = ("Critical", "High", "Medium", "Low", "Info", "Unknown")
 _STATUS_PASS = {"pass", "passed", "ok", "compliant"}
 _STATUS_PARTIAL = {"partial", "warning", "warn"}
@@ -113,8 +115,16 @@ def parse_report_findings(markdown: str) -> list[FindingRow]:
         if req_id in seen:
             continue
         body = block.group(3)
-        sev_m = re.search(r"\|\s*Severity\s*\|\s*([^|]+)\|", body, re.I)
-        st_m = re.search(r"\|\s*\*\*Status\*\*\s*\|\s*([^|]+)\|", body, re.I)
+        sev_m = re.search(
+            r"\|\s*(Severity|Критичность)\s*\|\s*([^|]+)\|",
+            body,
+            re.I,
+        )
+        st_m = re.search(
+            r"\|\s*\*\*(Status|Статус)\*\*\s*\|\s*([^|]+)\|",
+            body,
+            re.I,
+        )
         if not st_m:
             continue
         seen.add(req_id)
@@ -122,8 +132,8 @@ def parse_report_findings(markdown: str) -> list[FindingRow]:
             FindingRow(
                 req_id=req_id,
                 title=block.group(2).strip(),
-                severity=normalize_severity(sev_m.group(1) if sev_m else ""),
-                status=normalize_status(st_m.group(1)),
+                severity=normalize_severity(sev_m.group(2) if sev_m else ""),
+                status=normalize_status(st_m.group(2)),
             )
         )
     return rows
@@ -314,27 +324,25 @@ def _xml(text: str) -> str:
 def format_compliance_markdown(
     markdown_report: str,
     *,
-    title: str = "CIS compliance by severity (%)",
-    language: str = "en",
+    title: str | None = None,
+    language: str | ReportLanguage | None = "en",
 ) -> str:
     """Parse report → markdown section with table + SVG chart."""
+    ui = report_ui(language)
+    chart_title = title or ui["chart_title"]
     rows = parse_report_findings(markdown_report)
     if not rows:
-        if language.startswith("ru"):
-            return (
-                "\n\n---\n\n## Визуализация соответствия CIS\n\n"
-                "Не удалось разобрать таблицу результатов в отчёте.\n"
-            )
         return (
-            "\n\n---\n\n## CIS compliance visualization\n\n"
-            "Could not parse findings from the report markdown.\n"
+            f"\n\n---\n\n## {ui['chart_heading']}\n\n"
+            f"{ui['chart_parse_fail']}\n"
         )
 
     by_sev = compliance_by_severity(rows)
     overall = overall_compliance(rows)
+    overall_label = ui["chart_overall_label"]
     chart_stats = [
         SeverityCompliance(
-            "Overall",
+            overall_label,
             overall.total,
             overall.passed,
             overall.partial,
@@ -345,35 +353,22 @@ def format_compliance_markdown(
         ),
         *by_sev,
     ]
-    svg = render_compliance_bar_chart_svg(chart_stats, title=title)
-    image = svg_as_markdown_image(svg, alt=title)
+    svg = render_compliance_bar_chart_svg(chart_stats, title=chart_title)
+    image = svg_as_markdown_image(svg, alt=chart_title)
 
-    if language.startswith("ru"):
-        lines = [
-            "",
-            "---",
-            "",
-            "## Визуализация соответствия CIS",
-            "",
-            f"**Общий уровень соответствия:** **{overall.percent:.1f}%** "
-            f"(pass + ½·partial / оценённые; skipped не входят в знаменатель).",
-            "",
-            "| Критичность | Соответствие % | Pass | Partial | Fail | Error | Skip | Всего |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
-        ]
-    else:
-        lines = [
-            "",
-            "---",
-            "",
-            "## CIS compliance visualization",
-            "",
-            f"**Overall compliance:** **{overall.percent:.1f}%** "
-            f"(pass + ½·partial / assessed; skipped excluded from denominator).",
-            "",
-            "| Severity | Compliance % | Pass | Partial | Fail | Error | Skip | Total |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
-        ]
+    lines = [
+        "",
+        "---",
+        "",
+        f"## {ui['chart_heading']}",
+        "",
+        f"**{ui['chart_overall']}:** **{overall.percent:.1f}%** "
+        f"{ui['chart_formula']}",
+        "",
+        f"| {ui['chart_sev']} | {ui['chart_pct']} | Pass | Partial | Fail | "
+        f"Error | Skip | {ui['chart_total']} |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
 
     for s in chart_stats:
         lines.append(

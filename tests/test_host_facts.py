@@ -1,0 +1,123 @@
+"""Host facts parsing, drift compare, INVENTORY.md upsert."""
+
+from pathlib import Path
+
+from auditor.host_facts import (
+    HostFacts,
+    compare_to_netbox,
+    parse_binaries_present,
+    parse_hostname,
+    parse_ips,
+    parse_listening_ports,
+    parse_os_release,
+    upsert_inventory_md,
+)
+
+
+def test_parse_hostname_and_ips():
+    assert parse_hostname("db-01.example.com\n") == "db-01.example.com"
+    assert parse_hostname("   Static hostname: db-01\n") == "db-01"
+    assert parse_ips("10.0.0.5 127.0.0.1 10.0.0.6") == ["10.0.0.5", "10.0.0.6"]
+
+
+def test_parse_os_and_software():
+    os_id, ver, pretty = parse_os_release(
+        'NAME="Ubuntu"\nVERSION_ID="22.04"\nID=ubuntu\nPRETTY_NAME="Ubuntu 22.04"\n'
+    )
+    assert os_id == "ubuntu"
+    assert ver == "22.04"
+    assert "Ubuntu" in pretty
+    assert parse_binaries_present("postgres=/usr/bin/postgres\npsql=\ndocker=/usr/bin/docker\n") == [
+        "postgres",
+        "docker",
+    ]
+    assert 5432 in parse_listening_ports("LISTEN 0 128 0.0.0.0:5432 0.0.0.0:*\n")
+
+
+def test_compare_drift_mismatch():
+    facts = HostFacts(hostname="live-host", ips=["10.0.0.9"])
+    nb = {"name": "cmdb-host", "primary_ip4": {"address": "10.0.0.8/24"}}
+    items = compare_to_netbox(facts, nb)
+    by_field = {i.field: i for i in items}
+    assert by_field["hostname"].status == "mismatch"
+    assert by_field["ip"].status == "mismatch"
+
+
+def test_compare_drift_match():
+    facts = HostFacts(hostname="db-01", ips=["10.0.0.8", "10.0.0.9"])
+    nb = {"name": "db-01", "primary_ip4": "10.0.0.8/24"}
+    items = compare_to_netbox(facts, nb)
+    assert all(i.status == "match" for i in items)
+
+
+def test_upsert_inventory(tmp_path: Path):
+    path = tmp_path / "client" / "INVENTORY.md"
+    facts = HostFacts(hostname="h1", ips=["1.2.3.4"], cpu="2", ram="1024", disk="/ 20G")
+    upsert_inventory_md(
+        path,
+        client_name="Client",
+        facts=facts,
+        scope_text="Scope hosts",
+        reachable_services=[{"name": "ssh", "status": "ok", "detail": "ok"}],
+    )
+    text = path.read_text(encoding="utf-8")
+    assert "h1" in text
+    assert "1.2.3.4" in text
+    assert "ssh" in text
+
+
+def test_resolve_client_inventory_found(tmp_path: Path):
+    from auditor.host_facts import resolve_client_inventory
+
+    path = tmp_path / "acme" / "INVENTORY.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("# Scope\nhost-a\n", encoding="utf-8")
+    found_path, text, found = resolve_client_inventory(tmp_path, "acme")
+    assert found is True
+    assert found_path == path
+    assert "host-a" in text
+
+
+def test_resolve_client_inventory_missing_no_example(tmp_path: Path):
+    from auditor.host_facts import resolve_client_inventory
+
+    (tmp_path / "INVENTORY.example.md").write_text("# Example only\n", encoding="utf-8")
+    found_path, text, found = resolve_client_inventory(tmp_path, "missing_client")
+    assert found is False
+    assert found_path is not None
+    assert "Example only" not in text
+    assert "not found" in text.lower() or "No inventory" in text
+
+
+def test_resolve_client_dir_case_insensitive(tmp_path: Path):
+    from auditor.host_facts import resolve_client_dir
+
+    (tmp_path / "TestCompany").mkdir()
+    assert resolve_client_dir(tmp_path, "testcompany").name == "TestCompany"
+
+
+def test_load_inventory_credentials(tmp_path: Path):
+    from auditor.secrets_file import load_inventory_credentials
+
+    client = tmp_path / "TestCompany"
+    client.mkdir()
+    (client / "INVENTORY.md").write_text(
+        """
+## Credentials & access
+
+| Access | Host / URL | Port | Username | Password / Token | Database |
+|--------|------------|------|----------|------------------|----------|
+| SSH | 10.1.1.1 | 22 | auditor | | |
+| PostgreSQL | 10.1.1.1 | 5432 | postgres | secret | app |
+""",
+        encoding="utf-8",
+    )
+    env: dict[str, str] = {"SSH_HOST": "old"}
+    applied = load_inventory_credentials(
+        tmp_path, "testcompany", environ=env, override_existing=True
+    )
+    assert applied["SSH_HOST"] == "10.1.1.1"
+    assert env["SSH_HOST"] == "10.1.1.1"
+    assert env["SSH_PORT"] == "22"
+    assert env["PG_PASSWORD"] == "secret"
+    assert env["PG_DATABASE"] == "app"

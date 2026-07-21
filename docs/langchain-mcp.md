@@ -24,10 +24,12 @@ npx -y mcp-postgres-server   (PG_* env)
 Remote MCP tool names are `query`, `list_tables`, … Playbooks and prompts use
 stable **`mcp_query`**, **`mcp_list_tables`**, etc. Wrappers also:
 
+- honor ``CallToolResult.isError`` (prefix ``MCP error:``)
 - block mutating ``execute``
 - rewrite ``SHOW`` → ``SELECT`` on ``pg_settings``
-- soft-reject non-SELECT SQL
-- fill ``connect_db`` blanks from ``PG_*`` / ``DATABASE_URL``
+- reject non-read-only SQL (allows ``WITH … SELECT``; blocks multi-statement)
+- fill missing ``PG_*`` fields from ``DATABASE_URL`` (including password when host is set)
+- recycle the stdio session only on transport failures
 - keep reconnect semantics for the cyclic audit graph
 
 `PostgresMcpSession.load_adapted_tools()` can still load raw adapter tools

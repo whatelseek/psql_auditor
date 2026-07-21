@@ -20,7 +20,9 @@ async def test_assess_parallel_runs_workers_and_merges_findings():
     )
     graph = AuditorGraph(settings=settings)
 
-    async def fake_assess(req_id, requirement, user_request, framework_id="", store=None):
+    async def fake_assess(
+        req_id, requirement, user_request, framework_id="", store=None, **_kwargs
+    ):
         await asyncio.sleep(0)  # yield to event loop
         return Finding(
             requirement_id=req_id,
@@ -61,7 +63,9 @@ async def test_assess_parallel_respects_concurrency_limit():
     peak = 0
     lock = asyncio.Lock()
 
-    async def fake_assess(req_id, requirement, user_request, framework_id="", store=None):
+    async def fake_assess(
+        req_id, requirement, user_request, framework_id="", store=None, **_kwargs
+    ):
         nonlocal current, peak
         async with lock:
             current += 1

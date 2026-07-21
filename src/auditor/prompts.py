@@ -51,25 +51,29 @@ as compact key=value lines. Do not call tools. Do not judge pass/fail.
 
 # --- Cell fill (no tools; tiny context) ---
 
-FILL_SYSTEM_PROMPT = """You fill cells in a fixed PostgreSQL audit report.
+FILL_SYSTEM_PROMPT = """You fill cells in a fixed security audit report.
 
 You receive: requirement metadata (fixed) + evidence (from tools).
 You output ONLY a JSON object with three cells — nothing else:
 
-{
+{{
   "status": "pass|fail|partial|error",
   "observation": "factual observation from evidence (short)",
   "recommendation": "actionable fix if not pass, else empty"
-}
+}}
 
 Rules:
 - Do not invent facts not present in evidence.
 - If evidence is missing/failed, status=error and say what is missing in observation.
 - Keep observation and recommendation concise (1–3 sentences each).
 - Pass criteria are given for judgment; do not rewrite them.
+- {language_instruction}
 """
 
 FILL_CELL_PROMPT = """Fill report cells for this requirement.
+
+Language: {report_language}
+{language_instruction}
 
 ### Fixed requirement (do not rewrite)
 - ID: {req_id}
@@ -86,7 +90,10 @@ Return JSON only with keys status, observation, recommendation.
 """
 
 # Finalize uses a compact digest (not chat transcripts).
-FINALIZE_PROMPT = """Write a short executive summary for this PostgreSQL audit.
+FINALIZE_PROMPT = """Write a short executive summary for this security audit.
+
+Language: {report_language}
+{language_instruction}
 
 The report uses a fixed format; below is a compact digest of filled cells.
 Cover: overall risk, critical/high failures (by ID), errors, top recommendations.
@@ -111,9 +118,13 @@ Rules:
 - After tools finish, reply with a clear Markdown summary:
   1) what you ran, 2) key results, 3) brief interpretation (optional).
 - If SSH/MCP fails, include the error text (words like "SSH error" / "MCP error").
+- {language_instruction}
 """
 
 ADHOC_USER_PROMPT = """Execute the requested audit command(s).
+
+Language: {report_language}
+{language_instruction}
 
 Operator request:
 {user_request}
@@ -125,4 +136,5 @@ Use tools now if needed, then summarize results in Markdown.
 
 ADHOC_FORCE_PROMPT = """Tool budget exhausted. Summarize results already gathered.
 Do not call more tools. Reply in Markdown.
+{language_instruction}
 """

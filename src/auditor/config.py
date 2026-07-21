@@ -39,7 +39,7 @@ class Settings(BaseSettings):
         memory_enabled: Inject playbook memory into evidence prompts.
         memory_learn: When true, remember successful tool recipes (hot-path).
         evidence_dir: Root directory for per-run / per-requirement command
-            artifacts (``<evidence_dir>/<run_id>/<framework>/<REQ-NNN>/``).
+            artifacts (``<evidence_dir>/<client_name>/<framework>/<REQ-NNN>/``).
         hitl_enabled: When true, pause on failed requirements and ask the
             operator to skip or retry (LangGraph interrupt + chat resume).
         archive_enabled: When true, zip the evidence/report bundle after the
@@ -52,6 +52,8 @@ class Settings(BaseSettings):
             file links in chat (defaults to ``open_webui_url``).
         open_webui_api_key: Bearer token for Open WebUI file upload when auth
             is enabled.
+        open_webui_email / open_webui_password: Optional sign-in used to obtain
+            a JWT for file upload when ``open_webui_api_key`` is empty (lab).
         compliance_charts_in_report: When true, append SVG compliance charts
             to the finalized Markdown report.
         benchmark_enabled: Append aggregate scores to cumulative benchmark.md.
@@ -119,6 +121,8 @@ class Settings(BaseSettings):
     open_webui_url: str | None = None
     open_webui_public_url: str | None = None
     open_webui_api_key: str | None = None
+    open_webui_email: str | None = None
+    open_webui_password: str | None = None
     # Append CIS compliance % bar charts to the final report text
     compliance_charts_in_report: bool = True
     # Cumulative benchmark.md ledger of past audit scores
@@ -127,6 +131,10 @@ class Settings(BaseSettings):
     # Allow chat to run ad-hoc SSH/SQL/playbook commands without a full audit
     adhoc_commands_enabled: bool = True
     max_session_retries: int = 2
+    # Pre-audit intake questionnaire (client / CMDB / access / audit type)
+    intake_enabled: bool = True
+    # Working inventory docs (INVENTORY.md) when CMDB is absent
+    inventory_dir: Path = Field(default=Path("inventory"))
 
     # --- SSH target (PostgreSQL host) ---
     ssh_host: str | None = None
@@ -135,6 +143,8 @@ class Settings(BaseSettings):
     ssh_private_key_path: str | None = None
     ssh_password: str | None = None
     ssh_connect_timeout: int = 15
+    # When false, skip host-key verification (lab only). Default verifies known_hosts.
+    ssh_strict_host_key: bool = True
 
     # --- PostgreSQL credentials for antonorlov/mcp-postgres-server ---
     database_url: str | None = None
@@ -147,6 +157,15 @@ class Settings(BaseSettings):
     # --- MCP stdio via langchain-mcp-adapters → antonorlov/mcp-postgres-server ---
     mcp_postgres_command: str = "npx"
     mcp_postgres_args: str = "-y mcp-postgres-server"
+
+    # --- NetBox CMDB via netboxlabs/netbox-mcp-server ---
+    netbox_url: str | None = None
+    netbox_token: str | None = None
+    netbox_verify_ssl: bool = True
+    mcp_netbox_command: str = "uv"
+    mcp_netbox_args: str = (
+        "--directory /opt/netbox-mcp-server run netbox-mcp-server"
+    )
 
     # --- Context window / quality / parallelism guards ---
     # One requirement per LLM window; truncate tools; cap ReAct depth.
@@ -161,6 +180,9 @@ class Settings(BaseSettings):
     def resolve_pg_fields(self) -> dict[str, str | int]:
         """Resolve discrete PG connection fields, parsing ``database_url`` if needed.
 
+        Discrete ``PG_*`` values win when explicitly set. ``DATABASE_URL`` fills
+        any blank — including password when ``PG_HOST`` is already set.
+
         Returns:
             Dict with keys host, port, user, password, database. Missing values
             may be empty strings.
@@ -170,14 +192,21 @@ class Settings(BaseSettings):
         user = self.pg_user
         password = self.pg_password or ""
         database = self.pg_database
+        set_fields = self.model_fields_set
 
-        if self.database_url and not host:
+        if self.database_url:
             parsed = urlparse(self.database_url)
-            host = parsed.hostname or ""
-            port = parsed.port or 5432
-            user = unquote(parsed.username) if parsed.username else user
-            password = unquote(parsed.password) if parsed.password else password
-            database = (parsed.path or "/").lstrip("/") or database
+            if not host and parsed.hostname:
+                host = parsed.hostname
+            if "pg_port" not in set_fields and parsed.port:
+                port = parsed.port
+            if "pg_user" not in set_fields and parsed.username:
+                user = unquote(parsed.username)
+            if not password and parsed.password:
+                password = unquote(parsed.password)
+            url_db = (parsed.path or "/").lstrip("/")
+            if "pg_database" not in set_fields and url_db:
+                database = url_db
 
         return {
             "host": host,
@@ -238,10 +267,14 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return a process-wide cached ``Settings`` instance.
 
-    Caching avoids re-reading the environment on every tool call. Call
+    Loads ``secrets/connection.md`` (SSH/PG/MCP) before reading the environment.
+    Caching avoids re-reading on every tool call. Call
     ``get_settings.cache_clear()`` in tests after mutating ``os.environ``.
 
     Returns:
         The singleton ``Settings`` object for this process.
     """
+    from auditor.secrets_file import load_connection_secrets
+
+    load_connection_secrets()
     return Settings()

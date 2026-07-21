@@ -1,8 +1,8 @@
-"""Auditor tools: SSH host inspection and Postgres via LangChain MCP adapters.
+"""Auditor tools: SSH host inspection and Postgres/NetBox via LangChain MCP.
 
 Database queries go through ``mcp_client`` (``langchain-mcp-adapters`` +
-https://github.com/antonorlov/mcp-postgres-server). Direct asyncpg ``run_sql``
-remains available for optional offline use but is not bound into the agent.
+https://github.com/antonorlov/mcp-postgres-server). CMDB lookups use
+``netbox_mcp`` (https://github.com/netboxlabs/netbox-mcp-server).
 """
 
 from auditor.tools.mcp_client import (
@@ -16,6 +16,13 @@ from auditor.tools.mcp_client import (
     postgres_mcp_connection,
     reconnect_mcp_session,
 )
+from auditor.tools.netbox_mcp import (
+    get_netbox_tools,
+    netbox_get_changelogs,
+    netbox_get_object_by_id,
+    netbox_get_objects,
+    reconnect_netbox_session,
+)
 from auditor.tools.ssh import get_ssh_tools, ssh_read_file, ssh_run
 
 __all__ = [
@@ -28,6 +35,11 @@ __all__ = [
     "mcp_query",
     "postgres_mcp_connection",
     "reconnect_mcp_session",
+    "get_netbox_tools",
+    "netbox_get_objects",
+    "netbox_get_object_by_id",
+    "netbox_get_changelogs",
+    "reconnect_netbox_session",
     "get_ssh_tools",
     "ssh_run",
     "ssh_read_file",

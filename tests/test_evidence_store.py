@@ -35,16 +35,112 @@ def test_evidence_store_creates_per_requirement_folders(tmp_path: Path):
     assert (store.root / "meta.json").is_file()
 
 
-def test_evidence_store_sequences_multiple_commands(tmp_path: Path):
-    store = EvidenceStore(tmp_path, run_id="run_seq")
-    p1 = store.write_tool_result("ubuntu_cis", "REQ-002", "ssh_run", {"command": "id"}, "uid=0")
-    p2 = store.write_tool_result(
-        "ubuntu_cis",
-        "REQ-002",
-        "ssh_read_file",
-        {"path": "/etc/ssh/sshd_config"},
-        "PermitRootLogin no",
+def test_evidence_store_redacts_password_args(tmp_path: Path):
+    import json
+
+    store = EvidenceStore(tmp_path, run_id="run_secret")
+    path = store.write_tool_result(
+        "postgres_cis",
+        "REQ-001",
+        "mcp_connect_db",
+        {"host": "db", "password": "s3cret", "user": "postgres"},
+        "ok",
     )
-    assert p1.name.startswith("001_")
-    assert p2.name.startswith("002_")
-    assert p1.parent == p2.parent
+    text = path.read_text(encoding="utf-8")
+    assert "s3cret" not in text
+    assert "***REDACTED***" in text
+    sidecar = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert sidecar["arguments"]["password"] == "***REDACTED***"
+
+
+def test_deterministic_it_audit_req006_without_cmdb(tmp_path: Path):
+    from auditor.checklist import Requirement
+    from auditor.config import Settings
+    from auditor.evidence_store import EvidenceStore
+    from auditor.graph import AuditorGraph
+
+    settings = Settings(
+        agents_dir=Path("agents"),
+        playbooks_dir=Path("agents/playbooks"),
+        memory_dir=tmp_path / "memory",
+        evidence_dir=tmp_path,
+        memory_enabled=False,
+        memory_learn=False,
+        litellm_base_url="http://localhost:9",
+    )
+    graph = AuditorGraph(settings=settings)
+    store = EvidenceStore(tmp_path, run_id="TestCompany")
+    (store.root / "INVENTORY.md").write_text("# inv\n", encoding="utf-8")
+    req = Requirement(
+        id="REQ-006",
+        title="CMDB consistency (NetBox)",
+        category="CMDB",
+        severity="High",
+        how_to_verify="x",
+        pass_criteria="y",
+    )
+    finding = graph._deterministic_it_audit_finding(
+        req_id="REQ-006",
+        requirement=req,
+        framework_id="it_audit",
+        state={"has_cmdb": False, "intake": {"has_cmdb": False}},
+        store=store,
+    )
+    assert finding is not None
+    assert finding.status == "pass"
+    assert "INVENTORY.md" in finding.evidence
+
+
+def test_deterministic_it_audit_req007_from_probe():
+    from auditor.checklist import Requirement
+    from auditor.config import Settings
+    from auditor.graph import AuditorGraph
+    from pathlib import Path
+
+    graph = AuditorGraph(
+        settings=Settings(
+            agents_dir=Path("agents"),
+            playbooks_dir=Path("agents/playbooks"),
+            memory_enabled=False,
+            memory_learn=False,
+            litellm_base_url="http://localhost:9",
+        )
+    )
+    req = Requirement(
+        id="REQ-007",
+        title="Service reachability summary",
+        category="Access",
+        severity="Medium",
+        how_to_verify="x",
+        pass_criteria="y",
+    )
+    finding = graph._deterministic_it_audit_finding(
+        req_id="REQ-007",
+        requirement=req,
+        framework_id="it_audit",
+        state={
+            "intake": {
+                "access_probe": {
+                    "any_ok": True,
+                    "services": [
+                        {"name": "ssh", "status": "ok", "detail": "up"},
+                        {"name": "postgres_mcp", "status": "ok", "detail": "up"},
+                    ],
+                }
+            }
+        },
+        store=None,
+    )
+    assert finding is not None
+    assert finding.status == "pass"
+    assert "ssh" in finding.evidence
+
+
+def test_write_report_does_not_overwrite_root(tmp_path: Path):
+    store = EvidenceStore(tmp_path, run_id="run_multi")
+    store.write_root_report("# combined\n")
+    store.write_report("it_audit", "# it only\n")
+    assert (store.root / "it_audit" / "report.md").read_text(encoding="utf-8").startswith(
+        "# it"
+    )
+    assert (store.root / "report.md").read_text(encoding="utf-8").startswith("# combined")

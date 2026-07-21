@@ -42,9 +42,20 @@ Artifacts land under `artifacts/<run_id>/…` like a normal audit evidence folde
 
 ## Safety
 
-- MCP stays **read-only** (`SELECT` / `SHOW`).
-- SSH can run arbitrary remote commands — same trust model as full audits (env credentials).
+- MCP stays **read-only** (`SELECT` / `WITH … SELECT` / `SHOW`). Multi-statement or mutating SQL is blocked.
+- Tool arguments with secrets (`password`, tokens, …) are redacted in evidence / playbook memory.
+- SSH can run arbitrary remote commands — same trust model as full audits (env credentials). Host keys are verified by default (`SSH_STRICT_HOST_KEY=true`).
 - Prefer explicit phrasing so intent classification does not start a full audit by mistake.
+
+## Post-audit vs ad-hoc
+
+| Phrase | Intent |
+|--------|--------|
+| `Run playbook commands for REQ-002` | **Ad-hoc** (deterministic playbook) |
+| `Evaluate REQ-002…` / `Gather evidence for REQ-001` | **Revise** (append into audit evidence folder) |
+| `Prepare new observation… for REQ-001` | **Refill finding** (no new tools) |
+
+See [`post-audit-followup.md`](post-audit-followup.md).
 
 ## Related
 

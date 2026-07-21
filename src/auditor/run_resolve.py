@@ -9,34 +9,127 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from auditor.evidence_store import EvidenceStore
-from auditor.frameworks import get_framework, route_framework
+from auditor.frameworks import route_framework
 from auditor.intent import extract_req_ids
 
 _RUN_ID = re.compile(
     r"\b(20\d{6}T\d{6}Z_[0-9a-f]{8})\b",
     re.IGNORECASE,
 )
+# Client-named artifact folders (after intake): artifacts/TestCompany
+_CLIENT_RUN = re.compile(
+    r"(?:artifacts|evidence)[/\\]+([A-Za-z0-9._-]{1,64})\b",
+    re.IGNORECASE,
+)
 _EVIDENCE_PATH = re.compile(
-    r"(?:evidence(?:\s+directory)?|evidence:)\s*`?([^\s`]+)`?",
+    r"(?:evidence\s+directory:?|evidence:)\s*`?([^\s`:][^`\s]*)`?",
     re.IGNORECASE,
 )
 _DOWNLOAD = re.compile(
-    r"/v1/downloads/(20\d{6}T\d{6}Z_[0-9a-f]{8})_audit\.zip",
+    r"/v1/downloads/([A-Za-z0-9._-]{1,64})_audit\.zip",
     re.IGNORECASE,
+)
+# Host hints for multi-host evidence keys (``10.200.29.78/ubuntu_cis``).
+_IPV4 = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+_HOST_FOR = re.compile(
+    r"\b(?:host|on|for|@)\s+([A-Za-z0-9][A-Za-z0-9._-]{0,63})\b",
+    re.IGNORECASE,
+)
+_HOST_FW_PATH = re.compile(
+    r"\b(\d{1,3}(?:\.\d{1,3}){3}|[A-Za-z0-9][A-Za-z0-9._-]{0,63})"
+    r"[/\\]([A-Za-z0-9][A-Za-z0-9._-]{0,63})\b"
 )
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedTarget:
     run_id: str
-    framework_id: str
+    framework_id: str  # evidence key: ``ubuntu_cis`` or ``10.200.29.78/ubuntu_cis``
     req_ids: list[str]
     store: EvidenceStore
     source: str  # explicit | history | disk
+    host_id: str | None = None
+
+
+def split_evidence_framework_key(key: str) -> tuple[str | None, str]:
+    """Split ``host/fw`` evidence keys into ``(host_id, checklist_id)``."""
+    parts = [p for p in str(key or "").replace("\\", "/").split("/") if p]
+    if len(parts) >= 2:
+        return parts[0], parts[-1]
+    if len(parts) == 1:
+        return None, parts[0]
+    return None, ""
+
+
+def checklist_framework_id(framework_key: str) -> str:
+    """Bare checklist id for ``get_framework`` (strips host prefix)."""
+    _host, fw = split_evidence_framework_key(framework_key)
+    return fw
+
+
+def extract_host_hints(text: str) -> list[str]:
+    """Host IPs / names mentioned in operator text (order preserved)."""
+    raw = text or ""
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _add(value: str) -> None:
+        hint = (value or "").strip().rstrip("/\\")
+        if not hint or hint.lower() in seen:
+            return
+        low = hint.lower()
+        # Skip common non-host words / framework ids captured by _HOST_FOR.
+        if low in {
+            "ubuntu",
+            "postgres",
+            "postgresql",
+            "windows",
+            "linux",
+            "cis",
+            "req",
+            "the",
+            "this",
+            "that",
+            "host",
+            "it_audit",
+            "adhoc",
+        }:
+            return
+        if low.endswith("_cis") or low.endswith("_audit"):
+            return
+        seen.add(low)
+        out.append(hint)
+
+    for match in _HOST_FW_PATH.finditer(raw):
+        _add(match.group(1))
+    for match in _IPV4.finditer(raw):
+        _add(match.group(1))
+    for match in _HOST_FOR.finditer(raw):
+        _add(match.group(1))
+    return out
+
+
+def _key_matches_framework(evidence_key: str, framework_id: str) -> bool:
+    """True when evidence key is ``fw`` or ``host/fw`` for ``framework_id``."""
+    if not framework_id:
+        return False
+    if evidence_key == framework_id:
+        return True
+    return evidence_key.endswith(f"/{framework_id}")
+
+
+def _key_matches_host(evidence_key: str, host_hint: str) -> bool:
+    host_id, _fw = split_evidence_framework_key(evidence_key)
+    if not host_hint:
+        return False
+    hint = host_hint.lower()
+    if host_id and (host_id.lower() == hint or hint in host_id.lower()):
+        return True
+    return hint in evidence_key.lower()
 
 
 def extract_run_id(text: str) -> str | None:
-    """Pull a run id from free text if present."""
+    """Pull a run id (timestamp or client folder name) from free text."""
     if not text:
         return None
     match = _RUN_ID.search(text)
@@ -45,8 +138,11 @@ def extract_run_id(text: str) -> str | None:
     path_match = _EVIDENCE_PATH.search(text)
     if path_match:
         segment = Path(path_match.group(1).rstrip("/")).name
-        if _RUN_ID.fullmatch(segment):
+        if segment and segment not in {".", ".."}:
             return segment
+    client = _CLIENT_RUN.search(text)
+    if client:
+        return client.group(1)
     dl = _DOWNLOAD.search(text)
     if dl:
         return dl.group(1)
@@ -79,25 +175,77 @@ def latest_run_id(evidence_dir: Path | str) -> str | None:
     for path in root.iterdir():
         if not path.is_dir() or path.name.startswith("."):
             continue
-        if not _RUN_ID.fullmatch(path.name):
-            continue
-        score = path.stat().st_mtime
+        # Skip empty placeholder dirs without meta
         meta_path = path / "meta.json"
+        score = path.stat().st_mtime
         if meta_path.is_file():
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                updated = str(meta.get("updated_at") or "")
+                updated = str(meta.get("updated_at") or meta.get("created_at") or "")
                 if updated:
-                    # ISO timestamps sort lexicographically when UTC-Z
                     score = max(score, path.stat().st_mtime)
             except (OSError, json.JSONDecodeError):
                 pass
-        # Prefer run_id stamp ordering as primary key
+        elif not any(path.iterdir()):
+            continue
         candidates.append((path.name, score))
     if not candidates:
         return None
-    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    candidates.sort(key=lambda item: item[1], reverse=True)
     return candidates[0][0]
+
+
+def _disambiguate_framework_matches(
+    matches: list[str],
+    *,
+    user_text: str,
+    agents_dir: Path,
+    req_id: str,
+) -> str:
+    """Narrow ``host/fw`` (or plain fw) matches using host + framework hints."""
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise ValueError("No matching framework evidence found.")
+
+    narrowed = list(matches)
+    host_hints = extract_host_hints(user_text)
+    # Prefer IPv4 hints when present (ignore framework-like noise).
+    preferred_hosts = [h for h in host_hints if _IPV4.fullmatch(h)] or host_hints
+    if preferred_hosts:
+        by_host = [
+            m
+            for m in narrowed
+            if any(_key_matches_host(m, hint) for hint in preferred_hosts)
+        ]
+        if len(by_host) == 1:
+            return by_host[0]
+        if by_host:
+            narrowed = by_host
+
+    try:
+        routed = route_framework(user_text, agents_dir)
+    except FileNotFoundError:
+        routed = None
+
+    if routed is not None:
+        by_fw = [m for m in narrowed if _key_matches_framework(m, routed.id)]
+        if len(by_fw) == 1:
+            return by_fw[0]
+        if by_fw:
+            narrowed = by_fw
+        # Explicit path-like mention already in text (host/fw).
+        for m in narrowed:
+            if m.lower() in (user_text or "").lower():
+                return m
+
+    label = f"REQ `{req_id}`" if req_id else "this request"
+    raise ValueError(
+        f"{label} exists in multiple frameworks/hosts: "
+        + ", ".join(f"`{m}`" for m in matches)
+        + ". Name the host and framework, e.g. "
+        "`Evaluate REQ-001 on ubuntu_cis for host 10.200.29.78`."
+    )
 
 
 def resolve_framework_for_req(
@@ -107,42 +255,53 @@ def resolve_framework_for_req(
     req_id: str,
     agents_dir: Path,
 ) -> str:
-    """Pick a framework folder that contains ``req_id`` (or from routing)."""
-    # Explicit known framework id/alias from text.
-    try:
-        routed = route_framework(user_text, agents_dir)
-        fw_path = store.root / routed.id
-        if fw_path.is_dir() and (
-            not req_id
-            or (fw_path / req_id).is_dir()
-            or req_id in store.list_requirement_ids(routed.id)
-        ):
-            return routed.id
-        # Routed fw exists in agents but folder may use same id even if REQ not yet there
-        if fw_path.is_dir():
-            return routed.id
-        # If checklist has the REQ, still prefer routed id for revise
-        fw_obj = get_framework(routed.id, agents_dir)
-        if fw_obj is not None:
-            return routed.id
-    except FileNotFoundError:
-        pass
+    """Pick a framework folder that contains ``req_id`` (or from routing).
 
+    Returns an evidence key: bare ``ubuntu_cis`` or ``10.200.29.78/ubuntu_cis``.
+    """
     frameworks = store.list_framework_ids()
     if not frameworks:
         meta = store.read_run_meta()
-        frameworks = [str(x) for x in (meta.get("frameworks") or []) if x and x != "adhoc"]
+        frameworks = [
+            str(x) for x in (meta.get("frameworks") or []) if x and x != "adhoc"
+        ]
 
+    # Prefer on-disk evidence that already contains this REQ.
     if req_id:
         matches = [fw for fw in frameworks if (store.root / fw / req_id).is_dir()]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            raise ValueError(
-                f"REQ `{req_id}` exists in multiple frameworks: "
-                + ", ".join(f"`{m}`" for m in matches)
-                + ". Name the framework in your message."
+        if matches:
+            return _disambiguate_framework_matches(
+                matches,
+                user_text=user_text,
+                agents_dir=agents_dir,
+                req_id=req_id,
             )
+
+    # Explicit known framework id/alias from text (must exist in this run).
+    try:
+        routed = route_framework(user_text, agents_dir)
+        fw_path = store.root / routed.id
+        if fw_path.is_dir():
+            return routed.id
+        # Alias mentioned but folder not created yet — only if single framework run.
+        if len(frameworks) == 1:
+            return frameworks[0]
+        fw_matches = [m for m in frameworks if _key_matches_framework(m, routed.id)]
+        if fw_matches:
+            return _disambiguate_framework_matches(
+                fw_matches,
+                user_text=user_text,
+                agents_dir=agents_dir,
+                req_id=req_id,
+            )
+        # Text clearly names a framework that has a checklist even if empty folder.
+        lowered = (user_text or "").lower()
+        if routed.id.lower() in lowered or any(
+            a.lower() in lowered for a in (routed.aliases or [])
+        ):
+            return routed.id
+    except FileNotFoundError:
+        pass
 
     if len(frameworks) == 1:
         return frameworks[0]
@@ -191,10 +350,12 @@ def resolve_target(
         req_id=req_id,
         agents_dir=agents_dir,
     )
+    host_id, _bare = split_evidence_framework_key(framework_id)
     return ResolvedTarget(
         run_id=run_id,
         framework_id=framework_id,
         req_ids=req_ids,
         store=store,
         source=source,
+        host_id=host_id,
     )

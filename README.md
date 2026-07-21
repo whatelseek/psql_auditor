@@ -59,7 +59,7 @@ Reply in the same chat. A marker `[AUDIT_HITL:<thread>]` ties the resume to the 
 
 When the audit finishes, the agent:
 
-1. Zips `artifacts/<run_id>/` (Markdown report + per-REQ command outputs)
+1. Zips `artifacts/<client_name>/` (Markdown report + per-REQ command outputs)
 2. Serves it at `/v1/downloads/<run_id>_audit.zip?token=…`
 3. Uploads it to Open WebUI Files (when `OPEN_WEBUI_URL` is set)
 4. Appends a **Download ZIP** link to the chat reply
@@ -68,21 +68,23 @@ Configure `PUBLIC_BASE_URL` (browser → agent) and `OPEN_WEBUI_URL` (agent → 
 
 ## Starting an audit (Open WebUI)
 
-Operators start audits by **attaching a target file** (hostname/IP, SSH & Postgres credentials, host description) and asking the agent to run one or more frameworks.
-
-Full procedure, YAML/JSON schema, Open WebUI file-context settings, and security notes:
+Operators start audits in Open WebUI. The agent runs a **pre-audit intake**
+(client name → CMDB/NetBox → access probe → CIS / IT / both), then assesses.
 
 → **[`docs/starting-an-audit.md`](docs/starting-an-audit.md)**  
-→ Example file: [`docs/examples/target.example.yaml`](docs/examples/target.example.yaml)
+→ NetBox MCP: [`docs/netbox-mcp.md`](docs/netbox-mcp.md)  
+→ Example target file: [`docs/examples/target.example.yaml`](docs/examples/target.example.yaml)  
+→ Connection secrets: [`secrets/connection.example.md`](secrets/connection.example.md)
 
 Short version:
 
 1. Open WebUI → model `auditor`
-2. Attach target YAML/JSON (see example above)
-3. Chat: `Start PostgreSQL and Ubuntu CIS audit`
-4. Agent confirms target (secrets redacted) → assesses → HITL if needed → **Download ZIP** in chat
+2. Chat: `Start PostgreSQL CIS audit` (or IT audit / both)
+3. Answer intake questions; agent probes NetBox / SSH / Postgres as applicable
+4. Report + **Download ZIP** (includes host facts / INVENTORY.md when relevant)
 
-Without a file, the agent falls back to `SSH_*` / `PG_*` from `.env`.
+Without a CMDB, scope comes from [`inventory/INVENTORY.md`](inventory/INVENTORY.example.md).
+SSH/PG/NetBox credentials live only in [`secrets/connection.md`](secrets/connection.example.md).
 
 ### Long-term memory (command playbooks)
 
@@ -109,7 +111,8 @@ Procedural memory remembers **how to verify** each REQ (SSH/SQL recipes) per fra
 ## Quick start
 
 ```bash
-cp .env.example .env   # OPENAI_API_KEY, PG_*, SSH_*
+cp .env.example .env
+cp secrets/connection.example.md secrets/connection.md   # SSH/PG/MCP only here
 docker compose up --build
 # http://localhost:3000 → model auditor
 ```
@@ -125,7 +128,7 @@ docker compose up --build
 Each audit creates:
 
 ```text
-artifacts/<run_id>/
+artifacts/<client_name>/
   meta.json
   report.md
   <framework_id>/
@@ -139,6 +142,7 @@ artifacts/<run_id>/
       ...
 ```
 
+After intake, the folder is named after the **client** (e.g. `TestCompany`), not a timestamp.
 Multi-framework runs (e.g. PostgreSQL + Ubuntu) share one `<run_id>` with a subfolder per framework. Configure root with `EVIDENCE_DIR` (default `artifacts`; Docker mounts `./artifacts`).
 
 ## CIS compliance charts (Open WebUI)

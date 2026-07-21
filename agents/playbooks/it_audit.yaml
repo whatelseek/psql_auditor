@@ -1,0 +1,46 @@
+framework_id: it_audit
+framework_tips:
+  - Prefer deterministic ssh_run / netbox_* / mcp_query over freeform exploration.
+  - Host facts may already be in host_facts.md from the pre-assess collector.
+  - Do not mutate NetBox (read-only MCP).
+requirements:
+  REQ-001:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "hostname -f 2>/dev/null || hostname; hostname -I 2>/dev/null; ip -4 -o addr show 2>/dev/null | awk '{print $4}'"
+  REQ-002:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "echo auditor_access_ok; hostname"
+      - name: mcp_query
+        arguments:
+          sql: "SELECT current_database() AS db, current_user AS usr"
+  REQ-003:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "nproc 2>/dev/null; lscpu 2>/dev/null | grep -E 'Model name|CPU\\(s\\)|Thread|Core' | head -n 20"
+  REQ-004:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "free -m 2>/dev/null; grep -E 'MemTotal|MemAvailable' /proc/meminfo 2>/dev/null"
+  REQ-005:
+    tools:
+      - name: ssh_run
+        arguments:
+          command: "df -h 2>/dev/null | head -n 20"
+  REQ-006:
+    # When CMDB=no, graph resolves this REQ deterministically from INVENTORY.md
+    # (no NetBox call). Tools below apply only when CMDB/NetBox is in use.
+    tools:
+      - name: netbox_get_objects
+        arguments:
+          object_type: devices
+          filters_json: "{}"
+          fields_json: "[\"id\",\"name\",\"primary_ip4\",\"site\",\"tenant\"]"
+  REQ-007:
+    # Resolved from intake access_probe (no remote command required).
+    tools: []

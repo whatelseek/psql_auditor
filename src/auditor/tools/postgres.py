@@ -1,12 +1,9 @@
-"""Direct PostgreSQL SQL tools for audit queries.
+"""Direct PostgreSQL SQL helpers (asyncpg) — **not** bound into the live agent.
 
-Provides a read-only ``run_sql`` tool backed by ``asyncpg``. The auditor uses
-this for ``SHOW`` settings and ``SELECT`` against catalogs such as
-``pg_roles``, ``pg_extension``, and ``pg_settings``.
-
-Safety: statements are gated by ``_is_readonly`` before execution. Mutating
-SQL is rejected with an error string so the agent records ``status=error``
-rather than changing the target database.
+The Open WebUI / LangGraph auditor queries Postgres via LangChain MCP
+(``auditor.tools.mcp_client``). This module keeps a shared read-only SQL gate
+(``is_readonly_sql``) and an optional asyncpg ``run_sql`` tool for offline
+diagnostics.
 """
 
 from __future__ import annotations
@@ -72,18 +69,12 @@ def _strip_leading_comments(sql: str) -> str:
     return text
 
 
-def _is_readonly(sql: str) -> bool:
+def is_readonly_sql(sql: str) -> bool:
     """Return True if every statement in ``sql`` looks read-only.
 
     Splits on ``;`` and requires each non-empty part to start with an allowed
-    verb and not with a forbidden verb. This is intentionally conservative
-    (string/heuristic based) — suitable for an auditor, not a full SQL parser.
-
-    Args:
-        sql: Candidate SQL (may contain multiple statements).
-
-    Returns:
-        ``True`` if the batch appears safe to run; ``False`` otherwise.
+    verb (including ``WITH`` CTEs) and not with a forbidden verb. Intentionally
+    conservative — suitable for an auditor, not a full SQL parser.
     """
     lowered = " ".join(_strip_leading_comments(sql).lower().split())
     if not lowered:
@@ -98,6 +89,10 @@ def _is_readonly(sql: str) -> bool:
         if first in _FORBIDDEN_PREFIXES:
             return False
     return True
+
+
+# Back-compat alias for older imports / tests.
+_is_readonly = is_readonly_sql
 
 
 async def _fetch(sql: str, settings: Settings | None = None) -> str:

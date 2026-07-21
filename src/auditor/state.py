@@ -15,6 +15,7 @@ from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
 from auditor.checklist import Requirement
+from auditor.language import ReportLanguage, report_ui
 
 FindingStatus = Literal["pass", "fail", "partial", "error", "skipped"]
 
@@ -58,6 +59,8 @@ class AuditorState(TypedDict, total=False):
 
     messages: Annotated[list[BaseMessage], add_messages]
     user_request: str
+    # Report language code from detect_report_language (``en`` or ``ru`` only).
+    report_language: str
     framework_id: str
     framework_title: str
     checklist_title: str
@@ -70,13 +73,23 @@ class AuditorState(TypedDict, total=False):
     target_hints: dict[str, Any]
     # Cyclic reconnect loop: how many session restores have been attempted.
     retry_count: int
-    # Disk artifacts: <evidence_dir>/<run_id>/<framework>/REQ-NNN/
+    # Disk artifacts: <evidence_dir>/<client_name>/<framework>/REQ-NNN/
     evidence_run_id: str
     evidence_run_dir: str
     # Human-in-the-loop: requirement ids the operator chose to skip.
     hitl_skipped: list[str]
     # True when the graph is paused waiting for skip/retry.
     awaiting_hitl: bool
+    # Pre-audit intake answers + flags
+    intake_complete: bool
+    intake: dict[str, Any]
+    client_name: str
+    has_cmdb: bool
+    has_access: bool
+    audit_types: str  # cybersecurity | cis | it | both
+    evidence_host_id: str  # host slug under artifacts/<client>/<host>/
+    host_facts_md: str
+    cmdb_drift_md: str
     # Zip archive of report + evidence for chat download.
     archive_path: str
     archive_url: str
@@ -106,6 +119,8 @@ def render_report(
     checklist_title: str,
     findings: dict[str, Finding],
     requirements: dict[str, Requirement] | None = None,
+    *,
+    language: str | ReportLanguage | None = None,
 ) -> str:
     """Render the fixed-format Markdown audit report.
 
@@ -117,10 +132,12 @@ def render_report(
         checklist_title: Report title.
         findings: Filled cells keyed by requirement id.
         requirements: Full checklist map (defines row order and fixed fields).
+        language: Operator-requested report language (UI chrome localization).
 
     Returns:
         Markdown report with a summary table plus per-requirement detail blocks.
     """
+    ui = report_ui(language)
     order = list(requirements.keys()) if requirements else sorted(findings.keys())
     # Ensure skipped rows exist for missing findings when requirements known.
     effective: dict[str, Finding] = {}
@@ -146,17 +163,27 @@ def render_report(
     lines = [
         f"# Audit Report: {checklist_title}",
         "",
-        "Fixed report format — checklist fields are immutable; the model fills "
-        "**Status**, **Observation**, and **Recommendation** only.",
+        ui["fixed_format_note"],
         "",
-        f"Assessed **{total}** requirements — "
-        f"pass: {counts['pass']}, fail: {counts['fail']}, "
-        f"partial: {counts['partial']}, error: {counts['error']}, "
-        f"skipped: {counts['skipped']}.",
+        f"{ui['assessed']} **{total}** {ui['requirements']} — "
+        f"{ui['pass']}: {counts['pass']}, {ui['fail']}: {counts['fail']}, "
+        f"{ui['partial']}: {counts['partial']}, {ui['error']}: {counts['error']}, "
+        f"{ui['skipped']}: {counts['skipped']}.",
         "",
-        "## Summary table",
+        f"## {ui['summary_table']}",
         "",
-        "| ID | Title | Severity | Status | Observation | Recommendation |",
+        "| "
+        + " | ".join(
+            [
+                ui["col_id"],
+                ui["col_title"],
+                ui["col_severity"],
+                ui["col_status"],
+                ui["col_observation"],
+                ui["col_recommendation"],
+            ]
+        )
+        + " |",
         "|---|---|---|---|---|---|",
     ]
 
@@ -182,7 +209,7 @@ def render_report(
             + " |"
         )
 
-    lines.extend(["", "## Requirement details", ""])
+    lines.extend(["", f"## {ui['requirement_details']}", ""])
 
     for req_id in order:
         f = effective.get(req_id)
@@ -197,16 +224,18 @@ def render_report(
 
         lines.append(f"### {req_id}: {title}")
         lines.append("")
-        lines.append("| Cell | Value |")
+        lines.append(f"| {ui['col_cell']} | {ui['col_value']} |")
         lines.append("|---|---|")
-        lines.append(f"| Category | {_md_escape_cell(category)} |")
-        lines.append(f"| Severity | {_md_escape_cell(severity)} |")
-        lines.append(f"| Pass criteria | {_md_escape_cell(pass_criteria)} |")
+        lines.append(f"| {ui['category']} | {_md_escape_cell(category)} |")
+        lines.append(f"| {ui['col_severity']} | {_md_escape_cell(severity)} |")
+        lines.append(f"| {ui['pass_criteria']} | {_md_escape_cell(pass_criteria)} |")
         if how:
-            lines.append(f"| How to verify | {_md_escape_cell(how)} |")
-        lines.append(f"| **Status** | {f.status} |")
-        lines.append(f"| **Observation** | {_md_escape_cell(f.evidence)} |")
-        lines.append(f"| **Recommendation** | {_md_escape_cell(f.remediation)} |")
+            lines.append(f"| {ui['how_to_verify']} | {_md_escape_cell(how)} |")
+        lines.append(f"| **{ui['status']}** | {f.status} |")
+        lines.append(f"| **{ui['observation']}** | {_md_escape_cell(f.evidence)} |")
+        lines.append(
+            f"| **{ui['recommendation']}** | {_md_escape_cell(f.remediation)} |"
+        )
         lines.append("")
 
     return "\n".join(lines).strip() + "\n"

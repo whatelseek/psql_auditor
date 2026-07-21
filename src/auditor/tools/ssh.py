@@ -24,8 +24,9 @@ def _ssh_kwargs(settings: Settings) -> dict[str, Any]:
     """Build keyword arguments for ``asyncssh.connect``.
 
     Prefers private-key auth when ``ssh_private_key_path`` is set; otherwise
-    falls back to password auth. ``known_hosts`` is disabled for lab/dev
-    flexibility — tighten this for production bastions if needed.
+    falls back to password auth. Host keys are verified by default
+    (``SSH_STRICT_HOST_KEY=true``); set ``SSH_STRICT_HOST_KEY=false`` for
+    lab targets without a known_hosts entry.
 
     Args:
         settings: Application settings containing SSH target credentials.
@@ -45,9 +46,10 @@ def _ssh_kwargs(settings: Settings) -> dict[str, Any]:
         "host": settings.ssh_host,
         "port": settings.ssh_port,
         "username": settings.ssh_user,
-        "known_hosts": None,
         "connect_timeout": settings.ssh_connect_timeout,
     }
+    if not settings.ssh_strict_host_key:
+        kwargs["known_hosts"] = None
     if settings.ssh_private_key_path:
         key_path = Path(settings.ssh_private_key_path)
         if not key_path.exists():

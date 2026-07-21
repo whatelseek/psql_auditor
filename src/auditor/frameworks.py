@@ -4,7 +4,7 @@ You create frameworks — the code only discovers them:
 
 1. Add ``agents/<name>.md`` (CIS Postgres, Ubuntu, Windows, custom, …)
 2. Use the standard ``REQ-NNN`` Markdown shape (see existing files)
-3. Optionally add YAML frontmatter for aliases / description
+3. Optionally add YAML frontmatter for aliases / description / detect rules
 
 On each audit the agent routes the operator request to the best matching
 ``.md`` file and loads it as the fixed report skeleton.
@@ -13,14 +13,25 @@ On each audit the agent routes the operator request to the best matching
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 from auditor.checklist import Checklist, parse_checklist_markdown
 
 _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n(.*)\Z", re.DOTALL)
+
+
+@dataclass(frozen=True, slots=True)
+class FrameworkDetect:
+    """Host-matching rules from agent frontmatter ``detect:``."""
+
+    os_ids: tuple[str, ...] = ()
+    binaries: tuple[str, ...] = ()
+    ports: tuple[int, ...] = ()
+    always: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +43,8 @@ class Framework:
     path: Path
     description: str = ""
     aliases: tuple[str, ...] = ()
+    domain: str = "cybersecurity"  # it | cybersecurity
+    detect: FrameworkDetect = field(default_factory=FrameworkDetect)
 
 
 def _default_aliases(stem: str, title: str) -> tuple[str, ...]:
@@ -41,6 +54,41 @@ def _default_aliases(stem: str, title: str) -> tuple[str, ...]:
         if len(token) >= 3:
             parts.add(token)
     return tuple(sorted(parts))
+
+
+def _parse_detect(raw: Any) -> FrameworkDetect:
+    if not isinstance(raw, dict):
+        return FrameworkDetect()
+    os_ids_raw = raw.get("os_ids") or raw.get("os") or []
+    binaries_raw = raw.get("binaries") or raw.get("commands") or []
+    ports_raw = raw.get("ports") or []
+    if isinstance(os_ids_raw, str):
+        os_ids = tuple(x.strip().lower() for x in os_ids_raw.split(",") if x.strip())
+    else:
+        os_ids = tuple(str(x).strip().lower() for x in os_ids_raw if str(x).strip())
+    if isinstance(binaries_raw, str):
+        binaries = tuple(x.strip() for x in binaries_raw.split(",") if x.strip())
+    else:
+        binaries = tuple(str(x).strip() for x in binaries_raw if str(x).strip())
+    ports: list[int] = []
+    if isinstance(ports_raw, (list, tuple)):
+        for p in ports_raw:
+            try:
+                ports.append(int(p))
+            except (TypeError, ValueError):
+                continue
+    elif ports_raw not in (None, ""):
+        try:
+            ports.append(int(ports_raw))
+        except (TypeError, ValueError):
+            pass
+    always = bool(raw.get("always"))
+    return FrameworkDetect(
+        os_ids=os_ids,
+        binaries=binaries,
+        ports=tuple(ports),
+        always=always,
+    )
 
 
 def _parse_agent_file(path: Path) -> Framework:
@@ -77,12 +125,26 @@ def _parse_agent_file(path: Path) -> Framework:
         # Always include stem so `audit postgres_cis` works.
         aliases = tuple(dict.fromkeys((path.stem.lower(), *aliases)))
 
+    domain = str(meta.get("domain") or "").strip().lower()
+    if domain not in {"it", "cybersecurity"}:
+        # Heuristic: it_audit → it; everything else → cybersecurity
+        domain = "it" if fw_id == "it_audit" or "it_audit" in fw_id else "cybersecurity"
+
+    detect = _parse_detect(meta.get("detect"))
+    # it_audit defaults to always-on when domain is IT and no detect block
+    if domain == "it" and fw_id == "it_audit" and not (
+        detect.os_ids or detect.binaries or detect.ports or detect.always
+    ):
+        detect = FrameworkDetect(always=True)
+
     return Framework(
         id=fw_id,
         title=title,
         path=path,
         description=description,
         aliases=aliases,
+        domain=domain,
+        detect=detect,
     )
 
 
@@ -182,6 +244,82 @@ def route_frameworks(
     return matched
 
 
+def framework_matches_host(fw: Framework, facts: Any) -> bool:
+    """True when host facts satisfy the framework's ``detect`` rules.
+
+    Rule groups:
+    - ``always`` → match
+    - ``os_ids`` → OS id must match (when specified)
+    - ``binaries`` / ``ports`` → at least one binary **or** listening port
+      (OR within software signals)
+    """
+    detect = fw.detect
+    if detect.always:
+        return True
+
+    has_rules = bool(detect.os_ids or detect.binaries or detect.ports)
+    if not has_rules:
+        return False
+
+    os_id = str(getattr(facts, "os_id", "") or "").strip().lower()
+    binaries = {
+        str(b).strip().lower()
+        for b in (getattr(facts, "binaries", None) or [])
+        if str(b).strip()
+    }
+    ports: set[int] = set()
+    for p in getattr(facts, "listening_ports", None) or []:
+        try:
+            ports.add(int(p))
+        except (TypeError, ValueError):
+            continue
+
+    if detect.os_ids:
+        if not os_id or not any(
+            os_id == want or os_id.startswith(want) for want in detect.os_ids
+        ):
+            return False
+
+    if detect.binaries or detect.ports:
+        soft = False
+        if detect.binaries and any(b.lower() in binaries for b in detect.binaries):
+            soft = True
+        if detect.ports and any(p in ports for p in detect.ports):
+            soft = True
+        if not soft:
+            return False
+
+    return True
+
+
+def select_frameworks_for_host(
+    facts: Any,
+    *,
+    domains: list[str] | tuple[str, ...] | None = None,
+    agents_dir: Path | str | None = None,
+) -> list[Framework]:
+    """Pick frameworks whose domain + detect rules match host facts.
+
+    Order: IT frameworks first (by id), then cybersecurity (by id).
+    When domain includes ``it`` and nothing matches, fall back to ``it_audit``.
+    """
+    wanted = {d.lower() for d in (domains or ["it", "cybersecurity"])}
+    matched: list[Framework] = []
+    for fw in list_frameworks(agents_dir):
+        if fw.domain not in wanted:
+            continue
+        if framework_matches_host(fw, facts):
+            matched.append(fw)
+
+    if "it" in wanted and not any(f.domain == "it" for f in matched):
+        it_fw = get_framework("it_audit", agents_dir)
+        if it_fw is not None and it_fw not in matched:
+            matched.insert(0, it_fw)
+
+    matched.sort(key=lambda f: (0 if f.domain == "it" else 1, f.id))
+    return matched
+
+
 def load_framework_checklist(framework: Framework) -> Checklist:
     """Load checklist body (strips YAML frontmatter if present)."""
     text = framework.path.read_text(encoding="utf-8")
@@ -198,5 +336,8 @@ def frameworks_catalog_text(agents_dir: Path | str | None = None) -> str:
     lines = ["Available frameworks (from agents/):"]
     for fw in frameworks:
         alias_preview = ", ".join(fw.aliases[:6])
-        lines.append(f"- `{fw.id}`: {fw.title} — {fw.description} (aliases: {alias_preview})")
+        lines.append(
+            f"- `{fw.id}` [{fw.domain}]: {fw.title} — {fw.description} "
+            f"(aliases: {alias_preview})"
+        )
     return "\n".join(lines)

@@ -35,8 +35,20 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _memory_framework_id(framework_id: str) -> str:
+    """Bare checklist id safe for LangGraph store namespaces.
+
+    Evidence keys may be ``host/fw`` (e.g. ``10.200.29.78/ubuntu_cis``). LangGraph
+    rejects namespace labels that contain ``.``, so strip the host prefix and
+    neutralize remaining dots.
+    """
+    parts = [p for p in str(framework_id or "").replace("\\", "/").split("/") if p]
+    bare = parts[-1] if parts else "unknown"
+    return bare.replace(".", "_") or "unknown"
+
+
 def _ns(framework_id: str) -> tuple[str, ...]:
-    return ("playbooks", framework_id)
+    return ("playbooks", _memory_framework_id(framework_id))
 
 
 class PlaybookMemory:
@@ -248,7 +260,9 @@ class PlaybookMemory:
             return
         if not tool_name or tool_name.startswith("mcp_list"):
             return
-        args = dict(arguments or {})
+        from auditor.tools.secrets import redact_secrets
+
+        args = redact_secrets(dict(arguments or {}))
         # Avoid storing huge SQL dumps / file bodies as "memory".
         for key in list(args.keys()):
             val = args[key]

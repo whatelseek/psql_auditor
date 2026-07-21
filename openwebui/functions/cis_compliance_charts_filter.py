@@ -284,8 +284,16 @@ class Filter:
                 continue
             content = _message_text(msg.get("content"))
             looks_like_report = bool(
-                re.search(r"\|\s*Severity\s*\|\s*Status", content, re.I)
-                or re.search(r"##\s+Summary table", content, re.I)
+                re.search(
+                    r"\|\s*(Severity|Критичность)\s*\|\s*(Status|Статус)",
+                    content,
+                    re.I,
+                )
+                or re.search(
+                    r"##\s+(Summary table|Сводная таблица)",
+                    content,
+                    re.I,
+                )
                 or re.search(r"^\|\s*REQ-\d+\s*\|", content, re.I | re.M)
             )
             if not looks_like_report:

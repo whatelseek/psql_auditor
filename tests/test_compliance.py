@@ -51,7 +51,13 @@ def test_overall_compliance():
 def test_svg_and_markdown_output():
     md = format_compliance_markdown(SAMPLE)
     assert "CIS compliance visualization" in md
-    assert "<svg" in md
+    assert "data:image/svg+xml;base64," in md
     assert "Overall" in md
     svg = render_compliance_bar_chart_svg(compliance_by_severity(parse_report_findings(SAMPLE)))
     assert svg.startswith("<svg")
+
+
+def test_compliance_markdown_russian():
+    md = format_compliance_markdown(SAMPLE, language="ru")
+    assert "Визуализация соответствия CIS" in md
+    assert "Общий уровень соответствия" in md

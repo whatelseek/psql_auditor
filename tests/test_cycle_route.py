@@ -40,3 +40,14 @@ def test_assess_queues_recoverable_failures():
     from auditor.graph import _is_recoverable_finding
 
     assert _is_recoverable_finding(f)
+
+
+def test_loose_timeout_session_not_recoverable():
+    from auditor.graph import _is_recoverable_finding
+
+    f = Finding(
+        requirement_id="REQ-010",
+        status="error",
+        evidence="Operator session timeout while waiting for human input",
+    )
+    assert not _is_recoverable_finding(f)

@@ -119,6 +119,38 @@ def format_archive_chat_section(
     return "\n".join(lines)
 
 
+async def _open_webui_bearer_token(
+    client: httpx.AsyncClient,
+    settings: Settings,
+) -> str | None:
+    """Return Authorization bearer value for Open WebUI file APIs.
+
+    Prefers ``OPEN_WEBUI_API_KEY``. Otherwise signs in with
+    ``OPEN_WEBUI_EMAIL`` / ``OPEN_WEBUI_PASSWORD`` (JWT).
+    """
+    if settings.open_webui_api_key:
+        return settings.open_webui_api_key.strip()
+    email = (settings.open_webui_email or "").strip()
+    password = settings.open_webui_password or ""
+    if not email or not password:
+        return None
+    base = (settings.open_webui_url or "").rstrip("/")
+    response = await client.post(
+        f"{base}/api/v1/auths/signin",
+        json={"email": email, "password": password},
+    )
+    if response.status_code >= 400:
+        logger.warning(
+            "Open WebUI sign-in failed: %s %s",
+            response.status_code,
+            response.text[:200],
+        )
+        return None
+    data = response.json()
+    token = data.get("token") if isinstance(data, dict) else None
+    return str(token) if token else None
+
+
 async def upload_zip_to_open_webui(
     zip_path: Path,
     settings: Settings,
@@ -136,12 +168,12 @@ async def upload_zip_to_open_webui(
         return None
 
     url = f"{base}/api/v1/files/"
-    headers: dict[str, str] = {}
-    if settings.open_webui_api_key:
-        headers["Authorization"] = f"Bearer {settings.open_webui_api_key}"
-
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
+            token = await _open_webui_bearer_token(client, settings)
+            headers: dict[str, str] = {}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
             with zip_path.open("rb") as fh:
                 response = await client.post(
                     url,

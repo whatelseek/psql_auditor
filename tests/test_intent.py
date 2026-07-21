@@ -16,8 +16,33 @@ def test_adhoc_execute_sql():
 
 
 def test_adhoc_run_req_playbook():
-    # REQ-targeted commands after an audit revise the same evidence folder.
-    assert classify_intent("Run playbook commands for REQ-002 on Ubuntu") == "revise_req"
+    # Deterministic playbook path (docs), even when a REQ id is present.
+    assert classify_intent("Run playbook commands for REQ-002 on Ubuntu") == "adhoc"
+
+
+def test_evaluate_req_is_revise():
+    assert classify_intent("Evaluate REQ-1. Try read /etc/ssh/sshd_config") == "revise_req"
+    assert classify_intent("Gather evidence for REQ-001") == "revise_req"
+
+
+def test_refill_observation_intent():
+    assert (
+        classify_intent("Prepare new observation and recommendation for REQ-001")
+        == "refill_finding"
+    )
+
+
+def test_refill_beats_update_report():
+    assert (
+        classify_intent(
+            "Prepare new observation and recommendation then update the report"
+        )
+        == "refill_finding"
+    )
+
+
+def test_broad_verbs_alone_do_not_force_adhoc():
+    assert classify_intent("Please try to explain the checklist") == "audit"
 
 
 def test_adhoc_russian():

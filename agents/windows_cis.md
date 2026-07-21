@@ -2,6 +2,9 @@
 id: windows_cis
 aliases: [windows, win, powershell, server]
 description: Windows CIS hardening checklist (SSH/PowerShell)
+domain: cybersecurity
+detect:
+  os_ids: [windows, mswin]
 ---
 # Windows CIS Benchmark (scaffold)
 

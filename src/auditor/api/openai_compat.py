@@ -15,6 +15,7 @@ LangGraph pipe pattern.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -31,6 +32,7 @@ from pydantic import BaseModel
 from auditor.config import get_settings
 from auditor.graph import get_auditor_graph
 from auditor.hitl import extract_hitl_thread_id
+from auditor.intake import extract_intake_thread_id
 from auditor.intent import classify_intent
 from auditor.report_archive import archive_filename, verify_download_token
 
@@ -117,15 +119,18 @@ def _messages_from_responses_input(
 
 
 def _responses_payload(content: str, model: str, response_id: str) -> dict[str, Any]:
+    message_id = f"msg_{uuid.uuid4().hex[:20]}"
     return {
         "id": response_id,
         "object": "response",
         "created_at": int(time.time()),
         "model": model,
         "status": "completed",
+        # Convenience field some clients read directly.
+        "output_text": content,
         "output": [
             {
-                "id": f"msg_{uuid.uuid4().hex[:20]}",
+                "id": message_id,
                 "type": "message",
                 "role": "assistant",
                 "status": "completed",
@@ -138,6 +143,161 @@ def _responses_payload(content: str, model: str, response_id: str) -> dict[str, 
             "total_tokens": 0,
         },
     }
+
+
+def _sse_responses_event(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _stream_responses_audit(
+    auditor,
+    body: ChatCompletionRequest,
+    model: str,
+    response_id: str,
+) -> AsyncIterator[str]:
+    """Emit OpenAI Responses SSE events (Open WebUI stream=true path)."""
+    seq = 0
+    message_id = f"msg_{uuid.uuid4().hex[:20]}"
+    created_at = int(time.time())
+
+    def _next() -> int:
+        nonlocal seq
+        seq += 1
+        return seq
+
+    empty = _responses_payload("", model, response_id)
+    empty["status"] = "in_progress"
+    empty["created_at"] = created_at
+    empty["output"] = []
+    empty["output_text"] = ""
+
+    yield _sse_responses_event(
+        {
+            "type": "response.created",
+            "response": empty,
+            "sequence_number": _next(),
+        }
+    )
+    yield _sse_responses_event(
+        {
+            "type": "response.in_progress",
+            "response": empty,
+            "sequence_number": _next(),
+        }
+    )
+
+    # Keep the SSE socket alive while the (often long) audit runs.
+    run_task = asyncio.create_task(_run_or_resume(auditor, body))
+    while not run_task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(run_task), timeout=15.0)
+        except TimeoutError:
+            yield _sse_responses_event(
+                {
+                    "type": "response.in_progress",
+                    "response": empty,
+                    "sequence_number": _next(),
+                }
+            )
+
+    try:
+        result = run_task.result()
+        content = result.get("report") or _last_ai_text(result.get("messages") or [])
+        if result.get("awaiting_intake"):
+            prefix = "Paused for intake — reply to continue the questionnaire.\n\n"
+            content = f"{prefix}{content}"
+        elif result.get("awaiting_hitl"):
+            prefix = "Paused for your decision (skip / retry).\n\n"
+            content = f"{prefix}{content}"
+        if not content:
+            content = "Audit finished (no report captured)."
+    except Exception as exc:  # noqa: BLE001
+        content = f"Audit error: {exc}"
+
+    yield _sse_responses_event(
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "status": "in_progress",
+                "content": [],
+            },
+            "sequence_number": _next(),
+        }
+    )
+    yield _sse_responses_event(
+        {
+            "type": "response.content_part.added",
+            "item_id": message_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+            "sequence_number": _next(),
+        }
+    )
+
+    chunk_size = 400
+    for i in range(0, len(content), chunk_size):
+        delta = content[i : i + chunk_size]
+        yield _sse_responses_event(
+            {
+                "type": "response.output_text.delta",
+                "item_id": message_id,
+                "output_index": 0,
+                "content_index": 0,
+                "delta": delta,
+                "sequence_number": _next(),
+            }
+        )
+
+    yield _sse_responses_event(
+        {
+            "type": "response.output_text.done",
+            "item_id": message_id,
+            "output_index": 0,
+            "content_index": 0,
+            "text": content,
+            "sequence_number": _next(),
+        }
+    )
+    yield _sse_responses_event(
+        {
+            "type": "response.content_part.done",
+            "item_id": message_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": content},
+            "sequence_number": _next(),
+        }
+    )
+    yield _sse_responses_event(
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": content}],
+            },
+            "sequence_number": _next(),
+        }
+    )
+
+    final = _responses_payload(content, model, response_id)
+    final["created_at"] = created_at
+    final["output"][0]["id"] = message_id
+    yield _sse_responses_event(
+        {
+            "type": "response.completed",
+            "response": final,
+            "sequence_number": _next(),
+        }
+    )
 
 
 def _check_api_key(authorization: str | None) -> None:
@@ -267,8 +427,11 @@ async def download_archive(
 
 
 async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]:
-    """Start audit, follow-up, ad-hoc command run, or resume HITL."""
+    """Start audit, follow-up, ad-hoc command run, or resume intake/HITL."""
     user_text = _latest_user_text(body.messages)
+    intake_thread = extract_intake_thread_id(body.messages)
+    if intake_thread:
+        return await auditor.aresume(intake_thread, user_text)
     hitl_thread = extract_hitl_thread_id(body.messages)
     if hitl_thread:
         return await auditor.aresume(hitl_thread, user_text)
@@ -281,6 +444,10 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
     intent = classify_intent(user_text, agents_dir=settings.agents_dir)
     if intent == "revise_req":
         return await auditor.arun_revise_req(
+            user_text, messages=body.messages, thread_id=thread_id
+        )
+    if intent == "refill_finding":
+        return await auditor.arun_refill_finding(
             user_text, messages=body.messages, thread_id=thread_id
         )
     if intent == "update_report":
@@ -330,9 +497,8 @@ async def responses_api(
     """OpenAI Responses API shim used by newer Open WebUI connections.
 
     Converts ``input`` → chat messages, runs the same audit path as
-    ``/v1/chat/completions``, and returns a Responses-shaped payload.
-    Streaming Responses events are not implemented; callers should use
-    non-stream or prefer ``/v1/chat/completions``.
+    ``/v1/chat/completions``. When ``stream=true`` (Open WebUI default),
+    emits Responses SSE events so the chat UI receives text.
     """
     _check_api_key(authorization)
     settings = get_settings()
@@ -349,9 +515,30 @@ async def responses_api(
         user=body.user,
     )
     auditor = get_auditor_graph()
+    response_id = f"resp_{uuid.uuid4().hex[:24]}"
+
+    if body.stream:
+        return StreamingResponse(
+            _stream_responses_audit(auditor, chat_body, model, response_id),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     result = await _run_or_resume(auditor, chat_body)
     content = result.get("report") or _last_ai_text(result.get("messages") or [])
-    response_id = f"resp_{uuid.uuid4().hex[:24]}"
+    if result.get("awaiting_intake"):
+        content = (
+            "Paused for intake — reply to continue the questionnaire.\n\n"
+            f"{content}"
+        )
+    elif result.get("awaiting_hitl"):
+        content = f"Paused for your decision (skip / retry).\n\n{content}"
+    if not content:
+        content = "Audit finished (no report captured)."
     return JSONResponse(_responses_payload(content, model, response_id))
 
 
@@ -368,16 +555,21 @@ async def _stream_audit(
     model: str,
     completion_id: str,
 ) -> AsyncIterator[str]:
-    """Stream an audit (or HITL resume) as OpenAI-compatible SSE chunks."""
-    from auditor.frameworks import route_frameworks
-
+    """Stream an audit (or intake/HITL resume) as OpenAI-compatible SSE chunks."""
     settings = get_settings()
     user_text = _latest_user_text(body.messages)
+    intake_thread = extract_intake_thread_id(body.messages)
     hitl_thread = extract_hitl_thread_id(body.messages)
 
     yield _sse_chunk(None, model, completion_id)
     intent = classify_intent(user_text, agents_dir=settings.agents_dir)
-    if hitl_thread:
+    if intake_thread:
+        yield _sse_chunk(
+            f"Continuing pre-audit intake (`{intake_thread}`)…\n\n",
+            model,
+            completion_id,
+        )
+    elif hitl_thread:
         yield _sse_chunk(
             f"Resuming paused audit (`{hitl_thread}`)…\n\n",
             model,
@@ -385,7 +577,13 @@ async def _stream_audit(
         )
     elif intent == "revise_req":
         yield _sse_chunk(
-            "Revising requirement(s) in the prior audit evidence folder…\n\n",
+            "Collecting more evidence into the prior audit folder…\n\n",
+            model,
+            completion_id,
+        )
+    elif intent == "refill_finding":
+        yield _sse_chunk(
+            "Preparing new observation / recommendation from stored evidence…\n\n",
             model,
             completion_id,
         )
@@ -401,7 +599,16 @@ async def _stream_audit(
             model,
             completion_id,
         )
+    elif settings.intake_enabled:
+        # Do not announce frameworks before intake finishes.
+        yield _sse_chunk(
+            "Starting pre-audit intake…\n\n",
+            model,
+            completion_id,
+        )
     else:
+        from auditor.frameworks import route_frameworks
+
         try:
             selected = route_frameworks(user_text, settings.agents_dir)
             names = ", ".join(f"`{fw.id}`" for fw in selected)
@@ -421,7 +628,16 @@ async def _stream_audit(
     try:
         result = await _run_or_resume(auditor, body)
         final_report = result.get("report") or ""
-        if result.get("awaiting_hitl"):
+        if result.get("awaiting_intake") or (
+            result.get("awaiting_hitl")
+            and "[AUDIT_INTAKE:" in (final_report or "")
+        ):
+            yield _sse_chunk(
+                "Paused for intake — reply to continue the questionnaire.\n\n",
+                model,
+                completion_id,
+            )
+        elif result.get("awaiting_hitl"):
             yield _sse_chunk(
                 "Paused for your decision (skip / retry).\n\n",
                 model,

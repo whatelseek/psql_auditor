@@ -33,6 +33,32 @@ def test_format_prompt_block_includes_preferred_tools(tmp_path: Path):
     assert "PermitRootLogin" in block
 
 
+def test_host_prefixed_framework_uses_same_playbook_ns(tmp_path: Path):
+    """Multi-host evidence keys must not break LangGraph namespace rules."""
+    from auditor.memory.playbook_store import _memory_framework_id, _ns
+
+    assert _memory_framework_id("10.200.29.78/ubuntu_cis") == "ubuntu_cis"
+    assert _ns("10.200.29.78/ubuntu_cis") == ("playbooks", "ubuntu_cis")
+
+    mem = PlaybookMemory(
+        playbooks_dir=Path("agents/playbooks"),
+        memory_dir=tmp_path / "memory",
+        learn=True,
+    )
+    block = mem.format_prompt_block("10.200.29.78/ubuntu_cis", "REQ-002")
+    assert "ssh_run" in block
+    mem.remember_tool(
+        "10.200.29.78/ubuntu_cis",
+        "REQ-010",
+        "ssh_run",
+        {"command": "grep use_pty /etc/sudoers"},
+        success=True,
+    )
+    entry = mem.get_entry("ubuntu_cis", "REQ-010")
+    assert entry is not None
+    assert entry["tools"][0]["name"] == "ssh_run"
+
+
 def test_remember_tool_persists_learned_overlay(tmp_path: Path):
     memory_dir = tmp_path / "memory"
     mem = PlaybookMemory(

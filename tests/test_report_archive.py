@@ -77,8 +77,8 @@ async def test_package_and_publish_without_open_webui(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_package_uploads_to_open_webui(tmp_path: Path):
-    run = tmp_path / "run_up"
+async def test_package_uploads_via_signin_when_no_api_key(tmp_path: Path):
+    run = tmp_path / "run_signin"
     run.mkdir()
     (run / "report.md").write_text("ok\n", encoding="utf-8")
     settings = Settings(
@@ -87,25 +87,34 @@ async def test_package_uploads_to_open_webui(tmp_path: Path):
         public_base_url="http://localhost:8000",
         api_key="sk-test",
         open_webui_url="http://open-webui:8080",
-        open_webui_api_key="sk-owui",
+        open_webui_api_key=None,
+        open_webui_email="admin@localhost",
+        open_webui_password="admin",
     )
 
-    mock_response = AsyncMock()
-    mock_response.status_code = 200
-    mock_response.json = lambda: {"id": "file-xyz"}
-    mock_response.text = "ok"
+    signin = AsyncMock()
+    signin.status_code = 200
+    signin.json = lambda: {"token": "jwt-lab"}
+    signin.text = "ok"
+
+    upload = AsyncMock()
+    upload.status_code = 200
+    upload.json = lambda: {"id": "file-from-jwt"}
+    upload.text = "ok"
 
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
-    mock_client.post = AsyncMock(return_value=mock_response)
+    mock_client.post = AsyncMock(side_effect=[signin, upload])
 
     with patch("auditor.report_archive.httpx.AsyncClient", return_value=mock_client):
         result = await package_and_publish_archive(run, settings)
 
-    assert result["open_webui_file_id"] == "file-xyz"
-    assert "/api/v1/files/file-xyz/content" in result["chat_section"]
-    mock_client.post.assert_awaited()
+    assert result["open_webui_file_id"] == "file-from-jwt"
+    assert mock_client.post.await_count == 2
+    # Second call is the file upload with JWT
+    upload_call = mock_client.post.await_args_list[1]
+    assert upload_call.kwargs["headers"]["Authorization"] == "Bearer jwt-lab"
 
 
 def test_download_endpoint_serves_zip(tmp_path: Path):

@@ -2,6 +2,10 @@
 id: postgres_cis
 aliases: [postgres, postgresql, psql, database, pg]
 description: PostgreSQL CIS / hardening checklist
+domain: cybersecurity
+detect:
+  binaries: [postgres, psql]
+  ports: [5432]
 ---
 # PostgreSQL Security Audit Checklist
 
