@@ -18,6 +18,10 @@ Exposed LangChain tools:
 * ``mcp_list_tools`` — discovery via the live MCP session
 
 Mutating remote ``execute`` is intentionally **not** exposed.
+
+A process-wide **pool** of MCP stdio sessions (``MCP_POSTGRES_POOL_SIZE``,
+default 3) lets parallel REQ workers run concurrent ``mcp_query`` calls
+without sharing one locked stdio pipe.
 """
 
 from __future__ import annotations
@@ -238,17 +242,135 @@ class PostgresMcpSession:
                 return f"MCP reconnect failed: {type(exc).__name__}: {exc}"
 
 
-_SESSION = PostgresMcpSession()
+class PostgresMcpPool:
+    """Pool of ``PostgresMcpSession`` workers for concurrent MCP tool calls.
+
+    Each worker owns its own stdio ``npx mcp-postgres-server`` process. Callers
+    acquire a free session, invoke the tool, then release it back to the queue.
+    """
+
+    def __init__(self, size: int | None = None) -> None:
+        self._configured_size = size
+        self._sessions: list[PostgresMcpSession] = []
+        self._queue: asyncio.Queue[PostgresMcpSession] | None = None
+        self._init_lock = asyncio.Lock()
+        self._size = 0
+
+    @property
+    def size(self) -> int:
+        """Number of pooled sessions (0 until first use)."""
+        return self._size
+
+    def _resolve_size(self, settings: Settings) -> int:
+        raw = (
+            self._configured_size
+            if self._configured_size is not None
+            else settings.mcp_postgres_pool_size
+        )
+        try:
+            n = int(raw or 1)
+        except (TypeError, ValueError):
+            n = 1
+        return max(1, min(n, 16))
+
+    async def _ensure(self, settings: Settings) -> None:
+        if self._queue is not None:
+            return
+        async with self._init_lock:
+            if self._queue is not None:
+                return
+            size = self._resolve_size(settings)
+            sessions = [PostgresMcpSession() for _ in range(size)]
+            queue: asyncio.Queue[PostgresMcpSession] = asyncio.Queue()
+            for session in sessions:
+                queue.put_nowait(session)
+            self._sessions = sessions
+            self._queue = queue
+            self._size = size
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+        settings: Settings | None = None,
+    ) -> str:
+        """Borrow a pooled session, call the remote tool, then release it."""
+        settings = settings or get_settings()
+        await self._ensure(settings)
+        assert self._queue is not None
+        session = await self._queue.get()
+        try:
+            return await session.call_tool(tool_name, arguments, settings=settings)
+        finally:
+            self._queue.put_nowait(session)
+
+    async def list_tools(self, settings: Settings | None = None) -> str:
+        """List tools via one pooled session."""
+        settings = settings or get_settings()
+        await self._ensure(settings)
+        assert self._queue is not None
+        session = await self._queue.get()
+        try:
+            return await session.list_tools(settings=settings)
+        finally:
+            self._queue.put_nowait(session)
+
+    async def load_adapted_tools(
+        self, settings: Settings | None = None
+    ) -> list[BaseTool]:
+        """Load adapted tools via one pooled session (diagnostics)."""
+        settings = settings or get_settings()
+        await self._ensure(settings)
+        assert self._queue is not None
+        session = await self._queue.get()
+        try:
+            return await session.load_adapted_tools(settings=settings)
+        finally:
+            self._queue.put_nowait(session)
+
+    async def close(self) -> None:
+        """Close every pooled MCP subprocess."""
+        async with self._init_lock:
+            sessions = list(self._sessions)
+            self._sessions = []
+            self._queue = None
+            self._size = 0
+        for session in sessions:
+            await session.close()
+
+    async def reconnect(self, settings: Settings | None = None) -> str:
+        """Reconnect every pooled session (used by the graph reconnect node)."""
+        settings = settings or get_settings()
+        await self._ensure(settings)
+        results = [await session.reconnect(settings) for session in self._sessions]
+        failures = [r for r in results if "failed" in r.lower()]
+        if failures:
+            return (
+                f"MCP reconnect failed for {len(failures)}/{len(results)} "
+                f"pool workers: {failures[0]}"
+            )
+        return (
+            f"MCP session pool reconnected successfully "
+            f"({len(results)} workers)"
+        )
 
 
-def get_mcp_session() -> PostgresMcpSession:
-    """Return the process-wide Postgres MCP session singleton."""
-    return _SESSION
+_POOL = PostgresMcpPool()
+
+
+def get_mcp_session() -> PostgresMcpPool:
+    """Return the process-wide Postgres MCP **pool** (API name kept for compat)."""
+    return _POOL
+
+
+def get_mcp_pool() -> PostgresMcpPool:
+    """Return the process-wide Postgres MCP session pool."""
+    return _POOL
 
 
 async def reconnect_mcp_session() -> str:
-    """Public helper to recycle the process-wide MCP session."""
-    return await _SESSION.reconnect()
+    """Public helper to recycle every pooled MCP session."""
+    return await _POOL.reconnect()
 
 
 def _format_mcp_result(result: Any) -> str:
@@ -355,7 +477,7 @@ async def mcp_connect_db(
             + ", ".join(missing)
             + ". Set PG_* / DATABASE_URL in the environment or pass full credentials."
         )
-    result = await _SESSION.call_tool("connect_db", args, settings=settings)
+    result = await _POOL.call_tool("connect_db", args, settings=settings)
     # Never echo password-bearing args in the tool return path.
     if result.lower().startswith("mcp error"):
         return result
@@ -387,7 +509,7 @@ async def mcp_query(sql: str, params_json: str = "[]") -> str:
     rejected = _reject_if_not_readonly(rewritten)
     if rejected:
         return rejected
-    return await _SESSION.call_tool(
+    return await _POOL.call_tool(
         "query",
         {"sql": rewritten, "params": params},
     )
@@ -396,19 +518,19 @@ async def mcp_query(sql: str, params_json: str = "[]") -> str:
 @tool
 async def mcp_list_schemas() -> str:
     """List database schemas via antonorlov/mcp-postgres-server (LangChain MCP)."""
-    return await _SESSION.call_tool("list_schemas", {})
+    return await _POOL.call_tool("list_schemas", {})
 
 
 @tool
 async def mcp_list_tables(schema_name: str = "public") -> str:
     """List tables in a schema via antonorlov/mcp-postgres-server (LangChain MCP)."""
-    return await _SESSION.call_tool("list_tables", {"schema": schema_name})
+    return await _POOL.call_tool("list_tables", {"schema": schema_name})
 
 
 @tool
 async def mcp_describe_table(table: str, schema_name: str = "public") -> str:
     """Describe a table's columns via antonorlov/mcp-postgres-server (LangChain MCP)."""
-    return await _SESSION.call_tool(
+    return await _POOL.call_tool(
         "describe_table",
         {"table": table, "schema": schema_name},
     )
@@ -417,7 +539,7 @@ async def mcp_describe_table(table: str, schema_name: str = "public") -> str:
 @tool
 async def mcp_list_tools() -> str:
     """List tools exposed by the configured antonorlov/mcp-postgres-server."""
-    return await _SESSION.list_tools()
+    return await _POOL.list_tools()
 
 
 def get_mcp_tools() -> list:
@@ -451,4 +573,4 @@ async def mcp_call_tool(tool_name: str, arguments_json: str = "{}") -> str:
         if rejected:
             return rejected
         arguments = {**arguments, "sql": rewritten}
-    return await _SESSION.call_tool(tool_name, arguments)
+    return await _POOL.call_tool(tool_name, arguments)

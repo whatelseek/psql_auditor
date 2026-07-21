@@ -134,6 +134,7 @@ MODEL_ID=auditor
 | `MEMORY_ENABLED` / `MEMORY_LEARN` | `true` | Подсказки playbook / обучение |
 | `COMPLIANCE_CHARTS_IN_REPORT` | `true` | SVG-графики % соответствия в отчёте |
 | `MAX_PARALLEL_ASSESSMENTS` | `5` | Параллельные REQ-воркеры |
+| `MCP_POSTGRES_POOL_SIZE` | `3` | Параллельные MCP Postgres (stdio) для одновременных `mcp_query` |
 | `MAX_SESSION_RETRIES` | `2` | Повторы при обрыве SSH/MCP |
 | `LITELLM_MODEL` | `gpt-4o-mini` | Имя модели в LiteLLM |
 
