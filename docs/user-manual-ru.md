@@ -305,6 +305,12 @@ Update the report from new evidence
 
 Подробнее: [post-audit-followup.md](post-audit-followup.md).
 
+### 8.4. Склад результатов в PostgreSQL (опционально)
+
+Можно дублировать **заполненные ячейки** чек-листа (статус / наблюдение / рекомендация)
+в отдельную БД склада (`RESULTS_DB_*`). Доказательства (stdout инструментов) остаются
+на диске в `artifacts/`. Подробнее: [results-database.md](results-database.md).
+
 ---
 
 ## 9. Диаграммы соответствия CIS
@@ -481,6 +487,7 @@ docker compose up -d --build agent
 - [starting-an-audit.md](starting-an-audit.md) — старт аудита и формат target-файла  
 - [long-term-memory.md](long-term-memory.md) — playbook-память  
 - [cis-compliance-charts.md](cis-compliance-charts.md) — графики соответствия  
+- [results-database.md](results-database.md) — склад результатов в PostgreSQL  
 - [README.md](../README.md) — обзор на английском  
 
 ---

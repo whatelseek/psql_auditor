@@ -120,6 +120,7 @@ from auditor.language import (
 )
 from auditor.memory.playbook_store import PlaybookMemory
 from auditor.report_archive import package_and_publish_archive
+from auditor.results_store import record_results_safe
 from auditor.llm import build_chat_model
 from auditor.prompts import (
     EVIDENCE_FORCE_PROMPT,
@@ -1781,6 +1782,33 @@ class AuditorGraph:
                 )
             except Exception:  # noqa: BLE001
                 pass
+
+        if findings or requirements:
+            evidence_rel = ""
+            if store is not None:
+                try:
+                    evidence_rel = str(
+                        store.root.relative_to(
+                            Path(self.settings.evidence_dir).resolve()
+                        )
+                    )
+                except ValueError:
+                    evidence_rel = str(store.root)
+            await record_results_safe(
+                self.settings,
+                client_name=str(state.get("client_name") or "")
+                or (store.run_id if store else ""),
+                evidence_run_id=str(
+                    state.get("evidence_run_id") or (store.run_id if store else "")
+                ),
+                framework_id=fw or "framework",
+                evidence_host_id=str(state.get("evidence_host_id") or "") or None,
+                findings=findings,
+                requirements=requirements,
+                evidence_relpath=evidence_rel,
+                source="finalize",
+                report_language=report_lang.code if report_lang else None,
+            )
 
         header = (
             f"Framework: `{fw}` | session reconnects: {retries}{evidence_note}\n\n"

@@ -180,9 +180,15 @@ Update the report from new evidence
 
 See [`docs/post-audit-followup.md`](docs/post-audit-followup.md).
 
+## Results PostgreSQL warehouse
+
+Optionally dual-write filled checklist cells (status / observation / recommendation)
+to a per-client Postgres database. Evidence files stay on disk. See
+[`docs/results-database.md`](docs/results-database.md) (`RESULTS_DB_*`).
+
 ## Config
 
-See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `BENCHMARK_ENABLED`, `BENCHMARK_PATH`, `ADHOC_COMMANDS_ENABLED`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`, `MCP_POSTGRES_*`.
+See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `BENCHMARK_ENABLED`, `BENCHMARK_PATH`, `ADHOC_COMMANDS_ENABLED`, `RESULTS_DB_*`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`, `MCP_POSTGRES_*`.
 
 MCP architecture: [`docs/langchain-mcp.md`](docs/langchain-mcp.md).
 
