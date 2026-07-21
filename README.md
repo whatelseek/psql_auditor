@@ -161,10 +161,6 @@ streaming HTML/SVG canvases in chat (`@@@VIZ-START` / `@@@VIZ-END`).
 
 Install from [`openwebui/inline-visualizer-v2/`](openwebui/inline-visualizer-v2/) — see [`INSTALL.md`](openwebui/inline-visualizer-v2/INSTALL.md). Attach to a general chat model; enable **Allow iframe same origin**.
 
-## Audit benchmark history
-
-Every completed checklist audit appends aggregate scores to [`memory/benchmark.md`](memory/benchmark.md) (pass/fail/compliance % by framework). See [`docs/audit-benchmark.md`](docs/audit-benchmark.md).
-
 ## Ad-hoc commands (Open WebUI)
 
 Ask the model to **run commands** without a full checklist audit:
@@ -199,7 +195,7 @@ checkpoint query — resume with **continue**. Details:
 
 ## Config
 
-See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `BENCHMARK_ENABLED`, `BENCHMARK_PATH`, `ADHOC_COMMANDS_ENABLED`, `RESULTS_DB_*`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`, `MCP_POSTGRES_*`.
+See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `ADHOC_COMMANDS_ENABLED`, `RESULTS_DB_*`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `LITELLM_*`, `PG_*`, `SSH_*`, `MCP_POSTGRES_*`.
 
 MCP architecture: [`docs/langchain-mcp.md`](docs/langchain-mcp.md).
 

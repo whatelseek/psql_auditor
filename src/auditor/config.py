@@ -61,8 +61,6 @@ class Settings(BaseSettings):
             a JWT for file upload when ``open_webui_api_key`` is empty (lab).
         compliance_charts_in_report: When true, append SVG compliance charts
             to the finalized Markdown report.
-        benchmark_enabled: Append aggregate scores to cumulative benchmark.md.
-        benchmark_path: Optional path to benchmark.md (default memory/benchmark.md).
         adhoc_commands_enabled: When true, command-style chat requests use the
             ad-hoc executor instead of a full checklist audit.
         results_db_enabled: Dual-write filled checklist cells to a Postgres
@@ -141,9 +139,6 @@ class Settings(BaseSettings):
     open_webui_password: str | None = None
     # Append CIS compliance % bar charts to the final report text
     compliance_charts_in_report: bool = True
-    # Cumulative benchmark.md ledger of past audit scores
-    benchmark_enabled: bool = True
-    benchmark_path: Path | None = None
     # Allow chat to run ad-hoc SSH/SQL/playbook commands without a full audit
     adhoc_commands_enabled: bool = True
     max_session_retries: int = 2
@@ -277,13 +272,6 @@ class Settings(BaseSettings):
         return (
             f"postgresql://{auth}{fields['host']}:{fields['port']}/{fields['database']}"
         )
-
-    def resolve_benchmark_path(self) -> Path:
-        """Path to the cumulative audit benchmark Markdown ledger."""
-        if self.benchmark_path is not None:
-            return Path(self.benchmark_path)
-        return Path(self.memory_dir) / "benchmark.md"
-
 
 @lru_cache
 def get_settings() -> Settings:
