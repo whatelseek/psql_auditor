@@ -184,7 +184,10 @@ See [`docs/post-audit-followup.md`](docs/post-audit-followup.md).
 
 Optionally dual-write filled checklist cells to a per-client Postgres database and
 track **numbered audit sessions** (`#1`, `#2`, …). Evidence files stay on disk.
-Ask *which sessions need continue?* to list interrupted audits. See
+
+Chat uses **phrase patterns** (not free-form LLM): *which sessions need continue?*,
+*list audit sessions*, `continue session 3 for Acme`. Session list ≠ LangGraph
+checkpoint query — resume with **continue**. Details:
 [`docs/results-database.md`](docs/results-database.md) (`RESULTS_DB_*`).
 
 ## Config

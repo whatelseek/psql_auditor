@@ -261,6 +261,8 @@ HITL_ENABLED=false
 
 Чекпоинты LangGraph пишутся в Sqlite (`CHECKPOINT_PATH`, по умолчанию `artifacts/.checkpoints/auditor.sqlite`) и переживают перезапуск контейнера агента (том `./artifacts`).
 
+**Сессия аудита** (номер `#1`, `#2`, … в складе PostgreSQL) и **чекпоинт** LangGraph — разные вещи. Список прерванных аудитов по клиентам — через склад (фразы ниже); возобновление — через **continue** (поднимает чекпоинт). Свободный вопрос вроде «какой последний checkpoint?» **не** распознаётся — см. [results-database.md](results-database.md#chat-phrases-open-webui).
+
 ---
 
 ## 8. Отчёт, ZIP и артефакты
@@ -310,10 +312,22 @@ Update the report from new evidence
 Можно дублировать **заполненные ячейки** чек-листа в отдельную БД склада
 (`RESULTS_DB_*`) и вести **номера сессий аудита** (`#1`, `#2`, …) на клиента.
 Каждый новый аудит создаёт новую сессию; continue возобновляет ту же.
-Спросите в чате: *«Какие сессии прерваны?»* / *Which sessions need continue?*
 
-Доказательства (stdout инструментов) остаются на диске в `artifacts/`.
-Подробнее: [results-database.md](results-database.md).
+В чате (распознаются **готовые фразы**, не произвольный текст):
+
+```text
+Which sessions need continue?
+List audit sessions
+Какие сессии прерваны?
+Список сессий
+continue session 3 for Acme
+продолжи сессию 3 для Acme
+```
+
+Не сработает как список сессий: «какой последний checkpoint?», «where did we leave off?» —
+используйте фразы про **sessions/сессии**, затем **continue**.
+
+Подробнее (EN): [results-database.md](results-database.md).
 
 ---
 
