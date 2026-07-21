@@ -1,9 +1,16 @@
 """LangGraph state schema and fixed-format audit report helpers.
 
+Defines the shared :class:`AuditorState` TypedDict consumed by every node in the
+audit graph, plus :class:`Finding` records and :func:`render_report` for the
+final Markdown deliverable.
+
 The report skeleton is generated from the checklist (fixed cells). The model
 only fills ``status``, ``observation`` (stored as ``evidence``), and
 ``recommendation`` (stored as ``remediation``). Category, severity, title, and
 pass criteria always come from the Markdown checklist — never from the LLM.
+
+Used after each requirement assessment (findings merge) and at finalize time
+when the graph writes ``state["report"]``.
 """
 
 from __future__ import annotations
@@ -48,14 +55,46 @@ def merge_findings(
     left: dict[str, Finding] | None,
     right: dict[str, Finding] | None,
 ) -> dict[str, Finding]:
-    """LangGraph reducer: merge two findings dicts."""
+    """LangGraph reducer: merge two findings dicts.
+
+  Later values from ``right`` overwrite same-key entries in ``left``. Used as
+  the reducer for the ``findings`` state key so parallel requirement workers
+  can publish results independently.
+
+  Args:
+      left: Existing findings map (may be ``None``).
+      right: New or updated findings to merge in (may be ``None``).
+
+  Returns:
+      Combined dict keyed by requirement id.
+  """
     merged = dict(left or {})
     merged.update(right or {})
     return merged
 
 
 class AuditorState(TypedDict, total=False):
-    """Shared state for one audit graph run."""
+    """Shared state for one audit graph run.
+
+  All keys are optional at construction time; nodes populate them as the graph
+  progresses from intake through assessment to finalize. Message history uses
+  LangGraph's ``add_messages`` reducer; findings use :func:`merge_findings`.
+
+  Key fields:
+      messages: Chat history for the current graph thread.
+      user_request: Original operator prompt.
+      report_language: ``en`` or ``ru`` from language detection.
+      framework_id / framework_title / checklist_title: Active framework metadata.
+      requirements: Parsed checklist map keyed by ``REQ-NNN``.
+      pending_ids / current_id: Assessment queue cursor.
+      findings: Model-filled cells per requirement.
+      report: Final Markdown report string.
+      evidence_run_id / evidence_run_dir: On-disk artifact paths.
+      intake / intake_complete: Pre-audit questionnaire answers.
+      results_session_number: Postgres warehouse session id.
+      host_facts_md / cmdb_drift_md: Host inventory snapshots.
+      archive_path / archive_url: Zip bundle for chat download.
+  """
 
     messages: Annotated[list[BaseMessage], add_messages]
     user_request: str
@@ -100,7 +139,17 @@ class AuditorState(TypedDict, total=False):
 
 
 def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:
-    """Count findings by status for the report summary line."""
+    """Count findings by status for the report summary line.
+
+  Accepts either :class:`Finding` instances or dict-like objects with a
+  ``status`` key (for deserialized state).
+
+  Args:
+      findings: Map of requirement id → finding record.
+
+  Returns:
+      Dict with keys ``pass``, ``fail``, ``partial``, ``error``, ``skipped``.
+  """
     counts: dict[str, int] = {
         "pass": 0,
         "fail": 0,
@@ -115,7 +164,17 @@ def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:
 
 
 def _md_escape_cell(text: str) -> str:
-    """Flatten text for a single Markdown table cell."""
+    """Flatten text for a single Markdown table cell.
+
+  Replaces pipe characters (which would break tables), collapses whitespace,
+  and strips leading/trailing space.
+
+  Args:
+      text: Raw cell content.
+
+  Returns:
+      Single-line safe string for pipe-delimited tables.
+  """
     return " ".join((text or "").replace("|", "/").split())
 
 

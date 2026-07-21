@@ -1,16 +1,24 @@
 """OpenAI-compatible ``/v1`` endpoints for Open WebUI.
 
 Open WebUI connects to this service as if it were an OpenAI (or LiteLLM) chat
-backend. Two endpoints matter:
+backend. This module is the **HTTP adapter** between chat UI requests and
+``auditor.graph.AuditorGraph``.
 
-* ``GET /v1/models`` — advertises ``Settings.model_id`` (default ``auditor``)
-* ``POST /v1/chat/completions`` — runs the LangGraph audit and returns the report
-* ``POST /v1/responses`` — thin OpenAI Responses API shim (newer Open WebUI)
+Endpoints:
+    * ``GET /v1/models`` — Advertises ``Settings.model_id`` (default ``auditor``).
+    * ``POST /v1/chat/completions`` — Runs or resumes the LangGraph audit; supports SSE.
+    * ``POST /v1/responses`` — Thin OpenAI Responses API shim (newer Open WebUI).
+    * ``GET /v1/downloads/{filename}`` — Signed download links for audit ZIP archives.
 
-Human-in-the-loop: when a requirement fails, the graph interrupts and the
-assistant asks **skip** / **retry**. The next user message resumes the same
-thread (marker ``[AUDIT_HITL:<thread_id>]``), similar to the Open WebUI ↔
-LangGraph pipe pattern.
+Human-in-the-loop:
+    When a requirement fails, the graph interrupts and the assistant asks
+    **skip** / **retry**. The next user message resumes the same thread
+    (marker ``[AUDIT_HITL:<thread_id>]``), similar to the Open WebUI ↔
+    LangGraph pipe pattern.
+
+Key entry points:
+    ``router``, ``chat_completions``, ``responses_api``, ``list_models``,
+    ``download_archive``.
 """
 
 from __future__ import annotations
@@ -45,14 +53,25 @@ router = APIRouter(prefix="/v1")
 
 
 class ChatMessage(BaseModel):
-    """Single message in an OpenAI chat-completions request."""
+    """Single message in an OpenAI chat-completions request body.
 
-    role: Literal["system", "user", "assistant", "tool"]
+    Attributes:
+        role: Message author — ``system``, ``user``, ``assistant``, or ``tool``.
+        content: Plain-text body; may be empty for tool-call-only assistant turns.
+    """
     content: str | None = ""
 
 
 class ChatCompletionRequest(BaseModel):
-    """Subset of the OpenAI chat-completions request body we accept."""
+    """Subset of the OpenAI chat-completions request body accepted by the auditor.
+
+    Attributes:
+        model: Optional model override; defaults to ``Settings.model_id``.
+        messages: Full conversation history (used for resume markers and context).
+        stream: When ``True``, return Server-Sent Events instead of one JSON body.
+        temperature: Accepted for compatibility; not passed to the audit graph.
+        user: Optional stable user id; used to derive a persistent ``thread_id``.
+    """
 
     model: str | None = None
     messages: list[ChatMessage]
@@ -62,7 +81,17 @@ class ChatCompletionRequest(BaseModel):
 
 
 class ResponsesRequest(BaseModel):
-    """Minimal OpenAI Responses API request (Open WebUI ``api_type=responses``)."""
+    """Minimal OpenAI Responses API request (Open WebUI ``api_type=responses``).
+
+    Attributes:
+        model: Optional model override.
+        input: String user message or list of structured input items.
+        instructions: Optional system prompt prepended as a system message.
+        stream: When ``True``, emit Responses SSE events during the audit.
+        temperature: Accepted for compatibility; ignored by the graph.
+        user: Optional stable user id for thread derivation.
+        max_output_tokens: Accepted for compatibility; not enforced.
+    """
 
     model: str | None = None
     input: Any = None
@@ -74,6 +103,17 @@ class ResponsesRequest(BaseModel):
 
 
 def _text_from_content_parts(content: Any) -> str:
+    """Flatten OpenAI-style multipart content into a single string.
+
+    Handles plain strings, lists of strings, and dict parts with ``type`` in
+    ``input_text``, ``output_text``, or ``text``.
+
+    Args:
+        content: Raw ``content`` field from a Responses API input item.
+
+    Returns:
+        Joined text with newlines, or ``""`` for ``None``.
+    """
     if content is None:
         return ""
     if isinstance(content, str):
@@ -95,7 +135,15 @@ def _text_from_content_parts(content: Any) -> str:
 def _messages_from_responses_input(
     payload: ResponsesRequest,
 ) -> list[ChatMessage]:
-    """Convert Responses ``input`` (+ optional instructions) to chat messages."""
+    """Convert Responses ``input`` (+ optional instructions) to chat messages.
+
+    Args:
+        payload: Parsed Responses API request.
+
+    Returns:
+        Chat messages suitable for ``ChatCompletionRequest``; may be empty
+        when ``input`` is missing or unparseable.
+    """
     messages: list[ChatMessage] = []
     if payload.instructions:
         messages.append(ChatMessage(role="system", content=payload.instructions))
@@ -124,6 +172,17 @@ def _messages_from_responses_input(
 
 
 def _responses_payload(content: str, model: str, response_id: str) -> dict[str, Any]:
+    """Build a completed OpenAI Responses API response object.
+
+    Args:
+        content: Final assistant text (report or pause message).
+        model: Model id echoed in the response.
+        response_id: Unique response id (``resp_…``).
+
+    Returns:
+        Dict matching the Responses API ``response`` shape with ``output_text``
+        convenience field and zeroed token usage.
+    """
     message_id = f"msg_{uuid.uuid4().hex[:20]}"
     return {
         "id": response_id,
@@ -151,6 +210,14 @@ def _responses_payload(content: str, model: str, response_id: str) -> dict[str, 
 
 
 def _sse_responses_event(payload: dict[str, Any]) -> str:
+    """Encode one Responses API event as an SSE ``data:`` frame.
+
+    Args:
+        payload: Event dict (must be JSON-serializable).
+
+    Returns:
+        ``data: {json}\\n\\n`` string for ``StreamingResponse``.
+    """
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
@@ -160,13 +227,28 @@ async def _stream_responses_audit(
     model: str,
     response_id: str,
 ) -> AsyncIterator[str]:
-    """Emit OpenAI Responses SSE events (Open WebUI stream=true path)."""
+    """Emit OpenAI Responses SSE events while an audit runs (``stream=true``).
+
+    Binds a ``ProgressSink``, shields the audit task from client disconnect,
+    streams progress as Responses events, then emits the final report in
+    ``response.output_text.delta`` chunks.
+
+    Args:
+        auditor: Ready ``AuditorGraph`` instance.
+        body: Normalized chat request (messages from Responses input).
+        model: Model id for all SSE payloads.
+        response_id: Responses API id for this run.
+
+    Yields:
+        SSE frame strings (``data: …\\n\\n``).
+    """
     seq = 0
     message_id = f"msg_{uuid.uuid4().hex[:20]}"
     created_at = int(time.time())
     progress_q: asyncio.Queue[Any] = asyncio.Queue()
 
     def _next() -> int:
+        """Return the next monotonic Responses API ``sequence_number``."""
         nonlocal seq
         seq += 1
         return seq
@@ -219,6 +301,7 @@ async def _stream_responses_audit(
     sink = ProgressSink()
 
     async def _runner() -> dict[str, Any]:
+        """Run audit with progress sink bound (Responses stream path)."""
         with bind_progress_sink(sink):
             try:
                 return await _run_or_resume(auditor, body)
@@ -230,6 +313,7 @@ async def _stream_responses_audit(
     shielded = asyncio.ensure_future(asyncio.shield(run_task))
 
     async def _pump_progress() -> None:
+        """Move progress events from the sink queue into the async output queue."""
         while True:
             event = await sink.queue.get()
             await progress_q.put(event)
@@ -354,6 +438,14 @@ async def _stream_responses_audit(
 
 
 def _check_api_key(authorization: str | None) -> None:
+    """Validate Bearer token when ``Settings.api_key`` is configured.
+
+    Args:
+        authorization: Raw ``Authorization`` header value.
+
+    Raises:
+        HTTPException: 401 when a key is required but missing or incorrect.
+    """
     settings = get_settings()
     if not settings.api_key:
         return
@@ -365,6 +457,16 @@ def _check_api_key(authorization: str | None) -> None:
 
 
 def _latest_user_text(messages: list[ChatMessage]) -> str:
+    """Extract the most recent non-empty user message from the conversation.
+
+    Falls back to concatenated user/system content, then a default audit prompt.
+
+    Args:
+        messages: Conversation history from the chat request.
+
+    Returns:
+        Text to classify as audit intent and pass to the graph.
+    """
     for msg in reversed(messages):
         if msg.role == "user" and msg.content:
             return msg.content
@@ -373,6 +475,16 @@ def _latest_user_text(messages: list[ChatMessage]) -> str:
 
 
 def _completion_payload(content: str, model: str, completion_id: str) -> dict[str, Any]:
+    """Build a non-streaming OpenAI chat-completion response object.
+
+    Args:
+        content: Assistant message body (audit report or pause text).
+        model: Model id echoed in the response.
+        completion_id: Unique completion id (``chatcmpl-…``).
+
+    Returns:
+        Dict matching the Chat Completions API response schema.
+    """
     return {
         "id": completion_id,
         "object": "chat.completion",
@@ -395,6 +507,17 @@ def _sse_chunk(
     completion_id: str,
     finish: str | None = None,
 ) -> str:
+    """Format one OpenAI chat-completion SSE chunk.
+
+    Args:
+        content: Partial assistant text, or ``None`` for role-only or finish chunks.
+        model: Model id for the chunk.
+        completion_id: Completion id for the chunk.
+        finish: Optional ``finish_reason`` (e.g. ``stop``).
+
+    Returns:
+        SSE frame: ``data: {json}\\n\\n``.
+    """
     payload = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -417,6 +540,14 @@ def _sse_chunk(
 async def list_models(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    """List the single auditor model advertised to Open WebUI.
+
+    Args:
+        authorization: Optional Bearer token when API key auth is enabled.
+
+    Returns:
+        OpenAI-style model list with one entry (``Settings.model_id``).
+    """
     _check_api_key(authorization)
     settings = get_settings()
     return {
@@ -444,9 +575,21 @@ async def download_archive(
     authorization: str | None = Header(default=None),
     token: str | None = Query(default=None),
 ):
-    """Download a packaged audit zip (report + per-REQ evidence).
+    """Download a packaged audit ZIP (report + per-REQ evidence).
 
-    Auth: valid ``?token=`` (for Open WebUI markdown links) **or** Bearer API key.
+    Auth: valid ``?token=`` query parameter (for Open WebUI markdown links)
+    **or** Bearer API key matching ``Settings.api_key``.
+
+    Args:
+        filename: Must match ``{run_id}_audit.zip`` (case-insensitive).
+        authorization: Optional Bearer token.
+        token: HMAC download token embedded in chat archive links.
+
+    Returns:
+        ``FileResponse`` streaming the ZIP attachment.
+
+    Raises:
+        HTTPException: 404 for unknown names or missing files; 401 for bad auth.
     """
     settings = get_settings()
     match = _DOWNLOAD_NAME.match(filename)
@@ -480,7 +623,19 @@ async def download_archive(
 
 
 async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]:
-    """Start audit, follow-up, ad-hoc command run, or resume intake/HITL/continue."""
+    """Start audit, follow-up, ad-hoc command run, or resume intake/HITL/continue.
+
+    Classifies the latest user message via ``classify_intent`` and dispatches
+    to the appropriate ``AuditorGraph`` method. Pause/resume markers in the
+    message history take precedence over intent routing.
+
+    Args:
+        auditor: Ready ``AuditorGraph`` instance.
+        body: Parsed chat-completions request.
+
+    Returns:
+        Graph result dict with ``report``, ``messages``, and optional pause flags.
+    """
     user_text = _latest_user_text(body.messages)
     paused = resolve_pause_resume(body.messages)
     if paused:
@@ -528,7 +683,17 @@ async def chat_completions(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    """Run or resume a checklist audit (or ad-hoc commands) as a chat completion."""
+    """Run or resume a checklist audit (or ad-hoc commands) as a chat completion.
+
+    Args:
+        body: Chat request including messages and optional ``stream`` flag.
+        request: Raw FastAPI request (reserved for future disconnect handling).
+        authorization: Optional Bearer API key.
+
+    Returns:
+        ``JSONResponse`` with the full report, or ``StreamingResponse`` (SSE)
+        when ``body.stream`` is ``True``.
+    """
     _check_api_key(authorization)
     settings = get_settings()
     model = body.model or settings.model_id
@@ -560,7 +725,17 @@ async def responses_api(
 
     Converts ``input`` → chat messages, runs the same audit path as
     ``/v1/chat/completions``. When ``stream=true`` (Open WebUI default),
-    emits Responses SSE events so the chat UI receives text.
+    emits Responses SSE events so the chat UI receives incremental text.
+
+    Args:
+        body: Responses API request (``input``, ``instructions``, ``stream``).
+        authorization: Optional Bearer API key.
+
+    Returns:
+        Completed response JSON or ``StreamingResponse`` for SSE streaming.
+
+    Raises:
+        HTTPException: 400 when ``input`` yields no messages.
     """
     _check_api_key(authorization)
     settings = get_settings()
@@ -605,6 +780,15 @@ async def responses_api(
 
 
 def _last_ai_text(messages: list) -> str:
+    """Return content of the last ``AIMessage`` in a LangChain message list.
+
+    Args:
+        messages: LangChain message objects from graph state.
+
+    Returns:
+        String content of the most recent assistant message, or a fallback
+        when no AI content is present.
+    """
     for msg in reversed(messages):
         if isinstance(msg, AIMessage) and msg.content:
             return str(msg.content)
@@ -617,7 +801,21 @@ async def _stream_audit(
     model: str,
     completion_id: str,
 ) -> AsyncIterator[str]:
-    """Stream an audit (or intake/HITL resume) as OpenAI-compatible SSE chunks."""
+    """Stream an audit (or intake/HITL resume) as OpenAI-compatible SSE chunks.
+
+    Emits an initial role chunk, a human-readable preamble based on intent,
+    progress events via ``chat_progress_chunks``, then the final report in
+    fixed-size content deltas.
+
+    Args:
+        auditor: Ready ``AuditorGraph`` instance.
+        body: Chat request with conversation history.
+        model: Model id for all SSE payloads.
+        completion_id: Completion id for all SSE payloads.
+
+    Yields:
+        SSE frame strings ending with ``data: [DONE]\\n\\n``.
+    """
     settings = get_settings()
     user_text = _latest_user_text(body.messages)
     paused = resolve_pause_resume(body.messages)
@@ -702,6 +900,7 @@ async def _stream_audit(
     tool_index = 0
 
     async def _runner() -> dict[str, Any]:
+        """Run audit with progress sink bound (chat completions stream path)."""
         with bind_progress_sink(sink):
             try:
                 return await _run_or_resume(auditor, body)
@@ -712,6 +911,7 @@ async def _stream_audit(
     shielded = asyncio.ensure_future(asyncio.shield(run_task))
 
     async def _pump() -> None:
+        """Move progress events from the sink queue into the async output queue."""
         while True:
             event = await sink.queue.get()
             await progress_q.put(event)

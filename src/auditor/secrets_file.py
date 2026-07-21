@@ -1,4 +1,19 @@
-"""Load connection credentials from ``secrets/*.md`` (not from Compose)."""
+"""Load connection credentials from ``secrets/*.md`` (not from Compose).
+
+This module parses **Markdown credential tables** and fenced ``KEY=VALUE`` blocks
+from operator-maintained secret files. It loads SSH, PostgreSQL, and NetBox
+settings into the process environment without requiring them in ``docker-compose``.
+
+Pipeline role:
+    Called at startup and during multi-host discovery to bind SSH targets,
+    probe CMDB/Postgres access, and supply inventory rows for follow-up runs.
+
+Key entry points:
+    :func:`load_connection_secrets` — global ``secrets/connection.md``.
+    :func:`load_inventory_credentials` — per-client ``INVENTORY.md``.
+    :func:`list_client_ssh_targets` / :func:`bind_ssh_target` — multi-host SSH.
+    :class:`InventorySshTarget` — one SSH-capable inventory row.
+"""
 
 from __future__ import annotations
 
@@ -52,10 +67,26 @@ _EXTRA_KV = re.compile(
 
 
 def _cell(raw: str) -> str:
+    """Strip whitespace and backticks from a Markdown table cell.
+
+    Args:
+        raw: Raw cell text from a pipe table row.
+
+    Returns:
+        Trimmed cell value.
+    """
     return (raw or "").strip().strip("`")
 
 
 def _norm_header(cell: str) -> str:
+    """Normalize a table header to lowercase alphanumeric key for column lookup.
+
+    Args:
+        cell: Header cell text.
+
+    Returns:
+        Collapsed lowercase key (e.g. ``"Host / URL"`` → ``hosturl``).
+    """
     return re.sub(r"[^a-z0-9]+", "", (cell or "").lower())
 
 
@@ -86,6 +117,14 @@ def _parse_extra(extra: str) -> dict[str, str]:
 
 
 def _access_kind(label: str) -> str | None:
+    """Map an inventory ``Access`` column label to ``ssh``, ``pg``, or ``netbox``.
+
+    Args:
+        label: Access/service type cell (e.g. ``SSH``, ``PostgreSQL``, ``1C Ubuntu``).
+
+    Returns:
+        Kind string or ``None`` when the row is not a recognized credential type.
+    """
     low = (label or "").strip().lower()
     if not low:
         return None
@@ -133,6 +172,14 @@ def _parse_credentials_table(text: str) -> dict[str, str]:
         return {}
 
     def col(*aliases: str) -> int | None:
+        """Return the first matching header column index, or None.
+
+        Args:
+            *aliases: Normalized header names to look up in order of preference.
+
+        Returns:
+            Zero-based column index, or ``None`` when none of the aliases exist.
+        """
         for alias in aliases:
             if alias in headers:
                 return headers.index(alias)
@@ -256,7 +303,17 @@ def _parse_env_text(text: str) -> dict[str, str]:
 
 @dataclass(frozen=True, slots=True)
 class InventorySshTarget:
-    """One SSH-capable inventory row (host + auth)."""
+    """One SSH-capable inventory row (host + auth).
+
+    Attributes:
+        host: IP address or hostname.
+        port: SSH port (default ``22``).
+        user: SSH username.
+        password: SSH password when key auth is not used.
+        private_key_path: Path to private key file.
+        strict_host_key: ``true``/``false`` for host key checking.
+        label: Original Access column label from the inventory table.
+    """
 
     host: str
     port: str = "22"
@@ -294,6 +351,14 @@ def _iter_credential_rows(text: str) -> list[dict[str, str]]:
         return []
 
     def col(*aliases: str) -> int | None:
+        """Return the first matching header column index, or None.
+
+        Args:
+            *aliases: Normalized header names to look up in order of preference.
+
+        Returns:
+            Zero-based column index, or ``None`` when none of the aliases exist.
+        """
         for alias in aliases:
             if alias in headers:
                 return headers.index(alias)
@@ -415,7 +480,15 @@ def bind_ssh_target(
 ) -> Iterator[None]:
     """Temporarily apply one SSH target to the process environment.
 
-    Clears ``get_settings`` cache on enter/exit so SSH tools pick up the host.
+    Sets ``SSH_*`` variables from ``target``, clears :func:`~auditor.config.get_settings`
+    cache on enter/exit so SSH tools pick up the host, then restores prior values.
+
+    Args:
+        target: Inventory SSH row to bind.
+        environ: Environment dict to mutate (defaults to ``os.environ``).
+
+    Yields:
+        None — use as a context manager around tool calls for that host.
     """
     from auditor.config import get_settings
 

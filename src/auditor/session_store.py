@@ -1,4 +1,20 @@
-"""Persist multi-framework session queue across agent restarts."""
+"""Persist multi-framework session queue across agent restarts.
+
+This module stores **in-progress audit session state** on disk so LangGraph
+checkpoints can be resumed after process restarts. Multi-host / multi-framework
+job queues and SSH target descriptors are written to ``session.json`` under
+each evidence run (passwords retained for trusted resume contexts).
+
+Pipeline role:
+    Used by the graph during long audits to persist ``remaining_jobs``,
+    track interrupted runs in ``meta.json``, and support ``continue`` commands
+    coordinated with :mod:`auditor.results_store`.
+
+Key entry points:
+    :func:`save_multi_session` / :func:`load_all_multi_sessions` — per-thread session blobs.
+    :func:`write_run_status` — update run meta status and pending REQ ids.
+    :func:`find_interrupted_run` — locate newest interrupted evidence run.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +24,15 @@ from typing import Any
 
 
 def session_path(evidence_dir: Path, run_id: str) -> Path:
+    """Return path to ``session.json`` for an evidence run.
+
+    Args:
+        evidence_dir: Root evidence directory.
+        run_id: Run folder name.
+
+    Returns:
+        ``<evidence_dir>/<run_id>/session.json`` path.
+    """
     return Path(evidence_dir) / run_id / "session.json"
 
 
@@ -17,7 +42,19 @@ def save_multi_session(
     thread_id: str,
     session: dict[str, Any],
 ) -> Path:
-    """Write one multi-session entry (SSH secrets stripped)."""
+    """Write one multi-session entry (SSH secrets stripped where applicable).
+
+    Merges into existing ``session.json`` under ``sessions[thread_id]``.
+
+    Args:
+        evidence_dir: Root evidence directory.
+        run_id: Evidence run folder name.
+        thread_id: LangGraph thread id key.
+        session: Serializable session dict (sanitized via :func:`_sanitize_session`).
+
+    Returns:
+        Path to written ``session.json``.
+    """
     path = session_path(evidence_dir, run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = _load(path)
@@ -31,6 +68,15 @@ def save_multi_session(
 
 
 def drop_multi_session(evidence_dir: Path, run_id: str, thread_id: str) -> None:
+    """Remove one thread's session entry from ``session.json``.
+
+    No-op when the file or thread key does not exist.
+
+    Args:
+        evidence_dir: Root evidence directory.
+        run_id: Evidence run folder name.
+        thread_id: LangGraph thread id to remove.
+    """
     path = session_path(evidence_dir, run_id)
     if not path.is_file():
         return
@@ -43,6 +89,15 @@ def drop_multi_session(evidence_dir: Path, run_id: str, thread_id: str) -> None:
 
 
 def load_all_multi_sessions(evidence_dir: Path, run_id: str) -> dict[str, dict[str, Any]]:
+    """Load all per-thread session dicts for an evidence run.
+
+    Args:
+        evidence_dir: Root evidence directory.
+        run_id: Evidence run folder name.
+
+    Returns:
+        Mapping of thread id to sanitized session payload.
+    """
     path = session_path(evidence_dir, run_id)
     payload = _load(path)
     sessions = payload.get("sessions")
@@ -58,6 +113,19 @@ def write_run_status(
     pending_ids: list[str] | None = None,
     framework_id: str = "",
 ) -> None:
+    """Update run ``meta.json`` with lifecycle status and resume hints.
+
+    Opens the evidence store and merges status, continue thread id, pending
+    requirement ids, and current framework id.
+
+    Args:
+        evidence_dir: Root evidence directory.
+        run_id: Evidence run folder name.
+        status: Run status (e.g. ``running``, ``interrupted``, ``completed``).
+        thread_id: LangGraph thread id for continue commands.
+        pending_ids: Remaining REQ ids in the job queue.
+        framework_id: Active framework key when interrupted mid-run.
+    """
     from auditor.evidence_store import EvidenceStore
 
     store = EvidenceStore.open_existing(evidence_dir, run_id)
@@ -72,7 +140,17 @@ def write_run_status(
 
 
 def find_interrupted_run(evidence_dir: Path) -> tuple[str, dict[str, Any]] | None:
-    """Return newest interrupted run_id + meta, if any."""
+    """Return newest interrupted run_id + meta, if any.
+
+    Scans all run folders with ``meta.json`` where ``status == "interrupted"``.
+
+    Args:
+        evidence_dir: Root evidence directory.
+
+    Returns:
+        Tuple of ``(run_id, meta_dict)`` for the newest interrupted run,
+        or ``None`` when none found.
+    """
     root = Path(evidence_dir)
     if not root.is_dir():
         return None
@@ -101,7 +179,18 @@ def find_interrupted_run(evidence_dir: Path) -> tuple[str, dict[str, Any]] | Non
 
 
 def _sanitize_session(session: dict[str, Any]) -> dict[str, Any]:
-    """Drop live SSH password objects; keep serializable job descriptors."""
+    """Drop non-serializable values; normalize SSH target for resume.
+
+    Preserves ``remaining_jobs``, ``completed``, and ``intake_state`` verbatim.
+    Serializes ``ssh_target`` to a plain dict (password retained for trusted
+    resume inside the secrets volume context).
+
+    Args:
+        session: Raw in-memory session dict from the graph.
+
+    Returns:
+        JSON-serializable session dict safe for ``session.json``.
+    """
     out: dict[str, Any] = {}
     for key, value in session.items():
         if key == "ssh_target":
@@ -140,6 +229,14 @@ def _sanitize_session(session: dict[str, Any]) -> dict[str, Any]:
 
 
 def _load(path: Path) -> dict[str, Any]:
+    """Load JSON dict from path, returning ``{}`` on missing or invalid files.
+
+    Args:
+        path: Path to a JSON file.
+
+    Returns:
+        Parsed dict or empty dict.
+    """
     if not path.is_file():
         return {}
     try:

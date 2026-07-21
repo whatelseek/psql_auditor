@@ -1,11 +1,12 @@
 """LiteLLM-backed chat model factory.
 
-The auditor never calls a vendor API directly. All LLM traffic goes through the
+Constructs the LangChain chat model used by assess, finalize, and ad-hoc nodes.
+The auditor never calls a vendor API directly; all LLM traffic goes through the
 LiteLLM OpenAI-compatible proxy configured by ``Settings.litellm_*``.
 
 We use ``langchain_openai.ChatOpenAI`` pointed at LiteLLM's ``/v1`` base URL so
 tool-calling (required by the assess loop) behaves consistently across providers
-that LiteLLM fronts.
+that LiteLLM fronts. Invoked at graph startup and per ad-hoc command handler.
 """
 
 from __future__ import annotations

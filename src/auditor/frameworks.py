@@ -1,13 +1,19 @@
 """Drop-in audit frameworks from the ``agents/`` directory.
 
-You create frameworks — the code only discovers them:
+Discovery and routing layer at the start of every audit run. Operators add
+Markdown checklists under ``agents/<name>.md``; this module scans that directory,
+parses optional YAML frontmatter, and selects the best match for a natural-
+language request or for live host facts.
 
-1. Add ``agents/<name>.md`` (CIS Postgres, Ubuntu, Windows, custom, …)
-2. Use the standard ``REQ-NNN`` Markdown shape (see existing files)
-3. Optionally add YAML frontmatter for aliases / description / detect rules
+Pipeline integration:
 
-On each audit the agent routes the operator request to the best matching
-``.md`` file and loads it as the fixed report skeleton.
+1. :func:`route_framework` / :func:`route_frameworks` pick framework(s) from chat.
+2. :func:`select_frameworks_for_host` auto-selects by OS, binaries, and ports.
+3. :func:`load_framework_checklist` feeds the LangGraph ``load_checklist`` node.
+
+You create frameworks — the code only discovers them. Use the standard
+``REQ-NNN`` Markdown shape (see existing files) and optional frontmatter for
+aliases, description, and ``detect:`` host-matching rules.
 """
 
 from __future__ import annotations
@@ -26,7 +32,18 @@ _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n(.*)\Z", re.DOTALL)
 
 @dataclass(frozen=True, slots=True)
 class FrameworkDetect:
-    """Host-matching rules from agent frontmatter ``detect:``."""
+    """Host-matching rules from agent frontmatter ``detect:`` block.
+
+  Used by :func:`framework_matches_host` during intake to decide which
+  cybersecurity or IT frameworks apply to the target without explicit operator
+  naming.
+
+  Attributes:
+      os_ids: ``/etc/os-release`` id prefixes that must match (e.g. ``ubuntu``).
+      binaries: At least one of these command names must be present on the host.
+      ports: At least one listening TCP port must match.
+      always: When ``True``, the framework matches every host in its domain.
+  """
 
     os_ids: tuple[str, ...] = ()
     binaries: tuple[str, ...] = ()
@@ -36,7 +53,17 @@ class FrameworkDetect:
 
 @dataclass(frozen=True, slots=True)
 class Framework:
-    """One drop-in framework discovered from ``agents/*.md``."""
+    """One drop-in framework discovered from ``agents/*.md``.
+
+  Attributes:
+      id: Stable framework slug (from frontmatter or filename stem).
+      title: Human-readable checklist title.
+      path: Absolute or relative path to the Markdown file.
+      description: Short summary for catalogs and prompts.
+      aliases: Search tokens for :func:`route_framework` scoring.
+      domain: ``it`` or ``cybersecurity`` for intake filtering.
+      detect: Host auto-detection rules parsed from frontmatter.
+  """
 
     id: str
     title: str
@@ -48,7 +75,18 @@ class Framework:
 
 
 def _default_aliases(stem: str, title: str) -> tuple[str, ...]:
-    """Derive search aliases from filename and title."""
+    """Derive search aliases from filename stem and document title.
+
+  Splits the title on whitespace and punctuation and keeps tokens of length ≥ 3.
+  Includes underscore/hyphen variants of the stem for flexible operator matching.
+
+  Args:
+      stem: Filename without extension (e.g. ``postgres_cis``).
+      title: H1 title from the checklist body.
+
+  Returns:
+      Sorted unique lowercase alias strings.
+  """
     parts = {stem.lower(), stem.replace("_", " ").lower(), stem.replace("-", " ").lower()}
     for token in re.split(r"[\s_/.-]+", title.lower()):
         if len(token) >= 3:
@@ -57,6 +95,17 @@ def _default_aliases(stem: str, title: str) -> tuple[str, ...]:
 
 
 def _parse_detect(raw: Any) -> FrameworkDetect:
+    """Parse a frontmatter ``detect`` mapping into :class:`FrameworkDetect`.
+
+  Accepts comma-separated strings or lists for ``os_ids``, ``binaries``, and
+  ``ports``. Invalid port values are skipped silently.
+
+  Args:
+      raw: YAML-loaded value under the ``detect`` key (dict or non-dict).
+
+  Returns:
+      Normalized detect rules, or empty rules when ``raw`` is not a dict.
+  """
     if not isinstance(raw, dict):
         return FrameworkDetect()
     os_ids_raw = raw.get("os_ids") or raw.get("os") or []
@@ -92,7 +141,21 @@ def _parse_detect(raw: Any) -> FrameworkDetect:
 
 
 def _parse_agent_file(path: Path) -> Framework:
-    """Parse one agents/*.md file into a Framework (frontmatter optional)."""
+    """Parse one ``agents/*.md`` file into a :class:`Framework`.
+
+  Reads optional YAML frontmatter, extracts title from H1 or meta, builds
+  aliases, infers domain, and applies IT-audit defaults when detect rules are
+  absent.
+
+  Args:
+      path: Path to a framework Markdown file.
+
+  Returns:
+      Fully populated :class:`Framework` instance.
+
+  Raises:
+      OSError: If the file cannot be read (propagated from :meth:`Path.read_text`).
+  """
     text = path.read_text(encoding="utf-8")
     meta: dict = {}
     body = text
@@ -168,7 +231,15 @@ def get_framework(
     framework_id: str,
     agents_dir: Path | str | None = None,
 ) -> Framework | None:
-    """Lookup a discovered framework by id."""
+    """Look up a discovered framework by id.
+
+  Args:
+      framework_id: Framework slug to match (exact id comparison).
+      agents_dir: Directory to scan; defaults to ``agents``.
+
+  Returns:
+      The matching :class:`Framework`, or ``None`` if not found.
+  """
     for fw in list_frameworks(agents_dir):
         if fw.id == framework_id:
             return fw
@@ -179,7 +250,21 @@ def _score_frameworks(
     user_request: str,
     agents_dir: Path | str | None = None,
 ) -> list[tuple[int, Framework]]:
-    """Score every discovered framework against the request text."""
+    """Score every discovered framework against the operator request text.
+
+  Scoring weights: exact id match (+10), alias word-boundary hits (+1–3 by
+  length), title substring (+4). Results are sorted by descending score, then id.
+
+  Args:
+      user_request: Natural-language audit request from chat.
+      agents_dir: Framework directory to scan.
+
+  Returns:
+      List of ``(score, framework)`` tuples, highest score first.
+
+  Raises:
+      FileNotFoundError: When ``agents_dir`` contains no ``*.md`` frameworks.
+  """
     frameworks = list_frameworks(agents_dir)
     if not frameworks:
         raise FileNotFoundError(
@@ -213,7 +298,21 @@ def route_framework(
     user_request: str,
     agents_dir: Path | str | None = None,
 ) -> Framework:
-    """Pick the single best framework for a natural-language audit request."""
+    """Pick the single best framework for a natural-language audit request.
+
+  When no alias/id scores above zero, falls back to the first framework whose
+  id contains ``postgres``, else the first discovered framework alphabetically.
+
+  Args:
+      user_request: Operator chat text naming or implying a standard.
+      agents_dir: Framework directory to scan.
+
+  Returns:
+      The highest-scoring :class:`Framework`.
+
+  Raises:
+      FileNotFoundError: When no frameworks exist in ``agents_dir``.
+  """
     scored = _score_frameworks(user_request, agents_dir)
     best_score, best = scored[0]
     if best_score == 0:
@@ -324,7 +423,17 @@ def select_frameworks_for_host(
 
 
 def load_framework_checklist(framework: Framework) -> Checklist:
-    """Load checklist body (strips YAML frontmatter if present)."""
+    """Load checklist body from a framework file, stripping YAML frontmatter.
+
+  Delegates to :func:`auditor.checklist.parse_checklist_markdown` on the body
+  after optional frontmatter removal.
+
+  Args:
+      framework: Discovered framework whose :attr:`~Framework.path` is read.
+
+  Returns:
+      Parsed :class:`Checklist` with requirements in document order.
+  """
     text = framework.path.read_text(encoding="utf-8")
     match = _FRONTMATTER.match(text)
     body = match.group(2) if match else text
@@ -332,7 +441,14 @@ def load_framework_checklist(framework: Framework) -> Checklist:
 
 
 def frameworks_catalog_text(agents_dir: Path | str | None = None) -> str:
-    """Catalog string for prompts / help."""
+    """Build a human-readable catalog of available frameworks for prompts.
+
+  Args:
+      agents_dir: Directory to scan for ``*.md`` frameworks.
+
+  Returns:
+      Multi-line bullet list suitable for system prompts or help text.
+  """
     frameworks = list_frameworks(agents_dir)
     if not frameworks:
         return "No frameworks in agents/. Drop a .md checklist file to add one."

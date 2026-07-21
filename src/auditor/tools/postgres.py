@@ -36,7 +36,19 @@ _ALLOWED_PREFIXES = ("select", "show", "with", "table", "values", "explain")
 
 
 def _strip_leading_comments(sql: str) -> str:
-    """Remove leading ``--`` / ``/* */`` comments before classifying SQL."""
+    """Remove leading ``--`` and ``/* */`` comments before classifying SQL.
+
+    Strips comment blocks from the start of the string only (not inline
+    comments). Used so ``SELECT`` statements prefixed with header comments
+    are still recognized as read-only.
+
+    Args:
+        sql: Raw SQL text, possibly with leading comments.
+
+    Returns:
+        SQL with leading comments removed, or an empty string if the input
+        is only comments or an unclosed block comment.
+    """
     text = sql.strip()
     while True:
         if text.startswith("--"):
@@ -59,8 +71,16 @@ def is_readonly_sql(sql: str) -> bool:
     """Return True if every statement in ``sql`` looks read-only.
 
     Splits on ``;`` and requires each non-empty part to start with an allowed
-    verb (including ``WITH`` CTEs) and not with a forbidden verb. Intentionally
-    conservative — suitable for an auditor, not a full SQL parser.
+    verb (``SELECT``, ``SHOW``, ``WITH``, ``TABLE``, ``VALUES``, ``EXPLAIN``)
+    and not with a forbidden verb. Intentionally conservative — suitable for
+    an auditor gate, not a full SQL parser.
+
+    Args:
+        sql: One or more SQL statements (semicolon-separated).
+
+    Returns:
+        ``True`` when all non-empty statements pass the prefix checks;
+        ``False`` for empty input, unknown verbs, or mutating prefixes.
     """
     lowered = " ".join(_strip_leading_comments(sql).lower().split())
     if not lowered:

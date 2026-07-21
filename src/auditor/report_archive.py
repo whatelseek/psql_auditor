@@ -1,4 +1,18 @@
-"""Zip audit evidence/report bundles and optionally push them to Open WebUI."""
+"""Zip audit evidence/report bundles and optionally push them to Open WebUI.
+
+This module packages completed audit runs into downloadable ZIP archives,
+generates HMAC-protected download URLs, and optionally uploads archives to
+Open WebUI file storage for in-chat links.
+
+Pipeline role:
+    Invoked from :func:`~auditor.followup.run_update_report` when archiving is
+    enabled. Writes ``archive.json`` beside the evidence run for later lookups.
+
+Key entry points:
+    :func:`package_and_publish_archive` — zip, upload, return chat metadata.
+    :func:`create_run_archive` — filesystem ZIP of an evidence run.
+    :func:`public_download_url` — tokenized HTTP download link.
+"""
 
 from __future__ import annotations
 
@@ -56,12 +70,32 @@ def create_run_archive(run_dir: Path | str, *, zip_path: Path | None = None) -> 
 
 
 def make_download_token(run_id: str, secret: str) -> str:
-    """Create a stable HMAC token so browser markdown links can download."""
+    """Create a stable HMAC token so browser markdown links can download.
+
+    Args:
+        run_id: Evidence run folder name.
+        secret: Shared secret (typically ``settings.api_key``).
+
+    Returns:
+        First 32 hex chars of HMAC-SHA256.
+    """
     key = (secret or "auditor-dev").encode("utf-8")
     return hmac.new(key, run_id.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
 
 
 def verify_download_token(run_id: str, token: str | None, secret: str) -> bool:
+    """Verify an HMAC download token for a run id.
+
+    Uses constant-time comparison to prevent timing attacks.
+
+    Args:
+        run_id: Evidence run folder name.
+        token: Token from query string (may be ``None``).
+        secret: API key or shared secret used for HMAC.
+
+    Returns:
+        ``True`` when ``token`` matches :func:`make_download_token`.
+    """
     if not token:
         return False
     expected = make_download_token(run_id, secret)
@@ -69,7 +103,15 @@ def verify_download_token(run_id: str, token: str | None, secret: str) -> bool:
 
 
 def public_download_url(settings: Settings, run_id: str) -> str:
-    """Browser-reachable download URL for the zip (tokenized query)."""
+    """Build browser-reachable download URL for the zip (tokenized query).
+
+    Args:
+        settings: Auditor settings (``public_base_url``, ``api_key``, ``port``).
+        run_id: Evidence run folder name.
+
+    Returns:
+        Full HTTP URL to ``/v1/downloads/<run>_audit.zip?token=…``.
+    """
     base = (settings.public_base_url or f"http://localhost:{settings.port}").rstrip("/")
     token = make_download_token(run_id, settings.api_key or "auditor-dev")
     name = quote(archive_filename(run_id))
@@ -83,7 +125,17 @@ def format_archive_chat_section(
     open_webui_url: str | None = None,
     open_webui_file_id: str | None = None,
 ) -> str:
-    """Markdown block appended to the chat report with download links."""
+    """Build Markdown block appended to the chat report with download links.
+
+    Args:
+        zip_path: Path to the created ZIP file on disk.
+        download_url: Public HTTP download URL with token.
+        open_webui_url: Optional Open WebUI base URL for absolute links.
+        open_webui_file_id: Uploaded file id when Open WebUI upload succeeded.
+
+    Returns:
+        Markdown section with download link and optional Open WebUI attachment.
+    """
     size_kb = max(1, zip_path.stat().st_size // 1024)
     lines = [
         "",
@@ -156,9 +208,16 @@ async def upload_zip_to_open_webui(
 ) -> dict[str, Any] | None:
     """Upload the zip to Open WebUI ``POST /api/v1/files/?process=false``.
 
+    Authenticates via API key or email/password sign-in. Failures are logged
+    and return ``None`` rather than raising.
+
+    Args:
+        zip_path: Path to the ZIP file on disk.
+        settings: Auditor settings (Open WebUI URL and credentials).
+
     Returns:
         Parsed JSON response (includes ``id``) or ``None`` when upload is
-        disabled / fails (failures are logged, not raised).
+        disabled or fails.
     """
     base = (settings.open_webui_url or "").rstrip("/")
     if not base:

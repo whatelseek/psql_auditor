@@ -1,10 +1,20 @@
 """Human-in-the-loop helpers for failed requirement assessments.
 
-When a requirement cannot be audited, the graph interrupts and asks the
-operator to **skip** or **try again**. Open WebUI resumes via the next chat
-message (same pattern as LangGraph interrupt + Command(resume=…)).
+When a requirement cannot be audited (SSH/MCP failure, timeout, etc.), the
+LangGraph checklist pauses and asks the operator to **skip** or **try again**.
+Open WebUI and similar chat frontends resume via the next user message using
+the same pattern as LangGraph ``interrupt`` + ``Command(resume=…)``.
 
-Clear replies are parsed with regex; otherwise the LLM interprets intent.
+Pipeline role:
+    Provides pause/resume markers (``[AUDIT_HITL:<thread>]``), decision parsing
+    (regex with LLM fallback), and formatted interrupt prompts so the graph can
+    continue, skip, or retry failed requirements without losing checkpoint state.
+
+Key entry points:
+    :func:`build_hitl_prompt` — human-readable interrupt body for one REQ.
+    :func:`format_hitl_assistant_message` — embed resume marker in assistant reply.
+    :func:`parse_hitl_decision` / :func:`interpret_hitl_decision` — map user text to action.
+    :func:`resolve_pause_resume` — detect newest pause kind from chat history.
 """
 
 from __future__ import annotations
@@ -44,7 +54,15 @@ _VALID_ACTIONS = frozenset({"skip", "retry", "skip_all", "retry_all"})
 
 @dataclass(frozen=True, slots=True)
 class HitlDecision:
-    """Parsed operator decision for a paused requirement."""
+    """Parsed operator decision for a paused requirement.
+
+    Attributes:
+        action: One of ``skip``, ``retry``, ``skip_all``, ``retry_all``, or
+            ``unknown`` when intent could not be determined.
+        raw: Original operator text before normalization.
+        source: How the action was resolved: ``regex``, ``llm``, or ``explicit``
+            (structured resume payload from the client).
+    """
 
     action: HitlAction
     raw: str
@@ -52,7 +70,17 @@ class HitlDecision:
 
 
 def extract_hitl_thread_id(messages: list[Any]) -> str | None:
-    """Find ``[AUDIT_HITL:<thread>]`` only when it is the newest pause marker."""
+    """Find ``[AUDIT_HITL:<thread>]`` only when it is the newest pause marker.
+
+    Delegates to :func:`resolve_pause_resume` and returns the thread id only
+    when the active pause kind is ``hitl`` (not intake or continue).
+
+    Args:
+        messages: Chat message list (dicts or LangChain message objects).
+
+    Returns:
+        Thread id string, or ``None`` when no HITL pause is active.
+    """
     resolved = resolve_pause_resume(messages)
     if resolved and resolved[0] == "hitl":
         return resolved[1]
@@ -63,8 +91,16 @@ def resolve_pause_resume(messages: list[Any]) -> tuple[PauseKind, str] | None:
     """Return ``(kind, thread_id)`` from the newest assistant pause marker.
 
     Scans chat history newest-first and uses the last ``AUDIT_HITL`` /
-    ``AUDIT_INTAKE`` marker in that message so a HITL pause after intake is
-    not overridden by older intake markers still present in history.
+    ``AUDIT_INTAKE`` / ``AUDIT_CONTINUE`` marker in each assistant message so
+    a HITL pause after intake is not overridden by older intake markers still
+    present in the same or prior messages.
+
+    Args:
+        messages: Chat history (newest message typically last in the list).
+
+    Returns:
+        Tuple of pause kind (``hitl``, ``intake``, or ``continue``) and thread
+        id, or ``None`` when no pause marker is found.
     """
     for msg in reversed(messages):
         role, content = _msg_role_content(msg)
@@ -81,7 +117,18 @@ def resolve_pause_resume(messages: list[Any]) -> tuple[PauseKind, str] | None:
 
 
 def format_continue_assistant_message(prompt: str, thread_id: str) -> str:
-    """Marker so the operator can resume an interrupted mid-assess run."""
+    """Format assistant message with a continue marker for mid-assess resume.
+
+    Used when a long-running audit is interrupted (e.g. timeout) and the
+    operator must reply **continue** to resume from the LangGraph checkpoint.
+
+    Args:
+        prompt: Human-readable status or instruction text.
+        thread_id: LangGraph thread id embedded in ``[AUDIT_CONTINUE:…]``.
+
+    Returns:
+        Markdown string with prompt, separator, marker, and resume hint.
+    """
     return (
         f"{prompt.strip()}\n\n"
         f"---\n"
@@ -91,11 +138,33 @@ def format_continue_assistant_message(prompt: str, thread_id: str) -> str:
 
 
 def is_continue_reply(text: str) -> bool:
+    """Return True when operator text is a continue/resume command.
+
+    Matches English and Russian variants (e.g. "continue", "resume",
+    "продолжить", "далее") via :data:`CONTINUE_REPLY_RE`.
+
+    Args:
+        text: Raw operator message.
+
+    Returns:
+        ``True`` if the message requests resuming an interrupted audit.
+    """
     return bool(CONTINUE_REPLY_RE.search(str(text or "")))
 
 
 def parse_hitl_decision(text: Any) -> HitlDecision:
-    """Parse skip / retry (and all variants) from free-text user reply."""
+    """Parse skip / retry (and all variants) from free-text user reply.
+
+    Handles structured dict payloads (``action`` / ``decision`` keys), lists
+    of message fragments, and normalized free text with markdown stripped.
+
+    Args:
+        text: Operator reply, resume payload dict, or message list.
+
+    Returns:
+        :class:`HitlDecision` with ``action`` set to a known token or
+        ``unknown`` when no pattern matches.
+    """
     if isinstance(text, dict):
         action = str(text.get("action") or text.get("decision") or "").strip().lower()
         raw = str(text.get("text") or text.get("raw") or action)
@@ -152,7 +221,20 @@ async def interpret_hitl_decision(
     why: str = "",
     candidates: list[str] | None = None,
 ) -> HitlDecision:
-    """Regex-parse first; if unclear, ask the LLM to choose an action."""
+    """Regex-parse first; if unclear, ask the LLM to choose an action.
+
+    Args:
+        text: Operator reply (same formats as :func:`parse_hitl_decision`).
+        llm: Chat model for ambiguous replies.
+        requirement_id: Current failed REQ id (context for the classifier).
+        requirement_title: Human title of the requirement.
+        why: Short explanation of why the audit paused.
+        candidates: Remaining failed requirement ids for bulk actions.
+
+    Returns:
+        :class:`HitlDecision` with ``source`` ``regex``, ``llm``, or
+        ``explicit``. Returns ``unknown`` when both parsers fail.
+    """
     decision = parse_hitl_decision(text)
     if decision.action != "unknown":
         return decision
@@ -205,6 +287,14 @@ async def interpret_hitl_decision(
 
 
 def _msg_role_content(msg: Any) -> tuple[Any, Any]:
+    """Extract ``(role, content)`` from a dict or LangChain message object.
+
+    Args:
+        msg: Chat message as dict or object with optional ``role``/``content``.
+
+    Returns:
+        Tuple of role and content (either may be ``None``).
+    """
     role = getattr(msg, "role", None)
     content = getattr(msg, "content", None)
     if isinstance(msg, dict):
@@ -220,7 +310,20 @@ def build_hitl_prompt(
     finding: Finding,
     evidence_dir: str | None = None,
 ) -> str:
-    """Human-readable interrupt prompt for one failed requirement."""
+    """Build human-readable interrupt prompt for one failed requirement.
+
+    Includes why the check failed, pass criteria, checklist verification steps,
+    contextual remediation tips, and explicit skip/retry instructions.
+
+    Args:
+        framework_id: Active framework id (e.g. ``ubuntu_cis``).
+        requirement: Checklist requirement that could not be assessed.
+        finding: Partial finding with error evidence or notes.
+        evidence_dir: Optional path to evidence folder for operator reference.
+
+    Returns:
+        Markdown string shown to the operator during HITL pause.
+    """
     why = (finding.evidence or finding.notes or "No evidence collected.").strip()
     recommendation = (
         finding.remediation or _default_recommendation(finding, requirement)
@@ -261,7 +364,18 @@ def build_hitl_prompt(
 
 
 def format_hitl_assistant_message(prompt: str, thread_id: str) -> str:
-    """Wrap interrupt prompt with a resume marker for the chat API."""
+    """Wrap interrupt prompt with a resume marker for the chat API.
+
+    Embeds ``[AUDIT_HITL:<thread_id>]`` so the next user message can be
+    correlated with the paused LangGraph thread.
+
+    Args:
+        prompt: Body from :func:`build_hitl_prompt`.
+        thread_id: LangGraph checkpoint thread id.
+
+    Returns:
+        Markdown assistant message with marker and resume instructions.
+    """
     return (
         f"{prompt.strip()}\n\n"
         f"---\n"
@@ -271,6 +385,18 @@ def format_hitl_assistant_message(prompt: str, thread_id: str) -> str:
 
 
 def _default_recommendation(finding: Finding, requirement: Requirement) -> str:
+    """Generate bullet remediation hints from finding text and requirement metadata.
+
+    Inspects evidence/notes for SSH, MCP, timeout, and permission keywords
+    and appends the checklist ``how_to_verify`` step when present.
+
+    Args:
+        finding: Partial finding with evidence or error notes.
+        requirement: Source checklist requirement.
+
+    Returns:
+        Markdown bullet list of suggested next steps for the operator.
+    """
     blob = f"{finding.evidence} {finding.notes}".lower()
     tips: list[str] = []
     if "ssh" in blob or "not configured" in blob:
@@ -298,7 +424,14 @@ def _default_recommendation(finding: Finding, requirement: Requirement) -> str:
 
 
 def interrupt_payload_to_prompt(value: Any) -> str:
-    """Extract display text from a LangGraph Interrupt value."""
+    """Extract display text from a LangGraph Interrupt value.
+
+    Args:
+        value: Interrupt payload (dict with ``prompt``/``message``, or str).
+
+    Returns:
+        Human-readable prompt string for chat display.
+    """
     if isinstance(value, dict):
         return str(value.get("prompt") or value.get("message") or value)
     return str(value)

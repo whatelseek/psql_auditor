@@ -71,7 +71,15 @@ _TRANSPORT_EXC_NAMES = frozenset(
 
 
 def postgres_mcp_connection(settings: Settings | None = None) -> dict[str, Any]:
-    """Build a ``MultiServerMCPClient`` stdio connection dict for Postgres MCP."""
+    """Build a ``MultiServerMCPClient`` stdio connection dict for Postgres MCP.
+
+    Args:
+        settings: Application settings; defaults to ``get_settings()``.
+
+    Returns:
+        Connection spec with ``transport``, ``command``, ``args``, and minimal
+        ``env`` (Postgres vars from ``settings.pg_env_for_mcp()``).
+    """
     settings = settings or get_settings()
     command = settings.mcp_postgres_command or _DEFAULT_COMMAND
     args = shlex.split(settings.mcp_postgres_args or _DEFAULT_ARGS)
@@ -91,7 +99,14 @@ def postgres_mcp_connection(settings: Settings | None = None) -> dict[str, Any]:
 
 
 def _is_transport_exception(exc: BaseException) -> bool:
-    """True when the MCP stdio session likely died and should be recycled."""
+    """Return True when the MCP stdio session likely died and should be recycled.
+
+    Args:
+        exc: Exception from ``session.call_tool`` or transport I/O.
+
+    Returns:
+        ``True`` for known connection/EOF types or matching error messages.
+    """
     if isinstance(exc, (ConnectionError, BrokenPipeError, TimeoutError, EOFError)):
         return True
     name = type(exc).__name__
@@ -119,19 +134,35 @@ class PostgresMcpSession:
     """
 
     def __init__(self) -> None:
+        """Initialize empty session state (no subprocess until first use)."""
         self._lock = asyncio.Lock()
         self._stack: AsyncExitStack | None = None
         self._client: MultiServerMCPClient | None = None
         self._session: Any = None
 
     def _build_client(self, settings: Settings) -> MultiServerMCPClient:
+        """Create a ``MultiServerMCPClient`` for the configured Postgres MCP server.
+
+        Args:
+            settings: Connection command/args and env come from here.
+
+        Returns:
+            Client with ``handle_tool_errors=True``.
+        """
         return MultiServerMCPClient(
             {_SERVER_NAME: postgres_mcp_connection(settings)},
             handle_tool_errors=True,
         )
 
     async def _ensure_session(self, settings: Settings) -> Any:
-        """Start LangChain MCP client + session if needed."""
+        """Start LangChain MCP client and enter a persistent session if needed.
+
+        Args:
+            settings: Used to spawn ``npx mcp-postgres-server`` (or override).
+
+        Returns:
+            Active MCP session handle for ``call_tool``.
+        """
         if self._session is not None:
             return self._session
 
@@ -151,7 +182,19 @@ class PostgresMcpSession:
         arguments: dict[str, Any] | None = None,
         settings: Settings | None = None,
     ) -> str:
-        """Call a remote MCP tool on the persistent LangChain-managed session."""
+        """Call a remote MCP tool on the persistent LangChain-managed session.
+
+        Blocks mutating tools (e.g. ``execute``). Resets the session on
+        transport failures so the next call spawns a fresh subprocess.
+
+        Args:
+            tool_name: Remote MCP tool name.
+            arguments: JSON-serializable arguments.
+            settings: Optional settings override.
+
+        Returns:
+            Formatted result text or ``MCP error: …``.
+        """
         settings = settings or get_settings()
         arguments = arguments or {}
         if tool_name in _BLOCKED_REMOTE_TOOLS:
@@ -170,7 +213,14 @@ class PostgresMcpSession:
                 return f"MCP error: {type(exc).__name__}: {exc}"
 
     async def list_tools(self, settings: Settings | None = None) -> str:
-        """List tools exposed by the running MCP server."""
+        """List tools exposed by the running Postgres MCP server.
+
+        Args:
+            settings: Optional settings override.
+
+        Returns:
+            Bullet-list of tool names and descriptions, or error string.
+        """
         settings = settings or get_settings()
         async with self._lock:
             try:
@@ -183,6 +233,7 @@ class PostgresMcpSession:
                 return f"MCP error: {type(exc).__name__}: {exc}"
 
     async def _reset_unlocked(self) -> None:
+        """Close MCP stack and clear handles (caller must hold ``_lock``)."""
         if self._stack is not None:
             try:
                 await self._stack.aclose()
@@ -198,7 +249,14 @@ class PostgresMcpSession:
             await self._reset_unlocked()
 
     async def reconnect(self, settings: Settings | None = None) -> str:
-        """Force-close a dead MCP session and open a fresh LangChain MCP session."""
+        """Force-close a dead MCP session and open a fresh LangChain MCP session.
+
+        Args:
+            settings: Optional settings override.
+
+        Returns:
+            Success or failure message for the operator / graph reconnect node.
+        """
         settings = settings or get_settings()
         async with self._lock:
             await self._reset_unlocked()
@@ -218,6 +276,11 @@ class PostgresMcpPool:
     """
 
     def __init__(self, size: int | None = None) -> None:
+        """Create a pool; actual workers are spawned lazily on first use.
+
+        Args:
+            size: Fixed pool size, or ``None`` to read ``mcp_postgres_pool_size``.
+        """
         self._configured_size = size
         self._sessions: list[PostgresMcpSession] = []
         self._queue: asyncio.Queue[PostgresMcpSession] | None = None
@@ -230,6 +293,14 @@ class PostgresMcpPool:
         return self._size
 
     def _resolve_size(self, settings: Settings) -> int:
+        """Clamp configured pool size to ``[1, 16]``.
+
+        Args:
+            settings: Source for ``mcp_postgres_pool_size`` when not overridden.
+
+        Returns:
+            Number of concurrent MCP worker sessions.
+        """
         raw = (
             self._configured_size
             if self._configured_size is not None
@@ -242,6 +313,7 @@ class PostgresMcpPool:
         return max(1, min(n, 16))
 
     async def _ensure(self, settings: Settings) -> None:
+        """Lazily create ``PostgresMcpSession`` workers and the release queue."""
         if self._queue is not None:
             return
         async with self._init_lock:
@@ -262,7 +334,16 @@ class PostgresMcpPool:
         arguments: dict[str, Any] | None = None,
         settings: Settings | None = None,
     ) -> str:
-        """Borrow a pooled session, call the remote tool, then release it."""
+        """Borrow a pooled session, call the remote tool, then release it.
+
+        Args:
+            tool_name: Remote MCP tool name.
+            arguments: Tool arguments dict.
+            settings: Optional settings override.
+
+        Returns:
+            Formatted MCP result from the borrowed worker.
+        """
         settings = settings or get_settings()
         await self._ensure(settings)
         assert self._queue is not None
@@ -273,7 +354,7 @@ class PostgresMcpPool:
             self._queue.put_nowait(session)
 
     async def list_tools(self, settings: Settings | None = None) -> str:
-        """List tools via one pooled session."""
+        """List tools via one pooled session (same as single-session ``list_tools``)."""
         settings = settings or get_settings()
         await self._ensure(settings)
         assert self._queue is not None
@@ -294,7 +375,14 @@ class PostgresMcpPool:
             await session.close()
 
     async def reconnect(self, settings: Settings | None = None) -> str:
-        """Reconnect every pooled session (used by the graph reconnect node)."""
+        """Reconnect every pooled session (used by the graph ``reconnect_session`` node).
+
+        Args:
+            settings: Optional settings override.
+
+        Returns:
+            Aggregate success message or first failure summary.
+        """
         settings = settings or get_settings()
         await self._ensure(settings)
         results = [await session.reconnect(settings) for session in self._sessions]
@@ -319,12 +407,23 @@ def get_mcp_pool() -> PostgresMcpPool:
 
 
 async def reconnect_mcp_session() -> str:
-    """Public helper to recycle every pooled MCP session."""
+    """Public helper to recycle every pooled Postgres MCP session.
+
+    Returns:
+        Result from ``PostgresMcpPool.reconnect``.
+    """
     return await _POOL.reconnect()
 
 
 def _format_mcp_result(result: Any) -> str:
-    """Flatten MCP CallToolResult; prefix failures with ``MCP error:``."""
+    """Flatten MCP ``CallToolResult``; prefix failures with ``MCP error:``.
+
+    Args:
+        result: MCP tool result (``CallToolResult`` or plain value).
+
+    Returns:
+        Human-readable text for the LangChain tool return path.
+    """
     content = getattr(result, "content", None)
     parts: list[str] = []
     if content is None:
@@ -349,7 +448,14 @@ def _format_mcp_result(result: Any) -> str:
 
 
 def _format_tool_list(tools_result: Any) -> str:
-    """Format list_tools results as a bullet list."""
+    """Format ``list_tools`` results as a markdown bullet list.
+
+    Args:
+        tools_result: MCP list_tools response or raw tool sequence.
+
+    Returns:
+        ``- name: description`` lines, or a fallback when empty.
+    """
     tools = getattr(tools_result, "tools", tools_result)
     lines = []
     for t in tools:
@@ -367,7 +473,17 @@ _SHOW_ALL = re.compile(r"^\s*SHOW\s+ALL\s*;?\s*$", re.IGNORECASE)
 
 
 def rewrite_show_to_select(sql: str) -> str:
-    """Rewrite ``SHOW`` into ``SELECT`` against ``pg_settings``."""
+    """Rewrite ``SHOW`` / ``SHOW ALL`` into ``SELECT`` against ``pg_settings``.
+
+    The remote MCP server may not implement ``SHOW``; this keeps playbook SQL
+    portable.
+
+    Args:
+        sql: Single-statement SQL, possibly ``SHOW name`` or ``SHOW ALL``.
+
+    Returns:
+        Rewritten ``SELECT`` or the original ``sql`` when not a SHOW statement.
+    """
     text = sql.strip()
     if _SHOW_ALL.match(text):
         return "SELECT name, setting, source FROM pg_settings ORDER BY name"
@@ -493,7 +609,12 @@ async def mcp_list_tools() -> str:
 
 
 def get_mcp_tools() -> list:
-    """Return curated LangChain tools that query Postgres via MCP adapters."""
+    """Return curated LangChain tools that query Postgres via MCP adapters.
+
+    Returns:
+        ``[mcp_connect_db, mcp_query, mcp_list_schemas, mcp_list_tables,
+        mcp_describe_table, mcp_list_tools]`` for ``bind_tools``.
+    """
     return [
         mcp_connect_db,
         mcp_query,

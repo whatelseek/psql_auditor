@@ -1,4 +1,22 @@
-"""Pre-audit intake: client, CMDB, access, audit type (chat interrupts)."""
+"""Pre-audit intake: client, CMDB, access, audit type (chat interrupts).
+
+This module drives the **four-step questionnaire** that runs before a checklist
+audit when intake is enabled. It collects client name, CMDB availability,
+server access, and audit domain (IT / Cybersecurity / both), then maps answers
+to framework selection and inventory probes.
+
+Pipeline role:
+    The graph interrupts with ``[AUDIT_INTAKE:<thread>]`` markers between
+    steps. Parsing helpers support both regex (fast path) and LLM JSON
+    interpretation for ambiguous replies.
+
+Key entry points:
+    :func:`prompts_for_language` — localized step prompts (EN/RU).
+    :func:`format_intake_assistant_message` — embed intake marker in chat.
+    :func:`resolve_client_name` / :func:`resolve_yes_no` / :func:`resolve_audit_type` — structured answers.
+    :func:`frameworks_for_audit_type` — map domain choice to framework ids.
+    :func:`summarize_cmdb_capabilities` / :func:`summarize_access_probe` — probe result Markdown.
+"""
 
 from __future__ import annotations
 
@@ -27,6 +45,15 @@ _NO = re.compile(
 
 @dataclass(frozen=True, slots=True)
 class IntakePrompts:
+    """Localized Markdown prompts for each intake questionnaire step.
+
+    Attributes:
+        client: Step 1 — client / organization name.
+        cmdb: Step 2 — CMDB / NetBox availability (yes/no).
+        access: Step 3 — SSH/service access for probing.
+        audit_type: Step 4 — IT vs Cybersecurity vs both.
+    """
+
     client: str
     cmdb: str
     access: str
@@ -34,11 +61,33 @@ class IntakePrompts:
 
 
 def client_slug(name: str) -> str:
+    """Derive a filesystem-safe slug from a client display name.
+
+    Replaces non-alphanumeric characters with underscores, truncates to 64
+    chars, and lowercases. Used for evidence and inventory folder names.
+
+    Args:
+        name: Raw client or organization name from intake.
+
+    Returns:
+        Safe slug string; defaults to ``"client"`` when empty after cleaning.
+    """
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", (name or "").strip()).strip("_")
     return (slug[:64] or "client").lower()
 
 
 def parse_yes_no(text: str) -> YesNo:
+    """Parse yes/no intent from operator text using regex heuristics.
+
+    Supports English and Russian affirmatives/negatives at line start and
+    as embedded words when the reply is short.
+
+    Args:
+        text: Operator reply to a yes/no intake question.
+
+    Returns:
+        ``"yes"``, ``"no"``, or ``"unknown"`` when ambiguous or empty.
+    """
     raw = (text or "").strip()
     if not raw:
         return "unknown"
@@ -56,7 +105,15 @@ def parse_yes_no(text: str) -> YesNo:
 
 
 def resolve_yes_no(text: str, llm_payload: dict[str, Any] | None = None) -> YesNo:
-    """Prefer LLM JSON ``answer``, else regex ``parse_yes_no``."""
+    """Resolve yes/no from LLM JSON payload or regex fallback.
+
+    Args:
+        text: Raw operator reply.
+        llm_payload: Optional dict from intake interpret model with ``answer`` key.
+
+    Returns:
+        ``"yes"``, ``"no"``, or ``"unknown"``.
+    """
     if isinstance(llm_payload, dict):
         ans = str(llm_payload.get("answer") or "").strip().lower()
         if ans in {"yes", "y", "true", "1", "да"}:
@@ -73,7 +130,15 @@ def resolve_yes_no(text: str, llm_payload: dict[str, Any] | None = None) -> YesN
 def resolve_client_name(
     text: str, llm_payload: dict[str, Any] | None = None
 ) -> str:
-    """Prefer LLM JSON ``client_name``, else ``parse_client_name``."""
+    """Resolve client name from LLM JSON or regex parser.
+
+    Args:
+        text: Raw operator reply.
+        llm_payload: Optional dict with ``client_name`` key.
+
+    Returns:
+        Trimmed client name (max 120 chars), or empty string.
+    """
     if isinstance(llm_payload, dict):
         name = str(llm_payload.get("client_name") or "").strip()
         if name:
@@ -84,7 +149,17 @@ def resolve_client_name(
 def resolve_audit_type(
     text: str, llm_payload: dict[str, Any] | None = None
 ) -> AuditType | None:
-    """Prefer LLM JSON ``audit_type``, else ``parse_audit_type``."""
+    """Resolve audit domain from LLM JSON or regex parser.
+
+    Normalizes ``cis`` / ``cyber`` aliases to ``cybersecurity``.
+
+    Args:
+        text: Raw operator reply.
+        llm_payload: Optional dict with ``audit_type`` key.
+
+    Returns:
+        ``"it"``, ``"cybersecurity"``, ``"both"``, or ``None`` when unclear.
+    """
     if isinstance(llm_payload, dict) and "audit_type" in llm_payload:
         raw = llm_payload.get("audit_type")
         if raw is None or str(raw).strip().lower() in {"", "null", "none", "unknown"}:
@@ -100,6 +175,16 @@ def resolve_audit_type(
 
 
 def parse_client_name(text: str) -> str:
+    """Extract client name from free text, stripping common label prefixes.
+
+    Removes leading patterns like "Client:", "клиент:", etc.
+
+    Args:
+        text: Operator reply to the client name intake step.
+
+    Returns:
+        Trimmed name (max 120 chars), or empty string.
+    """
     raw = (text or "").strip()
     # Strip common prefixes
     raw = re.sub(
@@ -112,7 +197,17 @@ def parse_client_name(text: str) -> str:
 
 
 def parse_audit_type(text: str) -> AuditType | None:
-    """Parse domain scope: IT / Cybersecurity / both (``cis`` → cybersecurity)."""
+    """Parse domain scope: IT / Cybersecurity / both (``cis`` → cybersecurity).
+
+    Recognizes combined phrases (``both``, ``IT + CIS``), numbered menu replies,
+    and Russian keywords.
+
+    Args:
+        text: Operator reply to the audit type intake step.
+
+    Returns:
+        ``"it"``, ``"cybersecurity"``, ``"both"``, or ``None`` when unclear.
+    """
     lower = (text or "").strip().lower()
     if not lower:
         return None
@@ -149,7 +244,14 @@ def parse_audit_type(text: str) -> AuditType | None:
 
 
 def domains_for_audit_type(audit_type: AuditType | str) -> list[str]:
-    """Map intake scope to framework ``domain`` values (``it`` / ``cybersecurity``)."""
+    """Map intake scope to framework ``domain`` values (``it`` / ``cybersecurity``).
+
+    Args:
+        audit_type: One of ``it``, ``cybersecurity``, ``cis``, or ``both``.
+
+    Returns:
+        List of domain strings used by framework routing (one or two elements).
+    """
     at = (audit_type or "both").strip().lower()
     if at in {"it"}:
         return ["it"]
@@ -159,6 +261,14 @@ def domains_for_audit_type(audit_type: AuditType | str) -> list[str]:
 
 
 def prompts_for_language(code: str) -> IntakePrompts:
+    """Return localized intake step prompts for a language code.
+
+    Args:
+        code: BCP-47 or ISO language code; Russian when starting with ``ru``.
+
+    Returns:
+        :class:`IntakePrompts` with Markdown for all four intake steps.
+    """
     if (code or "en").startswith("ru"):
         return IntakePrompts(
             client=(
@@ -213,6 +323,15 @@ def prompts_for_language(code: str) -> IntakePrompts:
 
 
 def format_intake_assistant_message(prompt: str, thread_id: str) -> str:
+    """Wrap an intake step prompt with ``[AUDIT_INTAKE:<thread>]`` marker.
+
+    Args:
+        prompt: Step question Markdown from :func:`prompts_for_language`.
+        thread_id: LangGraph thread id for resume correlation.
+
+    Returns:
+        Assistant message with marker and continuation hint.
+    """
     return (
         f"{prompt.strip()}\n\n"
         f"---\n"
@@ -222,7 +341,17 @@ def format_intake_assistant_message(prompt: str, thread_id: str) -> str:
 
 
 def extract_intake_thread_id(messages: list[Any]) -> str | None:
-    """Find intake thread only when it is the newest pause marker."""
+    """Find intake thread only when it is the newest pause marker.
+
+    Delegates to :func:`~auditor.hitl.resolve_pause_resume` and returns the
+    thread id only when the active pause kind is ``intake``.
+
+    Args:
+        messages: Chat message history.
+
+    Returns:
+        Intake thread id string, or ``None`` when intake is not paused.
+    """
     from auditor.hitl import resolve_pause_resume
 
     resolved = resolve_pause_resume(messages)
@@ -232,11 +361,29 @@ def extract_intake_thread_id(messages: list[Any]) -> str | None:
 
 
 def intake_interrupt_payload(*, step: str, prompt: str, **extra: Any) -> dict[str, Any]:
+    """Build a LangGraph interrupt payload dict for an intake step.
+
+    Args:
+        step: Intake step identifier (e.g. ``client``, ``cmdb``).
+        prompt: Display prompt shown to the operator.
+        **extra: Additional fields merged into the payload.
+
+    Returns:
+        Dict with ``type``, ``step``, ``prompt``, and any extra keys.
+    """
     return {"type": "intake", "step": step, "prompt": prompt, **extra}
 
 
 def summarize_cmdb_capabilities(probe: dict[str, Any], *, language: str = "en") -> str:
-    """Markdown summary of what NetBox can provide for the operator."""
+    """Render NetBox/CMDB probe results as a Markdown table for the operator.
+
+    Args:
+        probe: Dict with ``reachable``, optional ``error``, and ``fields`` map.
+        language: ``"en"`` or Russian when starting with ``ru``.
+
+    Returns:
+        Markdown section listing which CMDB fields are available.
+    """
     reachable = bool(probe.get("reachable"))
     fields = probe.get("fields") or {}
     if language.startswith("ru"):
@@ -296,6 +443,15 @@ def summarize_cmdb_capabilities(probe: dict[str, Any], *, language: str = "en") 
 
 
 def summarize_access_probe(probe: dict[str, Any], *, language: str = "en") -> str:
+    """Render access probe results as a Markdown table for the operator.
+
+    Args:
+        probe: Dict with ``services`` list of ``name`` / ``status`` / ``detail``.
+        language: ``"en"`` or Russian when starting with ``ru``.
+
+    Returns:
+        Markdown section summarizing per-service reachability.
+    """
     services = probe.get("services") or []
     if language.startswith("ru"):
         lines = ["### Проверка доступа", ""]

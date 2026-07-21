@@ -1,8 +1,18 @@
 """Cumulative audit benchmark ledger (``memory/benchmark.md``).
 
-Append-only history of completed checklist audits: status counts and compliance
-percent per framework. Stores **aggregates only** — never observations,
-recommendations, tool output, or credentials.
+This module maintains an **append-only history** of completed checklist audits:
+status counts and compliance percent per framework. It stores **aggregates only**
+— never observations, recommendations, tool output, or credentials.
+
+Pipeline role:
+    After finalize or report update, findings are summarized via
+    :func:`findings_to_benchmark_metrics` and appended to a JSONL ledger.
+    Markdown ``benchmark.md`` is regenerated for operator visibility.
+
+Key entry points:
+    :class:`BenchmarkStore` — append entries and rewrite Markdown.
+    :func:`findings_to_benchmark_metrics` — derive counts and compliance %.
+    :class:`BenchmarkEntry` — one row in the history table.
 """
 
 from __future__ import annotations
@@ -38,6 +48,22 @@ Aggregates only (no observations, recommendations, or secrets).
 
 @dataclass(frozen=True, slots=True)
 class BenchmarkEntry:
+    """One completed framework audit row in the benchmark ledger.
+
+    Attributes:
+        finished_at: UTC ISO timestamp when the audit was recorded.
+        run_id: Evidence run folder id.
+        framework_id: Framework key (may include host prefix).
+        pass_count: Number of requirements with status ``pass``.
+        fail_count: Number of requirements with status ``fail``.
+        partial_count: Number of requirements with status ``partial``.
+        error_count: Number of requirements with status ``error``.
+        skipped_count: Number of requirements marked skipped.
+        assessed: Total requirements assessed (excluding skipped).
+        compliance_pct: Overall compliance percentage from :mod:`auditor.compliance`.
+        evidence: Relative path to evidence folder (optional).
+    """
+
     finished_at: str
     run_id: str
     framework_id: str
@@ -51,6 +77,11 @@ class BenchmarkEntry:
     evidence: str
 
     def to_row(self) -> str:
+        """Format this entry as a Markdown table row for the history section.
+
+        Returns:
+            Pipe-delimited table row string.
+        """
         return (
             f"| {self.finished_at} | `{self.run_id}` | `{self.framework_id}` | "
             f"{self.pass_count} | {self.fail_count} | {self.partial_count} | "
@@ -60,6 +91,11 @@ class BenchmarkEntry:
 
 
 def _utc_now() -> str:
+    """Return current UTC time as ISO string with ``Z`` suffix (no microseconds).
+
+    Returns:
+        Timestamp string suitable for benchmark table columns.
+    """
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
         "+00:00", "Z"
     )
@@ -68,7 +104,15 @@ def _utc_now() -> str:
 def findings_to_benchmark_metrics(
     findings: Mapping[str, Finding],
 ) -> dict[str, Any]:
-    """Derive status counts + overall compliance % from filled findings."""
+    """Derive status counts + overall compliance % from filled findings.
+
+    Args:
+        findings: Mapping of requirement id to :class:`~auditor.state.Finding`.
+
+    Returns:
+        Dict with keys ``pass``, ``fail``, ``partial``, ``error``, ``skipped``,
+        ``assessed``, and ``compliance_pct``.
+    """
     counts = aggregate_findings(dict(findings))
     rows = [
         FindingRow(
@@ -93,9 +137,19 @@ def findings_to_benchmark_metrics(
 
 
 class BenchmarkStore:
-    """Persist and rewrite ``benchmark.md`` (+ companion JSONL) under memory."""
+    """Persist and rewrite ``benchmark.md`` (+ companion JSONL) under memory.
+
+    Attributes:
+        path: Path to ``benchmark.md``.
+        jsonl_path: Append-only JSONL source of truth (``benchmark.jsonl``).
+    """
 
     def __init__(self, path: Path | str) -> None:
+        """Initialize store for a benchmark Markdown file.
+
+        Args:
+            path: Target ``benchmark.md`` path; ``.jsonl`` sibling is derived.
+        """
         self.path = Path(path)
         self.jsonl_path = self.path.with_suffix(".jsonl")
         self._lock = threading.Lock()
@@ -133,7 +187,13 @@ class BenchmarkStore:
         return entry
 
     def append(self, entry: BenchmarkEntry) -> None:
-        """Append ``entry`` to JSONL and regenerate Markdown."""
+        """Append ``entry`` to JSONL and regenerate Markdown.
+
+        Thread-safe via internal lock.
+
+        Args:
+            entry: Completed audit metrics row to persist.
+        """
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.jsonl_path.open("a", encoding="utf-8") as fh:
@@ -141,6 +201,11 @@ class BenchmarkStore:
             self._rewrite_markdown(self._load_entries())
 
     def _load_entries(self) -> list[BenchmarkEntry]:
+        """Load all benchmark entries from the JSONL file.
+
+        Returns:
+            List of entries in file order; empty when file is missing.
+        """
         if not self.jsonl_path.is_file():
             return []
         entries: list[BenchmarkEntry] = []
@@ -170,12 +235,25 @@ class BenchmarkStore:
         return entries
 
     def _latest_by_framework(self, entries: list[BenchmarkEntry]) -> list[BenchmarkEntry]:
+        """Return the most recent entry per ``framework_id``.
+
+        Args:
+            entries: Full history (chronological order).
+
+        Returns:
+            Latest entry per framework, sorted by framework id.
+        """
         latest: dict[str, BenchmarkEntry] = {}
         for entry in entries:
             latest[entry.framework_id] = entry
         return [latest[k] for k in sorted(latest)]
 
     def _rewrite_markdown(self, entries: list[BenchmarkEntry]) -> None:
+        """Regenerate ``benchmark.md`` from the full entry list.
+
+        Args:
+            entries: All benchmark rows (newest history section uses reverse order).
+        """
         latest = self._latest_by_framework(entries)
         if latest:
             latest_lines = [
@@ -201,7 +279,10 @@ class BenchmarkStore:
         self.path.write_text(body, encoding="utf-8")
 
     def ensure_file(self) -> None:
-        """Create an empty ledger if missing."""
+        """Create an empty ledger Markdown file if missing.
+
+        Writes placeholder tables when no audits have been recorded yet.
+        """
         with self._lock:
             if self.path.is_file():
                 return

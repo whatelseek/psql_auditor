@@ -1,4 +1,15 @@
-"""Host inventory facts: LLM gather + parsers, CMDB drift, inventory helpers."""
+"""Host inventory facts: LLM gather, deterministic parsers, CMDB drift, inventory I/O.
+
+Collects and normalizes target-host metadata during pre-audit intake and host-
+facts nodes. Tool stdout (SSH probes) and LLM JSON fills are parsed into
+:class:`HostFacts`, optionally compared against NetBox CMDB records, written to
+disk as JSON, and rendered into Markdown for graph state
+(``host_facts_md``, ``cmdb_drift_md``).
+
+Also maintains per-client ``INVENTORY.md`` files when no CMDB is available.
+Framework auto-selection (:mod:`auditor.frameworks`) consumes ``os_id``,
+``binaries``, and ``listening_ports`` from :class:`HostFacts`.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +23,29 @@ from typing import Any
 
 @dataclass
 class HostFacts:
+    """Normalized snapshot of a target host's identity and software footprint.
+
+  Populated by LLM structured output (:func:`parse_host_facts_json`) and/or
+  deterministic parsers in :func:`merge_facts_from_raw`. Stored in evidence
+  artifacts and used for framework ``detect`` matching.
+
+  Attributes:
+      hostname: Resolved static hostname.
+      ips: Non-loopback IPv4 addresses observed on the host.
+      disk: Short disk usage excerpt (``df``-style).
+      ram: Memory summary lines.
+      cpu: CPU model / core count excerpt.
+      os_id: Lowercase OS id from ``/etc/os-release`` (e.g. ``ubuntu``).
+      os_version_id: OS version id when available.
+      os_pretty_name: Human-readable OS name.
+      binaries: Command names found on PATH (lowercase).
+      listening_ports: TCP ports in LISTEN state.
+      raw: Map of semantic tool keys → raw stdout blobs.
+      collected_at: ISO-8601 UTC timestamp when facts were assembled.
+      error: First SSH or probe error message, if any.
+      ssh_host: Configured SSH target string for context.
+  """
+
     hostname: str = ""
     ips: list[str] = field(default_factory=list)
     disk: str = ""
@@ -30,6 +64,15 @@ class HostFacts:
 
 @dataclass
 class DriftItem:
+    """One CMDB comparison row between expected (NetBox) and observed host data.
+
+  Attributes:
+      field: Compared attribute name (``hostname``, ``ip``, ``device``, …).
+      expected: Value from CMDB or a placeholder when missing.
+      observed: Value gathered from the live host.
+      status: ``match``, ``mismatch``, ``missing_cmdb``, or ``missing_host``.
+  """
+
     field: str
     expected: str
     observed: str
@@ -37,6 +80,14 @@ class DriftItem:
 
 
 def _first_line(text: str) -> str:
+    """Return the first non-empty line, skipping ``exit_code`` noise.
+
+  Args:
+      text: Multi-line command stdout.
+
+  Returns:
+      First meaningful line, or empty string when none found.
+  """
     for line in (text or "").splitlines():
         line = line.strip()
         if line and not line.lower().startswith("exit_code"):
@@ -45,6 +96,17 @@ def _first_line(text: str) -> str:
 
 
 def parse_hostname(stdout: str) -> str:
+    """Extract hostname from ``hostname`` or ``hostnamectl`` output.
+
+  Prefers ``Static hostname`` / ``hostname:`` lines from hostnamectl; falls
+  back to :func:`_first_line`.
+
+  Args:
+      stdout: Raw command output.
+
+  Returns:
+      Hostname string, or empty when unparseable.
+  """
     # Prefer hostnamectl Static hostname / Pretty, else first non-empty line
     for line in (stdout or "").splitlines():
         if "static hostname" in line.lower() or "static hostname:" in line.lower():
@@ -55,6 +117,17 @@ def parse_hostname(stdout: str) -> str:
 
 
 def parse_ips(stdout: str) -> list[str]:
+    """Extract non-loopback IPv4 addresses from command output.
+
+  Scans for dotted-quad patterns and skips ``127.*`` addresses. Preserves
+  first-seen order without duplicates.
+
+  Args:
+      stdout: Text from ``ip addr``, ``ifconfig``, or similar probes.
+
+  Returns:
+      List of IPv4 strings.
+  """
     found: list[str] = []
     for match in re.finditer(
         r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}"
@@ -70,7 +143,14 @@ def parse_ips(stdout: str) -> list[str]:
 
 
 def parse_os_release(stdout: str) -> tuple[str, str, str]:
-    """Parse ``/etc/os-release`` → ``(id, version_id, pretty_name)``."""
+    """Parse ``/etc/os-release`` or Windows probe output into OS fields.
+
+  Args:
+      stdout: Contents of os-release or a Windows environment probe.
+
+  Returns:
+      Tuple ``(id, version_id, pretty_name)`` with lowercase ``id`` when known.
+  """
     data: dict[str, str] = {}
     for line in (stdout or "").splitlines():
         line = line.strip()
@@ -90,7 +170,17 @@ def parse_os_release(stdout: str) -> tuple[str, str, str]:
 
 
 def parse_binaries_present(stdout: str) -> list[str]:
-    """Parse ``command -v`` / which probe lines: ``name=/path`` or ``name=``."""
+    """Parse ``command -v`` / ``which`` probe lines of the form ``name=/path``.
+
+  Ignores lines where the path is missing or ``not found``. Skips internal
+  keys like ``exit_code``.
+
+  Args:
+      stdout: Multi-line probe output.
+
+  Returns:
+      Lowercase binary names found on PATH, in first-seen order.
+  """
     skip = {"exit_code", "stdout", "stderr"}
     found: list[str] = []
     for line in (stdout or "").splitlines():
@@ -109,7 +199,17 @@ def parse_binaries_present(stdout: str) -> list[str]:
 
 
 def parse_listening_ports(stdout: str) -> list[int]:
-    """Extract listening TCP ports from ``ss`` / ``netstat`` style output."""
+    """Extract listening TCP ports from ``ss`` or ``netstat`` style output.
+
+  Collects port numbers after colons in address:port tokens. Valid range is
+  1–65535; duplicates are omitted.
+
+  Args:
+      stdout: Socket listing command output.
+
+  Returns:
+      Sorted list is **not** guaranteed; order follows first occurrence in text.
+  """
     ports: list[int] = []
     for match in re.finditer(r":(\d{1,5})\b", stdout or ""):
         try:
@@ -127,7 +227,19 @@ def parse_host_facts_json(
     ssh_host: str = "",
     raw: dict[str, str] | None = None,
 ) -> HostFacts:
-    """Build ``HostFacts`` from an LLM fill JSON object."""
+    """Build :class:`HostFacts` from an LLM-produced JSON object.
+
+  Coerces list-like fields from strings when needed (comma/space separated IPs
+  and binaries). Sets ``collected_at`` to the current UTC time.
+
+  Args:
+      payload: Dict from structured LLM output; non-dicts yield empty facts.
+      ssh_host: SSH target label to store on the facts record.
+      raw: Optional map of tool keys → stdout for later :func:`merge_facts_from_raw`.
+
+  Returns:
+      Populated :class:`HostFacts` (fields may still be empty).
+  """
     data = payload if isinstance(payload, dict) else {}
     ips_raw = data.get("ips") or []
     if isinstance(ips_raw, str):
@@ -177,12 +289,21 @@ def parse_host_facts_json(
 
 
 def merge_facts_from_raw(facts: HostFacts, raw: dict[str, str] | None = None) -> HostFacts:
-    """Fill empty HostFacts fields using deterministic parsers on tool stdout.
+    """Fill empty :class:`HostFacts` fields using deterministic parsers on tool stdout.
 
-    Used when the LLM fill JSON is incomplete. ``raw`` keys may be semantic
-    (``hostname``, ``os``, …) or opaque (``tool_1``, …); for opaque blobs the
-    full concatenated text is also scanned.
-    """
+  Used when the LLM fill JSON is incomplete. ``raw`` keys may be semantic
+  (``hostname``, ``os``, …) or opaque (``tool_1``, …); for opaque blobs the
+  full concatenated text is also scanned.
+
+  Mutates and returns the same ``facts`` instance for chaining.
+
+  Args:
+      facts: Partial facts object to enrich in place.
+      raw: Optional stdout map; defaults to ``facts.raw``.
+
+  Returns:
+      The same ``facts`` object with empty fields filled where possible.
+  """
     blob_map = dict(raw or facts.raw or {})
     facts.raw = blob_map
     combined = "\n".join(str(v) for v in blob_map.values() if v)
@@ -274,7 +395,18 @@ def compare_to_netbox(
     facts: HostFacts,
     netbox_device: dict[str, Any] | None,
 ) -> list[DriftItem]:
-    """Highlight hostname / IP differences vs a NetBox device record."""
+    """Highlight hostname and primary IP differences vs a NetBox device record.
+
+  Compares case-insensitive hostname equality and checks whether the NetBox
+  primary IPv4 appears in ``facts.ips``.
+
+  Args:
+      facts: Live host facts from probes.
+      netbox_device: NetBox API device dict, or ``None`` when CMDB has no match.
+
+  Returns:
+      List of :class:`DriftItem` rows (may be a single ``missing_cmdb`` row).
+  """
     if not netbox_device:
         return [
             DriftItem(
@@ -341,10 +473,31 @@ def compare_to_netbox(
 
 
 def facts_to_dict(facts: HostFacts) -> dict[str, Any]:
+    """Serialize :class:`HostFacts` to a plain dict via :func:`dataclasses.asdict`.
+
+  Args:
+      facts: Host facts dataclass instance.
+
+  Returns:
+      JSON-serializable mapping of all fields.
+  """
     return asdict(facts)
 
 
 def write_host_facts_json(path: Path, facts: HostFacts, drift: list[DriftItem]) -> Path:
+    """Write host facts and CMDB drift rows to a JSON artifact file.
+
+  Creates parent directories as needed. Payload includes ``written_at`` UTC
+  timestamp metadata.
+
+  Args:
+      path: Destination ``.json`` file path.
+      facts: Host facts to persist.
+      drift: CMDB comparison rows from :func:`compare_to_netbox`.
+
+  Returns:
+      The same ``path`` after writing.
+  """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "facts": facts_to_dict(facts),
@@ -361,6 +514,19 @@ def format_host_facts_markdown(
     *,
     language: str = "en",
 ) -> str:
+    """Render host facts (and optional CMDB drift) as Markdown for graph state.
+
+  Produces a section suitable for ``AuditorState.host_facts_md`` with hostname,
+  OS, network, binaries, ports, resource excerpts, and an optional drift table.
+
+  Args:
+      facts: Host facts to display.
+      drift: Optional CMDB comparison rows.
+      language: ``"ru"`` prefix selects Russian section headings; else English.
+
+  Returns:
+      Markdown string (no trailing file newline required by caller).
+  """
     ru = language.startswith("ru")
     lines = [
         "## " + ("Факты о хосте" if ru else "Host facts"),
@@ -415,11 +581,22 @@ def upsert_inventory_md(
     scope_text: str = "",
     reachable_services: list[dict[str, Any]] | None = None,
 ) -> Path:
-    """Create or refresh INVENTORY.md for a client when CMDB is absent.
+    """Create or refresh ``INVENTORY.md`` for a client when CMDB is absent.
 
-    Preserves an existing ``## Credentials`` / ``## Credentials & access``
-    section so operator secrets are not wiped on host-facts refresh.
-    """
+  Preserves an existing ``## Credentials`` / ``## Credentials & access`` section
+  so operator secrets are not wiped on host-facts refresh. Overwrites scope,
+  reachable-services table, and host sections with current data.
+
+  Args:
+      inventory_path: Full path to ``INVENTORY.md``.
+      client_name: Display name for the document title.
+      facts: Optional host facts for the Host section.
+      scope_text: Audit scope prose for the Scope section.
+      reachable_services: Optional rows from :func:`probe_access_services`.
+
+  Returns:
+      The same ``inventory_path`` after writing.
+  """
     inventory_path.parent.mkdir(parents=True, exist_ok=True)
     creds_block = ""
     if inventory_path.is_file():
@@ -488,13 +665,21 @@ def resolve_client_dir(
     *,
     display_name: str | None = None,
 ) -> Path:
-    """Resolve ``inventory/<client>/`` with case-insensitive folder match.
+    """Resolve ``inventory/<client>/`` with case-insensitive folder matching.
 
-    Prefer an existing directory whose name matches the slug ignoring case
-    (e.g. ``TestCompany`` for slug ``testcompany``). When several case variants
-    exist, prefer ``display_name`` casing, then mixed-case over all-lowercase.
-    Otherwise return the path for ``display_name`` (sanitized) or the slug.
-    """
+  Prefer an existing directory whose name matches the slug ignoring case
+  (e.g. ``TestCompany`` for slug ``testcompany``). When several case variants
+  exist, prefer ``display_name`` casing, then mixed-case over all-lowercase.
+  Otherwise return the path for ``display_name`` (sanitized) or the slug.
+
+  Args:
+      inventory_dir: Root ``inventory/`` directory.
+      client_slug_name: Artifact-safe client slug.
+      display_name: Optional human name used for preferred folder casing.
+
+  Returns:
+      Resolved client directory path (may not exist yet).
+  """
     from auditor.evidence_store import client_artifacts_id
 
     inventory_dir = Path(inventory_dir)
@@ -536,10 +721,17 @@ def resolve_client_inventory(
 ) -> tuple[Path | None, str, bool]:
     """Locate ``inventory/<client>/INVENTORY.md`` before asking about access.
 
-    Returns:
-        ``(path, content_or_message, found)``. Does **not** fall back to the
-        example template — that file is documentation only.
-    """
+  Creates the client directory when the file is missing but returns
+  ``found=False`` with guidance text for the operator.
+
+  Args:
+      inventory_dir: Root ``inventory/`` directory.
+      client_slug_name: Client slug used to resolve the subdirectory.
+
+  Returns:
+      Tuple ``(path, content_or_message, found)``. Does **not** fall back to the
+      example template — that file is documentation only.
+  """
     inventory_dir = Path(inventory_dir)
     slug = (client_slug_name or "").strip()
     if not slug:

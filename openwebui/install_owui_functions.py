@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-"""Install / repair CIS chart Tool + Filter in Open WebUI webui.db."""
+"""Install or repair CIS compliance chart Tool + Filter rows in Open WebUI.
+
+This script is intended to run inside the Open WebUI container during image
+build or startup. It reads pre-staged Python sources from ``/tmp/filter.py`` and
+``/tmp/tool.py``, validates that they contain the expected ``Filter`` and
+``Tools`` classes, then upserts rows in ``webui.db``:
+
+* **function** table — global, active ``cis_compliance_charts_filter`` outlet filter.
+* **tool** table — ``cis_compliance_charts`` tool with OpenAPI-style specs.
+
+The first admin user in the database is used as ``user_id`` for new inserts.
+
+Notes:
+    Paths ``DB``, ``FILTER_PATH``, and ``TOOL_PATH`` are fixed for the container
+    layout (``/app/backend/data/webui.db``). The script prints row diagnostics
+    after commit for build-time verification.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +30,20 @@ TOOL_PATH = Path("/tmp/tool.py")
 
 
 def main() -> None:
+    """Load filter/tool sources and upsert them into Open WebUI SQLite tables.
+
+    Workflow:
+
+    1. Read and validate ``FILTER_PATH`` and ``TOOL_PATH`` contents.
+    2. Resolve an admin ``user_id`` from ``webui.db``.
+    3. Update or insert the CIS compliance **filter** function (global + active).
+    4. Update or insert the CIS compliance **tool** with JSON specs/metadata.
+    5. Commit and print diagnostic row listings.
+
+    Raises:
+        SystemExit: If source files are missing expected classes, no admin user
+            exists, or required paths cannot be read.
+    """
     filter_content = FILTER_PATH.read_text(encoding="utf-8")
     tool_content = TOOL_PATH.read_text(encoding="utf-8")
     if "class Filter" not in filter_content:

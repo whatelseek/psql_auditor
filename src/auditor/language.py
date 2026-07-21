@@ -1,4 +1,17 @@
-"""Detect and apply the operator's preferred report language (English or Russian)."""
+"""Report language detection and localized UI chrome for audit output.
+
+Runs early in the audit pipeline when the operator's chat request is parsed.
+:func:`detect_report_language` inspects explicit language requests and Cyrillic
+script to choose English or Russian. The resolved :class:`ReportLanguage` is
+stored in graph state and drives:
+
+* LLM prompt fragments (:func:`language_instruction`) for narrative cells.
+* Fixed report section headers and chart labels (:func:`report_ui`).
+
+Narrative content (observation, recommendation, executive summary) is written
+by the LLM in the chosen language; status tokens remain English
+(``pass|fail|partial|error|skipped``).
+"""
 
 from __future__ import annotations
 
@@ -10,7 +23,15 @@ _ALLOWED = frozenset({"en", "ru"})
 
 @dataclass(frozen=True, slots=True)
 class ReportLanguage:
-    """Resolved language for narrative report cells and localized UI labels."""
+    """Resolved language for narrative report cells and localized UI labels.
+
+  Immutable value object produced by :func:`detect_report_language` and carried
+  through LangGraph state as ``report_language``.
+
+  Attributes:
+      code: Short code used for UI packs (``en`` or ``ru``).
+      name: Human language name for LLM instructions (``English`` or ``Russian``).
+  """
 
     code: str
     """Short code used for UI packs (``en`` or ``ru``)."""
@@ -141,7 +162,18 @@ _REPORT_UI: dict[str, dict[str, str]] = {
 
 
 def normalize_language_code(value: str) -> str:
-    """Return ``en`` or ``ru``; anything else falls back to ``en``."""
+    """Normalize arbitrary language input to a supported report code.
+
+  Accepts ISO-style codes (``en``, ``ru``), full names (``English``, ``русский``),
+  and BCP-47 tags (``en-US`` → ``en``). Unknown or empty values default to
+  ``en``.
+
+  Args:
+      value: Raw language string from settings, frontmatter, or operator text.
+
+  Returns:
+      ``"en"`` or ``"ru"``.
+  """
     text = (value or "").strip().lower().replace("_", "-")
     if not text:
         return "en"
@@ -156,11 +188,32 @@ def normalize_language_code(value: str) -> str:
 
 
 def language_name(code: str) -> str:
+    """Map a language code to its English display name for LLM prompts.
+
+  Args:
+      code: Language code or alias accepted by :func:`normalize_language_code`.
+
+  Returns:
+      ``"English"`` or ``"Russian"``. Unrecognized codes fall back to English.
+  """
     code = normalize_language_code(code)
     return _CODE_TO_NAME.get(code, "English")
 
 
 def report_ui(language: str | ReportLanguage | None) -> dict[str, str]:
+    """Return localized fixed-report chrome strings for a language.
+
+  Used by :func:`auditor.state.render_report` and compliance chart formatters
+  to label section headings, table columns, and chart text without hard-coding
+  English in the template.
+
+  Args:
+      language: Language code, :class:`ReportLanguage`, or ``None`` (→ English).
+
+  Returns:
+      Dict of UI label keys to localized strings. Always returns a full pack;
+      unknown codes fall back to the English pack.
+  """
     code = (
         language.code
         if isinstance(language, ReportLanguage)
@@ -171,7 +224,18 @@ def report_ui(language: str | ReportLanguage | None) -> dict[str, str]:
 
 
 def detect_report_language(user_request: str) -> ReportLanguage:
-    """Pick English or Russian from an explicit request or Cyrillic wording."""
+    """Pick English or Russian from an explicit request or Cyrillic wording.
+
+  Checks explicit patterns first (e.g. "report in Russian", "на русском").
+  If no explicit hint is found, any Cyrillic characters in the request imply
+  Russian; otherwise English is assumed.
+
+  Args:
+      user_request: Full operator chat message or audit request text.
+
+  Returns:
+      A :class:`ReportLanguage` with normalized ``code`` and display ``name``.
+  """
     text = user_request or ""
 
     for pattern, code, name in _EXPLICIT_PATTERNS:
@@ -193,7 +257,18 @@ def detect_report_language(user_request: str) -> ReportLanguage:
 
 
 def language_instruction(language: str | ReportLanguage | None) -> str:
-    """Prompt fragment forcing narrative cells into English or Russian."""
+    """Build a prompt fragment forcing narrative cells into one language.
+
+  Injected into assessment and finalize LLM prompts so observation,
+  recommendation, and executive summary text match the operator's language
+  while technical identifiers and status tokens stay unchanged.
+
+  Args:
+      language: Resolved language code, :class:`ReportLanguage`, or ``None``.
+
+  Returns:
+      Markdown instruction paragraph suitable for appending to system prompts.
+  """
     if isinstance(language, ReportLanguage):
         code = normalize_language_code(language.code)
         name = language_name(code)

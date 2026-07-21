@@ -1,6 +1,15 @@
 """NetBox access via LangChain MCP adapters + netboxlabs/netbox-mcp-server.
 
-Read-only CMDB lookups for intake and IT-audit drift checks.
+Read-only CMDB lookups for intake (capability probe) and IT-audit drift checks.
+The graph binds ``get_netbox_tools()`` only when intake reports CMDB access.
+
+Pipeline role:
+    Long-lived stdio MCP session to NetBox; curated ``netbox_*`` LangChain tools
+    with fallback to legacy remote tool names (``get_objects``, etc.).
+
+Key entry points:
+    ``get_netbox_tools``, ``probe_netbox_capabilities``,
+    ``fetch_netbox_device_by_name``, ``reconnect_netbox_session``.
 """
 
 from __future__ import annotations
@@ -51,7 +60,15 @@ _TRANSPORT_EXC_NAMES = frozenset(
 
 
 def netbox_mcp_connection(settings: Settings | None = None) -> dict[str, Any]:
-    """Build MultiServerMCPClient stdio connection for NetBox MCP."""
+    """Build ``MultiServerMCPClient`` stdio connection dict for NetBox MCP.
+
+    Args:
+        settings: Application settings; defaults to ``get_settings()``.
+
+    Returns:
+        Connection spec with ``transport``, ``command``, ``args``, and ``env``
+        (``NETBOX_URL``, ``NETBOX_TOKEN``, ``VERIFY_SSL``, ``TRANSPORT``).
+    """
     settings = settings or get_settings()
     command = settings.mcp_netbox_command or _DEFAULT_COMMAND
     args = shlex.split(settings.mcp_netbox_args or _DEFAULT_ARGS)
@@ -76,6 +93,14 @@ def netbox_mcp_connection(settings: Settings | None = None) -> dict[str, Any]:
 
 
 def _is_transport_exception(exc: BaseException) -> bool:
+    """Return True when the NetBox MCP stdio session likely died.
+
+    Args:
+        exc: Exception raised from ``session.call_tool`` or similar.
+
+    Returns:
+        ``True`` for connection/pipe/EOF errors or matching message substrings.
+    """
     if isinstance(exc, (ConnectionError, BrokenPipeError, TimeoutError, EOFError)):
         return True
     if type(exc).__name__ in _TRANSPORT_EXC_NAMES:
@@ -95,6 +120,14 @@ def _is_transport_exception(exc: BaseException) -> bool:
 
 
 def _format_mcp_result(result: Any) -> str:
+    """Flatten MCP ``CallToolResult`` into a string; prefix NetBox failures.
+
+    Args:
+        result: MCP tool result object (or plain value).
+
+    Returns:
+        Concatenated text parts, or ``NetBox error: …`` when ``isError`` is set.
+    """
     content = getattr(result, "content", None)
     parts: list[str] = []
     if content is None:
@@ -118,14 +151,30 @@ def _format_mcp_result(result: Any) -> str:
 
 
 class NetboxMcpSession:
-    """Long-lived LangChain MCP session for netbox-mcp-server."""
+    """Long-lived LangChain MCP session for netbox-mcp-server.
+
+    Holds a single stdio subprocess and MCP session behind an asyncio lock.
+    Transport failures trigger session reset on the next call.
+    """
 
     def __init__(self) -> None:
+        """Initialize an empty session (no subprocess until first tool call)."""
         self._lock = asyncio.Lock()
         self._stack: AsyncExitStack | None = None
         self._session: Any = None
 
     async def _ensure_session(self, settings: Settings) -> Any:
+        """Start the MCP client and enter a persistent session context.
+
+        Args:
+            settings: Must include ``netbox_url`` and ``netbox_token``.
+
+        Returns:
+            LangChain MCP session handle for ``call_tool``.
+
+        Raises:
+            RuntimeError: When NetBox URL or token is not configured.
+        """
         if self._session is not None:
             return self._session
         if not settings.netbox_url or not settings.netbox_token:
@@ -145,6 +194,7 @@ class NetboxMcpSession:
         return session
 
     async def _reset_unlocked(self) -> None:
+        """Close the MCP stack and clear session state (caller must hold lock)."""
         if self._stack is not None:
             try:
                 await self._stack.aclose()
@@ -159,6 +209,16 @@ class NetboxMcpSession:
         arguments: dict[str, Any] | None = None,
         settings: Settings | None = None,
     ) -> str:
+        """Invoke a remote NetBox MCP tool on the persistent session.
+
+        Args:
+            tool_name: Remote tool name (e.g. ``netbox_get_objects``).
+            arguments: JSON-serializable arguments dict.
+            settings: Optional settings override.
+
+        Returns:
+            Formatted tool output or ``NetBox error: …`` on failure.
+        """
         settings = settings or get_settings()
         arguments = arguments or {}
         async with self._lock:
@@ -172,10 +232,19 @@ class NetboxMcpSession:
                 return f"NetBox error: {type(exc).__name__}: {exc}"
 
     async def close(self) -> None:
+        """Shut down the NetBox MCP subprocess."""
         async with self._lock:
             await self._reset_unlocked()
 
     async def reconnect(self, settings: Settings | None = None) -> str:
+        """Force-close a dead session and open a fresh NetBox MCP connection.
+
+        Args:
+            settings: Optional settings override.
+
+        Returns:
+            Success or failure message string.
+        """
         settings = settings or get_settings()
         async with self._lock:
             await self._reset_unlocked()
@@ -191,10 +260,23 @@ _SESSION = NetboxMcpSession()
 
 
 async def reconnect_netbox_session() -> str:
+    """Public helper to recycle the process-wide NetBox MCP session.
+
+    Returns:
+        Message from ``NetboxMcpSession.reconnect``.
+    """
     return await _SESSION.reconnect()
 
 
 def _parse_jsonish(text: str) -> Any:
+    """Best-effort parse of MCP tool output as JSON.
+
+    Args:
+        text: Raw tool result string.
+
+    Returns:
+        Parsed object, or ``None`` when empty, error-prefixed, or unparseable.
+    """
     raw = (text or "").strip()
     if not raw or raw.lower().startswith("netbox error"):
         return None
@@ -211,6 +293,14 @@ def _parse_jsonish(text: str) -> Any:
 
 
 def re_search_json(text: str) -> str | None:
+    """Extract the first JSON object or array substring from ``text``.
+
+    Args:
+        text: String that may embed JSON inside prose or logs.
+
+    Returns:
+        First ``{…}`` or ``[…]`` match, or ``None``.
+    """
     import re
 
     match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", text)
@@ -280,6 +370,7 @@ async def probe_netbox_capabilities(settings: Settings | None = None) -> dict[st
             sample = data
 
     def avail(ok: bool, note: str = "") -> dict[str, Any]:
+        """Build one intake-field availability descriptor for the probe result."""
         return {"available": ok, "note": note}
 
     fields = {
@@ -412,4 +503,9 @@ async def netbox_get_changelogs(filters_json: str = "{}") -> str:
 
 
 def get_netbox_tools() -> list:
+    """Return curated LangChain tools for read-only NetBox CMDB queries.
+
+    Returns:
+        ``[netbox_get_objects, netbox_get_object_by_id, netbox_get_changelogs]``.
+    """
     return [netbox_get_objects, netbox_get_object_by_id, netbox_get_changelogs]

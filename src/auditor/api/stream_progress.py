@@ -1,4 +1,16 @@
-"""SSE helpers: map ProgressEvent → OpenAI chat-completions / Responses chunks."""
+"""SSE helpers: map ``ProgressEvent`` → OpenAI chat-completions / Responses chunks.
+
+Pipeline role:
+    During streaming audits, the graph emits ``ProgressEvent`` objects (phase
+    changes, tool calls, requirement status). This module translates those
+    internal events into wire-format SSE payloads understood by Open WebUI:
+
+    * ``chat_progress_chunks`` — OpenAI Chat Completions ``chat.completion.chunk``.
+    * ``responses_progress_events`` — OpenAI Responses API event dicts.
+
+Key entry points:
+    ``chat_progress_chunks``, ``responses_progress_events``.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +33,17 @@ def _chat_chunk(
     delta: dict[str, Any],
     finish: str | None = None,
 ) -> str:
+    """Format one OpenAI chat-completion SSE ``data:`` line.
+
+    Args:
+        model: Model id advertised to the client (e.g. ``auditor``).
+        completion_id: Unique completion id for this response.
+        delta: Partial message delta (``content``, ``tool_calls``, etc.).
+        finish: Optional ``finish_reason`` when the stream ends.
+
+    Returns:
+        A complete SSE frame: ``data: {json}\\n\\n``.
+    """
     payload: dict[str, Any] = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -44,7 +67,21 @@ def chat_progress_chunks(
     completion_id: str,
     tool_index: int,
 ) -> list[str]:
-    """OpenAI chat-completions SSE for one progress event."""
+    """Convert one progress event into OpenAI chat-completion SSE chunks.
+
+    Handles ``reasoning``, ``phase``, ``req_status``, ``tool_call``, and
+    ``tool_result`` event kinds. Reasoning text is sent both as
+    ``reasoning_content`` (for capable clients) and italicized ``content``.
+
+    Args:
+        event: Internal progress event from the audit graph.
+        model: Model id for the SSE payload.
+        completion_id: Completion id for the SSE payload.
+        tool_index: Zero-based index for parallel tool-call deltas.
+
+    Returns:
+        List of SSE frame strings (may be empty for unhandled kinds).
+    """
     out: list[str] = []
     if event.kind in ("reasoning", "phase", "req_status"):
         text = event.text or ""
@@ -120,7 +157,21 @@ def responses_progress_events(
     seq_fn: Callable[[], int],
     message_id: str,
 ) -> list[dict[str, Any]]:
-    """OpenAI Responses API event dicts for one progress event."""
+    """Convert one progress event into OpenAI Responses API event dicts.
+
+    Mirrors ``chat_progress_chunks`` but emits Responses-native event types
+    (``response.reasoning_summary_text.delta``, ``response.output_text.delta``,
+    function-call argument deltas, etc.) for newer Open WebUI connections.
+
+    Args:
+        event: Internal progress event from the audit graph.
+        response_id: Responses API id (``resp_…``).
+        seq_fn: Callable returning the next monotonic ``sequence_number``.
+        message_id: Assistant message item id within the response.
+
+    Returns:
+        List of event dicts to JSON-encode as SSE ``data:`` payloads.
+    """
     events: list[dict[str, Any]] = []
     if event.kind in ("reasoning", "phase", "req_status"):
         text = event.text or ""

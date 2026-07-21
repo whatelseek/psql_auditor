@@ -1,8 +1,21 @@
 """Auditor tools: SSH host inspection and Postgres/NetBox via LangChain MCP.
 
-Database queries go through ``mcp_client`` (``langchain-mcp-adapters`` +
-https://github.com/antonorlov/mcp-postgres-server). CMDB lookups use
-``netbox_mcp`` (https://github.com/netboxlabs/netbox-mcp-server).
+Pipeline role:
+    LangChain ``@tool`` callables bound into the evidence-gathering model during
+    ``assess_parallel``. SSH covers host-level checks; MCP subprocesses handle
+    read-only SQL and CMDB lookups.
+
+Submodules:
+    * ``ssh`` — Remote shell commands and file reads over asyncssh.
+    * ``mcp_client`` — Postgres via ``langchain-mcp-adapters`` and
+      https://github.com/antonorlov/mcp-postgres-server (pooled stateful sessions).
+    * ``netbox_mcp`` — NetBox CMDB via https://github.com/netboxlabs/netbox-mcp-server.
+    * ``postgres`` — Read-only SQL gate used by MCP wrappers.
+    * ``secrets`` — Redact credentials before evidence/playbook persistence.
+
+Re-exported entry points (see ``__all__``):
+    ``get_ssh_tools``, ``get_mcp_tools``, ``get_netbox_tools``, and the
+    individual ``ssh_*`` / ``mcp_*`` / ``netbox_*`` tool functions.
 """
 
 from auditor.tools.mcp_client import (

@@ -1,4 +1,21 @@
-"""Post-audit follow-up: gather evidence, refill cells, rebuild reports."""
+"""Post-audit follow-up: gather evidence, refill cells, rebuild reports.
+
+This module implements the **post-checklist** operator workflow after an initial
+audit completes. It supports incremental evidence collection, rewriting finding
+cells from stored tool logs, and regenerating Markdown reports plus archives.
+
+Pipeline role:
+    Called from the graph when intent routing detects follow-up phrases such as
+    "Evaluate REQ-001", "Prepare new observation", or "Update the report".
+    All operations target an **existing** evidence run resolved via
+    :mod:`auditor.run_resolve`.
+
+Key entry points:
+    :func:`run_revise_req` — gather more evidence (optionally full cell rewrite).
+    :func:`run_refill_finding` — rewrite observation/recommendation from disk only.
+    :func:`run_update_report` — rebuild ``report.md`` and optional ZIP archive.
+    :func:`followup_footer` — operator hint appended after checklist completion.
+"""
 
 from __future__ import annotations
 
@@ -55,7 +72,14 @@ _FOLLOWUP_FOOTER = (
 
 
 def followup_footer() -> str:
-    """Short operator hint appended after a completed checklist audit."""
+    """Return the standard post-audit operator hint block.
+
+    Appended to completed checklist audit reports to explain the three-step
+    follow-up workflow: gather evidence, refill cells, rebuild report.
+
+    Returns:
+        Markdown footer with numbered next-step instructions (EN/RU examples).
+    """
     return _FOLLOWUP_FOOTER
 
 
@@ -65,7 +89,20 @@ def _resolve_ssh_target(
     client_run_id: str,
     host_id: str | None,
 ) -> InventorySshTarget | None:
-    """Match inventory SSH row for a multi-host evidence host slug."""
+    """Match an inventory SSH row for a multi-host evidence host slug.
+
+    Looks up SSH credentials from ``inventory/<client>/INVENTORY.md`` and
+    matches by exact slug/host or partial substring.
+
+    Args:
+        inventory_dir: Root inventory directory from settings.
+        client_run_id: Client or evidence run folder name.
+        host_id: Host hint from evidence key (IP, hostname, or slug).
+
+    Returns:
+        Matching :class:`~auditor.secrets_file.InventorySshTarget`, or
+        ``None`` when ``host_id`` is empty or no row matches.
+    """
     if not host_id:
         return None
     try:
@@ -87,7 +124,19 @@ def _ssh_bind_for_target(
     settings: Any,
     target: ResolvedTarget,
 ) -> Iterator[InventorySshTarget | None]:
-    """Bind process SSH env to the evidence host for tool gather / full revise."""
+    """Temporarily bind process SSH env to the evidence host for tool calls.
+
+    Resolves the inventory SSH target for ``target.host_id`` and enters
+    :func:`~auditor.secrets_file.bind_ssh_target` for the duration of the
+    context. Yields ``None`` when no matching inventory row exists.
+
+    Args:
+        settings: Auditor settings (``inventory_dir``).
+        target: Resolved evidence target including run id and host slug.
+
+    Yields:
+        Bound :class:`~auditor.secrets_file.InventorySshTarget`, or ``None``.
+    """
     ssh = _resolve_ssh_target(
         inventory_dir=settings.inventory_dir,
         client_run_id=target.run_id,
@@ -110,7 +159,20 @@ async def run_revise_req(
 
     By default this is **evidence-only** (tools are stored; finding cells keep
     prior values). When the operator says ``revise`` / ``reassess`` /
-    ``re-audit``, observation + recommendation are also rewritten immediately.
+    ``re-audit``, observation + recommendation are also rewritten immediately
+    via :meth:`AuditorGraph._fill_requirement_cells`.
+
+    Falls back to :func:`~auditor.adhoc.run_adhoc_commands` when no prior
+    checklist run exists on disk.
+
+    Args:
+        graph: Auditor graph with models and tool execution.
+        user_text: Operator message naming REQ id(s) and optional host/framework.
+        messages: Optional chat history for run-id resolution.
+
+    Returns:
+        Result dict with ``report``, ``messages``, ``followup=True``,
+        ``mode`` (``gather_evidence`` or ``revise_full``), and ``revised_reqs``.
     """
     settings = graph.settings
     user_request = truncate_text(
@@ -310,7 +372,23 @@ async def run_refill_finding(
     *,
     messages: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
-    """Rewrite status / observation / recommendation from **stored** evidence only."""
+    """Rewrite status / observation / recommendation from **stored** evidence only.
+
+    Loads concatenated tool logs from :class:`~auditor.evidence_store.EvidenceStore`
+    and invokes the fill model — **no new SSH/MCP commands** are executed.
+
+    When no REQ id is named, refills only requirements listed in run meta
+    ``revised_reqs`` from a prior gather step.
+
+    Args:
+        graph: Auditor graph (fill model required).
+        user_text: Operator message; may name REQ id(s) and framework/host.
+        messages: Optional chat history for run resolution.
+
+    Returns:
+        Result dict with ``mode="refill_finding"``, ``revised_reqs``, and
+        per-requirement status/observation/recommendation in ``report``.
+    """
     settings = graph.settings
     user_request = truncate_text(
         user_text,
@@ -489,7 +567,25 @@ async def run_update_report(
     *,
     messages: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
-    """Rebuild Markdown report(s) from on-disk ``finding.json`` files."""
+    """Rebuild Markdown report(s) from on-disk ``finding.json`` files.
+
+    For each framework folder in the resolved evidence run:
+
+    1. Loads findings and checklist metadata.
+    2. Renders the deterministic report body via :func:`~auditor.state.render_report`.
+    3. Generates a short executive summary with the fill model.
+    4. Optionally appends compliance charts and packages a ZIP archive.
+    5. Records results in the PostgreSQL warehouse when enabled.
+
+    Args:
+        graph: Auditor graph (fill model for summary).
+        user_text: Operator message; may filter to one framework or name run id.
+        messages: Optional chat history for run-id extraction.
+
+    Returns:
+        Result dict with combined ``report``, ``archive_path`` / ``archive_url``
+        when archiving is enabled, and ``mode="update_report"``.
+    """
     settings = graph.settings
     user_request = truncate_text(
         user_text,
