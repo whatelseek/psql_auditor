@@ -152,6 +152,7 @@ from auditor.tools.netbox_mcp import (
     fetch_netbox_device_by_name,
     get_netbox_tools,
     probe_netbox_capabilities,
+    reconnect_netbox_session,
 )
 from auditor.tools.ssh import get_ssh_tools
 
@@ -1120,8 +1121,16 @@ class AuditorGraph:
         return "finalize"
 
     async def reconnect_session(self, state: AuditorState) -> dict[str, Any]:
-        """Node: restore MCP session and bump retry counter (graph cycle)."""
+        """Node: restore MCP sessions and bump retry counter (graph cycle)."""
         status = await reconnect_mcp_session()
+        try:
+            nb = await reconnect_netbox_session()
+            if nb and "failed" not in nb.lower():
+                status = f"{status}; {nb}"
+            elif nb and "failed" in nb.lower():
+                status = f"{status}; NetBox: {nb}"
+        except Exception as exc:  # noqa: BLE001
+            status = f"{status}; NetBox reconnect skipped: {type(exc).__name__}"
         retry_count = int(state.get("retry_count") or 0) + 1
         pending = state.get("pending_ids") or []
         return {

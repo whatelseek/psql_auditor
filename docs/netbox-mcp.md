@@ -1,7 +1,10 @@
 # NetBox MCP (CMDB)
 
 CMDB lookups use **[netboxlabs/netbox-mcp-server](https://github.com/netboxlabs/netbox-mcp-server)**
-via LangChain MCP adapters (stdio), same pattern as Postgres MCP.
+via [`langchain-mcp-adapters`](https://github.com/langchain-ai/langchain-mcp-adapters)
+(`MultiServerMCPClient` + **stateful** `client.session("netbox")`), same pattern as
+Postgres MCP. See the official guide:
+[LangChain MCP](https://docs.langchain.com/oss/python/langchain/mcp#stateful-sessions).
 
 ```text
 Intake / it_audit
@@ -10,12 +13,18 @@ Intake / it_audit
 netbox_get_objects / netbox_get_object_by_id / netbox_get_changelogs
       │
       ▼
-NetboxMcpSession  (process-wide, asyncio.Lock)
+NetboxMcpSession  (process-wide, asyncio.Lock; single stdio worker)
+      │
+      ▼
+MultiServerMCPClient.session("netbox")  (handle_tool_errors=True)
       │
       ▼
 uv --directory /opt/netbox-mcp-server run netbox-mcp-server
       (NETBOX_URL + NETBOX_TOKEN; cloned into the agent image)
 ```
+
+A **pool is not used** for NetBox: intake/drift calls are infrequent compared to
+parallel `mcp_query` during Postgres CIS. One locked stateful session is enough.
 
 Read-only. The auditor never writes devices back to NetBox.
 

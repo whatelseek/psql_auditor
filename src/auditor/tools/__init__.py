@@ -6,6 +6,7 @@ https://github.com/antonorlov/mcp-postgres-server). CMDB lookups use
 """
 
 from auditor.tools.mcp_client import (
+    get_mcp_pool,
     get_mcp_tools,
     mcp_connect_db,
     mcp_describe_table,
@@ -26,6 +27,7 @@ from auditor.tools.netbox_mcp import (
 from auditor.tools.ssh import get_ssh_tools, ssh_read_file, ssh_run
 
 __all__ = [
+    "get_mcp_pool",
     "get_mcp_tools",
     "mcp_connect_db",
     "mcp_describe_table",
