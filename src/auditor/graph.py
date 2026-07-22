@@ -112,11 +112,13 @@ from auditor.intake import (
     client_slug,
     domains_for_audit_type,
     format_intake_assistant_message,
+    format_proposed_jobs_markdown,
     frameworks_for_audit_type,
     intake_interrupt_payload,
     prompts_for_language,
     resolve_audit_type,
     resolve_client_name,
+    resolve_scope_decision,
     resolve_yes_no,
     summarize_access_probe,
     summarize_cmdb_capabilities,
@@ -130,7 +132,9 @@ from auditor.language import (
 from auditor.memory.playbook_store import PlaybookMemory
 from auditor.report_archive import package_and_publish_archive
 from auditor.results_store import (
+    record_requirement_result_safe,
     record_results_safe,
+    snapshot_checklist_safe,
     start_session_safe,
     sync_session_status_from_run_meta,
 )
@@ -151,6 +155,8 @@ from auditor.prompts import (
     INTAKE_INTERPRET_AUDIT_TYPE_SYSTEM,
     INTAKE_INTERPRET_CLIENT_PROMPT,
     INTAKE_INTERPRET_CLIENT_SYSTEM,
+    INTAKE_INTERPRET_SCOPE_PROMPT,
+    INTAKE_INTERPRET_SCOPE_SYSTEM,
     INTAKE_INTERPRET_YES_NO_PROMPT,
     INTAKE_INTERPRET_YES_NO_SYSTEM,
 )
@@ -611,6 +617,7 @@ class AuditorGraph:
                 ),
                 cmdb=prompts.cmdb,
                 access=prompts.access,
+                scope=prompts.scope,
                 audit_type=prompts.audit_type,
             )
 
@@ -696,25 +703,141 @@ class AuditorGraph:
             if yn == "yes":
                 access = await probe_access_services(self.settings)
                 intake["access_probe"] = access
+                # 3b) Preaudit: discover hosts + propose frameworks (both domains).
+                store = self._store_from_state(state)
+                if store is not None:
+                    try:
+                        discovered = await self._discover_inventory_hosts(
+                            intake=intake, store=store
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        discovered = []
+                        intake["discovery_error"] = f"{type(exc).__name__}: {exc}"
+                    proposed: list[dict[str, Any]] = []
+                    for target, facts in discovered:
+                        if facts.error:
+                            matched_ids: list[str] = []
+                            it_fw = get_framework(
+                                "it_audit", self.settings.agents_dir
+                            )
+                            if it_fw is not None:
+                                matched_ids = [it_fw.id]
+                            proposed.append(
+                                {
+                                    "host_id": target.slug,
+                                    "hostname": facts.hostname or "",
+                                    "ssh_host": target.host,
+                                    "frameworks": matched_ids,
+                                    "error": facts.error,
+                                }
+                            )
+                        else:
+                            matched = select_frameworks_for_host(
+                                facts,
+                                domains=["it", "cybersecurity"],
+                                agents_dir=self.settings.agents_dir,
+                            )
+                            proposed.append(
+                                {
+                                    "host_id": target.slug,
+                                    "hostname": facts.hostname or "",
+                                    "ssh_host": target.host,
+                                    "frameworks": [fw.id for fw in matched],
+                                    "error": "",
+                                }
+                            )
+                    intake["proposed_jobs"] = proposed
+                else:
+                    intake["proposed_jobs"] = []
             else:
                 intake["access_probe"] = {
                     "services": [],
                     "any_ok": False,
                     "skipped": True,
                 }
+                intake["proposed_jobs"] = []
 
         access_summary = summarize_access_probe(
             intake.get("access_probe") or {}, language=lang.code
         )
-        audit_prompt = f"{prompts.audit_type}\n\n{access_summary}"
-        while not intake.get("audit_types"):
-            raw = interrupt(
-                intake_interrupt_payload(step="audit_type", prompt=audit_prompt)
-            )
-            atype = await self._intake_resolve_audit_type(str(raw or ""))
-            if atype:
-                intake["audit_types"] = atype
+        proposed_jobs = list(intake.get("proposed_jobs") or [])
+        has_plan = bool(
+            proposed_jobs
+            and any((row.get("frameworks") or []) for row in proposed_jobs)
+        )
+
+        # 4) Scope: confirm / exclude proposed frameworks (or domain fallback).
+        if has_plan:
+            plan_md = format_proposed_jobs_markdown(proposed_jobs)
+            scope_prompt = f"{prompts.scope}\n\n{access_summary}\n\n{plan_md}"
+            while "selected_jobs" not in intake:
+                raw = interrupt(
+                    intake_interrupt_payload(step="scope", prompt=scope_prompt)
+                )
+                payload = await self._intake_llm_json(
+                    INTAKE_INTERPRET_SCOPE_SYSTEM,
+                    INTAKE_INTERPRET_SCOPE_PROMPT.format(
+                        reply=str(raw or "").strip() or "(empty)",
+                        plan=plan_md,
+                    ),
+                )
+                selected = resolve_scope_decision(
+                    str(raw or ""), proposed_jobs, payload
+                )
+                if selected is None:
+                    hint = (
+                        "\n\n_Could not parse that. Reply **confirm** or "
+                        "`exclude <framework>, …`._"
+                        if lang.code == "en"
+                        else "\n\n_Не удалось разобрать ответ. Напишите "
+                        "**подтвердить** или `exclude <framework>, …`._"
+                    )
+                    scope_prompt = f"{prompts.scope}{hint}\n\n{plan_md}"
+                    continue
+                if not selected:
+                    hint = (
+                        "\n\n_Nothing left to run after exclusions. "
+                        "Confirm the full plan or exclude fewer items._"
+                        if lang.code == "en"
+                        else "\n\n_После исключений нечего запускать. "
+                        "Подтвердите весь план или исключите меньше._"
+                    )
+                    scope_prompt = f"{prompts.scope}{hint}\n\n{plan_md}"
+                    continue
+                intake["selected_jobs"] = selected
+                proposed_pairs = {
+                    (str(r.get("host_id") or ""), str(fw))
+                    for r in proposed_jobs
+                    for fw in (r.get("frameworks") or [])
+                }
+                selected_pairs = {
+                    (str(r.get("host_id") or ""), str(fw))
+                    for r in selected
+                    for fw in (r.get("frameworks") or [])
+                }
+                intake["excluded_pairs"] = sorted(
+                    f"{h}/{fw}" for h, fw in (proposed_pairs - selected_pairs)
+                )
+                intake["excluded_frameworks"] = sorted(
+                    {
+                        fw
+                        for _h, fw in (proposed_pairs - selected_pairs)
+                    }
+                )
+                intake["audit_types"] = "both"
                 break
+        else:
+            audit_prompt = f"{prompts.audit_type}\n\n{access_summary}"
+            while not intake.get("audit_types"):
+                raw = interrupt(
+                    intake_interrupt_payload(
+                        step="audit_type", prompt=audit_prompt
+                    )
+                )
+                atype = await self._intake_resolve_audit_type(str(raw or ""))
+                if atype:
+                    intake["audit_types"] = atype
+                    break
 
         store = self._store_from_state(state)
         if store is not None:
@@ -725,6 +848,20 @@ class AuditorGraph:
                 has_cmdb=intake.get("has_cmdb"),
                 has_access=intake.get("has_access"),
                 audit_types=intake.get("audit_types"),
+                proposed_jobs=intake.get("proposed_jobs"),
+                selected_jobs=intake.get("selected_jobs"),
+            )
+
+        client_note = ""
+        if intake.get("selected_jobs"):
+            n_jobs = sum(
+                len(r.get("frameworks") or [])
+                for r in (intake.get("selected_jobs") or [])
+            )
+            client_note = (
+                f" Selected **{n_jobs}** host/framework job(s) from the preaudit plan."
+                if lang.code == "en"
+                else f" Выбрано **{n_jobs}** задач хост/фреймворк по плану предаудита."
             )
 
         out: dict[str, Any] = {
@@ -738,7 +875,8 @@ class AuditorGraph:
                 AIMessage(
                     content=(
                         f"Intake complete for **{intake.get('client_name')}**. "
-                        f"Audit type: `{intake.get('audit_types')}`. Starting assessment…"
+                        f"Audit type: `{intake.get('audit_types')}`.{client_note} "
+                        f"Starting assessment…"
                     ),
                     name="auditor",
                 )
@@ -1064,6 +1202,46 @@ class AuditorGraph:
             f"(concurrency={limit})…",
             framework_id=framework_id,
         )
+        if requirements:
+            evidence_rel = ""
+            hostname = None
+            ssh_host = None
+            if store is not None:
+                try:
+                    evidence_rel = str(
+                        store.root.relative_to(
+                            Path(self.settings.evidence_dir).resolve()
+                        )
+                    )
+                except ValueError:
+                    evidence_rel = str(store.root)
+                facts_path = store.host_root(host_id) / "host_facts.json" if host_id else None
+                if facts_path is None:
+                    facts_path = store.root / "host_facts.json"
+                if facts_path.is_file():
+                    try:
+                        import json as _json
+
+                        raw_facts = _json.loads(facts_path.read_text(encoding="utf-8"))
+                        hostname = str(raw_facts.get("hostname") or "") or None
+                        ssh_host = str(raw_facts.get("ssh_host") or "") or None
+                    except Exception:  # noqa: BLE001
+                        pass
+            await snapshot_checklist_safe(
+                self.settings,
+                client_name=str(state.get("client_name") or "")
+                or (store.run_id if store else ""),
+                evidence_run_id=str(
+                    state.get("evidence_run_id") or (store.run_id if store else "")
+                ),
+                framework_id=framework_id or "framework",
+                requirements=requirements,
+                evidence_host_id=host_id or None,
+                session_number=self._results_session_number(state, store),
+                hostname=hostname,
+                ssh_host=ssh_host or host_id or None,
+                evidence_relpath=evidence_rel,
+            )
 
         async def _worker(req_id: str) -> Finding:
             """Assess one requirement under the concurrency semaphore."""
@@ -1096,6 +1274,13 @@ class AuditorGraph:
                             store.write_finding(
                                 framework_id, req_id, special.model_dump()
                             )
+                        await self._warehouse_live_upsert(
+                            state,
+                            framework_id=framework_id,
+                            finding=special,
+                            requirement=requirements.get(req_id),
+                            store=store,
+                        )
                         emit_req_status(
                             req_id,
                             special.status,
@@ -1110,6 +1295,13 @@ class AuditorGraph:
                         store=store,
                         report_language=report_lang,
                         has_cmdb=has_cmdb,
+                    )
+                    await self._warehouse_live_upsert(
+                        state,
+                        framework_id=framework_id,
+                        finding=finding,
+                        requirement=requirements.get(req_id),
+                        store=store,
                     )
                     emit_req_status(
                         req_id,
@@ -1159,6 +1351,13 @@ class AuditorGraph:
                             req_id,
                             finding.model_dump(),
                         )
+                    await self._warehouse_live_upsert(
+                        state,
+                        framework_id=framework_id,
+                        finding=finding,
+                        requirement=req,
+                        store=store,
+                    )
                     emit_req_status(
                         req_id, "error", framework_id=framework_id, text=str(exc)[:200]
                     )
@@ -1551,6 +1750,80 @@ class AuditorGraph:
                 store.run_id = path.name
         self._evidence_by_run[store.run_id] = store
         return store
+
+    def _results_session_number(
+        self,
+        state: AuditorState,
+        store: EvidenceStore | None,
+    ) -> int | None:
+        """Resolve warehouse session number from state or disk meta."""
+        if store is not None:
+            raw = store.read_run_meta().get("results_session_number")
+            if raw is not None:
+                try:
+                    return int(raw)
+                except (TypeError, ValueError):
+                    pass
+        if state.get("results_session_number") is not None:
+            try:
+                return int(state["results_session_number"])  # type: ignore[index]
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    async def _warehouse_live_upsert(
+        self,
+        state: AuditorState,
+        *,
+        framework_id: str,
+        finding: Finding,
+        requirement: Requirement | None,
+        store: EvidenceStore | None,
+        source: str = "live",
+    ) -> None:
+        """Best-effort dual-write of one filled REQ to the results warehouse."""
+        evidence_rel = ""
+        hostname = None
+        ssh_host = None
+        host_id = str(state.get("evidence_host_id") or "").strip()
+        if store is not None:
+            try:
+                evidence_rel = str(
+                    store.root.relative_to(Path(self.settings.evidence_dir).resolve())
+                )
+            except ValueError:
+                evidence_rel = str(store.root)
+            facts_path = (
+                store.host_root(host_id) / "host_facts.json"
+                if host_id
+                else store.root / "host_facts.json"
+            )
+            if facts_path.is_file():
+                try:
+                    import json as _json
+
+                    raw_facts = _json.loads(facts_path.read_text(encoding="utf-8"))
+                    hostname = str(raw_facts.get("hostname") or "") or None
+                    ssh_host = str(raw_facts.get("ssh_host") or "") or None
+                except Exception:  # noqa: BLE001
+                    pass
+        await record_requirement_result_safe(
+            self.settings,
+            client_name=str(state.get("client_name") or "")
+            or (store.run_id if store else ""),
+            evidence_run_id=str(
+                state.get("evidence_run_id") or (store.run_id if store else "")
+            ),
+            framework_id=framework_id or "framework",
+            evidence_host_id=host_id or None,
+            finding=finding,
+            requirement=requirement,
+            evidence_relpath=evidence_rel,
+            source=source,
+            session_number=self._results_session_number(state, store),
+            hostname=hostname,
+            ssh_host=ssh_host or host_id or None,
+        )
 
     async def _fill_requirement_cells(
         self,
@@ -2535,6 +2808,39 @@ class AuditorGraph:
             "awaiting_hitl": False,
         }
 
+    async def alist_status(self, user_text: str = "") -> dict[str, Any]:
+        """Show host progress table for a session (``/list-status``)."""
+        from auditor.results_store import list_status_report, parse_list_status_request
+
+        client, session_num = parse_list_status_request(user_text or "")
+        text = await list_status_report(
+            self.settings,
+            client_name=client,
+            session_number=session_num,
+        )
+        return {
+            "report": text,
+            "messages": [AIMessage(content=text)],
+            "awaiting_hitl": False,
+        }
+
+    async def alist_host(self, user_text: str = "") -> dict[str, Any]:
+        """Show REQ cells for one host+framework (``/list-host``)."""
+        from auditor.results_store import list_host_report, parse_list_host_request
+
+        hostname, framework_id, client = parse_list_host_request(user_text or "")
+        text = await list_host_report(
+            self.settings,
+            hostname=hostname,
+            framework_id=framework_id,
+            client_name=client,
+        )
+        return {
+            "report": text,
+            "messages": [AIMessage(content=text)],
+            "awaiting_hitl": False,
+        }
+
     async def _discover_inventory_hosts(
         self,
         *,
@@ -2570,6 +2876,59 @@ class AuditorGraph:
             (host_base / "host_facts.md").write_text(md, encoding="utf-8")
             discovered.append((target, facts))
         return discovered
+
+    def _jobs_from_selected_intake(
+        self,
+        *,
+        intake: dict[str, Any],
+        store: EvidenceStore,
+        selected_rows: list[dict[str, Any]],
+    ) -> list[tuple[InventorySshTarget, HostFacts, Any]]:
+        """Rebuild (target, facts, framework) jobs from intake selected_jobs.
+
+        Prefers host_facts.json written during stage-3 discovery so SSH is not
+        repeated. Falls back to empty facts when the artifact is missing.
+        """
+        slug = str(
+            intake.get("client_slug")
+            or client_slug(str(intake.get("client_name") or ""))
+        )
+        targets = list_client_ssh_targets(self.settings.inventory_dir, slug)
+        if not targets and self.settings.ssh_host:
+            targets = [
+                InventorySshTarget(
+                    host=self.settings.ssh_host,
+                    port=str(self.settings.ssh_port or 22),
+                    user=self.settings.ssh_user or "",
+                    password=self.settings.ssh_password or "",
+                    private_key_path=self.settings.ssh_private_key_path or "",
+                )
+            ]
+        by_slug = {t.slug: t for t in targets}
+        by_host = {t.host: t for t in targets}
+        jobs: list[tuple[InventorySshTarget, HostFacts, Any]] = []
+        for row in selected_rows:
+            host_id = str(row.get("host_id") or "").strip()
+            ssh_host = str(row.get("ssh_host") or "").strip()
+            target = by_slug.get(host_id) or by_host.get(ssh_host)
+            if target is None:
+                continue
+            facts_path = store.host_root(target.slug) / "host_facts.json"
+            facts = HostFacts(ssh_host=target.host)
+            if facts_path.is_file():
+                try:
+                    payload = json.loads(facts_path.read_text(encoding="utf-8"))
+                    facts = parse_host_facts_json(
+                        payload.get("facts") or {},
+                        ssh_host=target.host,
+                    )
+                except Exception:  # noqa: BLE001
+                    facts = HostFacts(ssh_host=target.host)
+            for fw_id in row.get("frameworks") or []:
+                fw = get_framework(str(fw_id), self.settings.agents_dir)
+                if fw is not None:
+                    jobs.append((target, facts, fw))
+        return jobs
 
     def _format_host_framework_plan(
         self,
@@ -2667,7 +3026,12 @@ class AuditorGraph:
 
         # Jobs: (ssh_target, facts, framework)
         jobs: list[tuple[InventorySshTarget, HostFacts, Any]] = []
-        if has_access:
+        selected_rows = list(intake.get("selected_jobs") or [])
+        if has_access and selected_rows:
+            jobs = self._jobs_from_selected_intake(
+                intake=intake, store=store, selected_rows=selected_rows
+            )
+        elif has_access:
             discovered = await self._discover_inventory_hosts(
                 intake=intake, store=store
             )

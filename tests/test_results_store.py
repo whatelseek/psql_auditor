@@ -49,10 +49,61 @@ def test_parse_list_results_request() -> None:
     assert num == 1
 
 
+def test_parse_list_status_and_host_request() -> None:
+    from auditor.results_store import (
+        format_session_status_markdown,
+        parse_list_host_request,
+        parse_list_status_request,
+    )
+
+    client, num = parse_list_status_request("List status for AlphaCo session 2")
+    assert client == "AlphaCo"
+    assert num == 2
+    client, num = parse_list_status_request("list-status BetaCo 1")
+    assert client == "BetaCo"
+    assert num == 1
+
+    host, fw, client = parse_list_host_request("list-host 10.200.29.79 it_audit")
+    assert host == "10.200.29.79"
+    assert fw == "it_audit"
+    assert client is None
+    host, fw, client = parse_list_host_request(
+        "list-host pg-db ubuntu_cis_24_l2 for AlphaCo"
+    )
+    assert host == "pg-db"
+    assert fw == "ubuntu_cis_24_l2"
+    assert client == "AlphaCo"
+
+    text = format_session_status_markdown(
+        AuditSessionInfo(
+            id=1,
+            session_number=2,
+            client_name="AlphaCo",
+            client_slug="alphaco",
+            evidence_run_id="AlphaCo",
+            status="running",
+            framework_id="it_audit",
+        ),
+        [
+            {
+                "hostname": "pg-db",
+                "ip": "10.200.29.79",
+                "framework_id": "it_audit",
+                "ready_label": "15/60 ready",
+            }
+        ],
+    )
+    assert "15/60 ready" in text
+    assert "pg-db" in text
+
+
 def test_intent_list_results() -> None:
     assert classify_intent("List results for AlphaCo session 2") == "list_results"
     assert classify_intent("list-results AlphaCo 2") == "list_results"
     assert classify_intent("Show warehouse results for Acme") == "list_results"
+    assert classify_intent("List status for AlphaCo session 2") == "list_status"
+    assert classify_intent("list-status AlphaCo 2") == "list_status"
+    assert classify_intent("list-host 10.0.0.1 it_audit") == "list_host"
     assert classify_intent("List audit sessions") == "list_sessions"
 
 
@@ -334,7 +385,7 @@ async def test_record_host_framework_audit_tags_session_number() -> None:
     conn.close = AsyncMock()
 
     with (
-        patch.object(store, "_ensure_schema_on_dsn", new=AsyncMock()),
+        patch.object(store, "_ensure_schema", new=AsyncMock()),
         patch("auditor.results_store.asyncpg.connect", new=AsyncMock(return_value=conn)),
     ):
         await store.record_host_framework_audit(
@@ -357,5 +408,131 @@ async def test_record_host_framework_audit_tags_session_number() -> None:
     assert req_calls
     args = req_calls[0].args
     assert 3 in args  # session_number column
-    assert "PermitRootLogin yes" in args
-    assert "Set PermitRootLogin no" in args
+    host_upsert = [
+        c
+        for c in conn.fetchval.await_args_list
+        if c.args and "INSERT INTO host_results" in str(c.args[0])
+    ]
+    assert host_upsert
+    assert "ON CONFLICT (session_id, host_id, framework_id)" in str(
+        host_upsert[0].args[0]
+    )
+
+
+@pytest.mark.asyncio
+async def test_upsert_requirement_result_live() -> None:
+    settings = SimpleNamespace(
+        results_db_enabled=True,
+        results_database_url="postgresql://u:p@localhost/postgres",
+        results_db_per_client=False,
+        results_db_name_prefix="results_",
+    )
+    store = ResultsStore(settings)  # type: ignore[arg-type]
+    finding = Finding(
+        requirement_id="REQ-002",
+        title="Banner",
+        category="Access",
+        severity="Low",
+        status="pass",
+        evidence="ok",
+        remediation="",
+    )
+    requirement = Requirement(
+        id="REQ-002",
+        title="Banner",
+        category="Access",
+        severity="Low",
+        how_to_verify="cat",
+        pass_criteria="present",
+    )
+
+    class _Row(dict):
+        def __getitem__(self, key):
+            return dict.__getitem__(self, key)
+
+        def get(self, key, default=None):
+            return dict.get(self, key, default)
+
+    sess_row = _Row(
+        id=11,
+        session_number=1,
+        client_name="Acme",
+        client_slug="acme",
+        evidence_run_id="Acme",
+        status="running",
+        continue_thread_id="",
+        framework_id="it_audit",
+        pending_ids=[],
+        started_at=datetime.now(timezone.utc),
+        finished_at=None,
+    )
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=sess_row)
+    conn.fetchval = AsyncMock(side_effect=[22, 44])  # host, hr
+    conn.fetch = AsyncMock(
+        return_value=[{"req_id": "REQ-002", "status": "pass", "title": "Banner", "severity": "Low"}]
+    )
+    conn.execute = AsyncMock()
+    tx = MagicMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction = MagicMock(return_value=tx)
+    conn.close = AsyncMock()
+
+    with (
+        patch.object(store, "_ensure_schema", new=AsyncMock()),
+        patch("auditor.results_store.asyncpg.connect", new=AsyncMock(return_value=conn)),
+    ):
+        await store.upsert_requirement_result(
+            client_name="Acme",
+            evidence_run_id="Acme",
+            framework_id="it_audit",
+            evidence_host_id="10.0.0.1",
+            finding=finding,
+            requirement=requirement,
+            evidence_relpath="Acme",
+            source="live",
+            session_number=1,
+        )
+
+    completed = [
+        c
+        for c in conn.execute.await_args_list
+        if c.args and "status = 'completed'" in str(c.args[0])
+    ]
+    assert not completed
+    req_calls = [
+        c
+        for c in conn.execute.await_args_list
+        if c.args and "INSERT INTO requirement_results" in str(c.args[0])
+    ]
+    assert req_calls
+    refresh = [
+        c
+        for c in conn.execute.await_args_list
+        if c.args and "UPDATE host_results SET" in str(c.args[0])
+    ]
+    assert refresh
+
+
+@pytest.mark.asyncio
+async def test_record_requirement_result_safe_forwards() -> None:
+    from auditor.results_store import record_requirement_result_safe
+
+    settings = SimpleNamespace(results_db_enabled=True)
+    mock_store = MagicMock()
+    mock_store.upsert_requirement_result = AsyncMock()
+    with patch(
+        "auditor.results_store.get_results_store",
+        return_value=mock_store,
+    ):
+        await record_requirement_result_safe(
+            settings,  # type: ignore[arg-type]
+            client_name="Acme",
+            evidence_run_id="Acme",
+            framework_id="it_audit",
+            evidence_host_id=None,
+            finding=Finding(requirement_id="REQ-001", status="pass"),
+        )
+    mock_store.upsert_requirement_result.assert_awaited_once()

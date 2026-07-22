@@ -25,6 +25,8 @@ IntentKind = Literal[
     "update_report",
     "list_sessions",
     "list_results",
+    "list_status",
+    "list_host",
 ]
 
 # Deterministic playbook / freeform command path (not REQ evidence-gather revise).
@@ -92,6 +94,22 @@ _LIST_RESULTS = (
     re.compile(r"\bрезультаты\s+(сессии|аудита|склада)\b", re.I),
     re.compile(r"\bсписок\s+результатов\b", re.I),
     re.compile(r"\bпокажи\s+результаты\b", re.I),
+)
+
+# Host progress table (N/M ready) — prefer over list_sessions.
+_LIST_STATUS = (
+    re.compile(r"\blist[- ]?status\b", re.I),
+    re.compile(r"\bhost\s+status\b", re.I),
+    re.compile(r"\bстатус\s+(хостов|сессии|аудита)\b", re.I),
+    re.compile(r"\bсписок\s+статус\w*\b", re.I),
+)
+
+# Per-host framework assessment dump.
+_LIST_HOST = (
+    re.compile(r"\blist[- ]?host\b", re.I),
+    re.compile(r"\bhost\s+results?\b", re.I),
+    re.compile(r"\bрезультаты\s+хоста\b", re.I),
+    re.compile(r"\bпокажи\s+хост\b", re.I),
 )
 
 # Which warehouse sessions exist / need continue (Postgres tracker).
@@ -230,6 +248,12 @@ def classify_intent(text: str, *, agents_dir: Path | None = None) -> IntentKind:
     # Prefer REQ warehouse dump over session listing when both match.
     if any(pat.search(raw) for pat in _LIST_RESULTS):
         return "list_results"
+
+    if any(pat.search(raw) for pat in _LIST_STATUS):
+        return "list_status"
+
+    if any(pat.search(raw) for pat in _LIST_HOST):
+        return "list_host"
 
     if any(pat.search(raw) for pat in _LIST_SESSIONS):
         return "list_sessions"

@@ -15,9 +15,11 @@ Layout (when ``RESULTS_DB_PER_CLIENT=true``)::
       requirement_results      -- filled cells (status/obs/rec)
 
 Pipeline role:
-    :func:`start_session_safe` allocates session numbers at intake; finalize and
-    :func:`~auditor.followup.run_update_report` call :func:`record_results_safe`
-    to upsert findings. ``continue`` resumes the same session without a new number.
+    :func:`start_session_safe` allocates session numbers at intake;
+    :func:`record_requirement_result_safe` dual-writes each filled REQ during
+    assess; finalize and :func:`~auditor.followup.run_update_report` call
+    :func:`record_results_safe` to refresh aggregates and mark completed.
+    ``continue`` resumes the same session without a new number.
 
 Key entry points:
     :class:`ResultsStore` — async PostgreSQL access and schema management.
@@ -47,6 +49,17 @@ from auditor.state import Finding
 logger = logging.getLogger(__name__)
 
 _SAFE_DB = re.compile(r"[^a-z0-9_]+")
+_IP_LIKE = re.compile(
+    r"^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]+)$"
+)
+
+
+def _looks_like_ip(value: str) -> bool:
+    """Return True when ``value`` looks like an IPv4/IPv6 address."""
+    text = (value or "").strip()
+    if not text or text == "_default":
+        return False
+    return bool(_IP_LIKE.match(text))
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS audit_sessions (
@@ -538,6 +551,347 @@ class ResultsStore:
         finally:
             await conn.close()
 
+    async def list_session_host_status(
+        self,
+        *,
+        client_name: str,
+        session_number: int,
+    ) -> tuple[AuditSessionInfo | None, list[dict[str, Any]]]:
+        """Host/framework progress rows for ``/list-status`` (N/M ready).
+
+        Args:
+            client_name: Client display name.
+            session_number: Per-client session number.
+
+        Returns:
+            ``(session, rows)`` where each row has hostname, ip, framework_id,
+            filled, total, and ready_label.
+        """
+        if not self.enabled:
+            return None, []
+        info = await self.get_session(
+            client_name=client_name, session_number=session_number
+        )
+        if info is None:
+            return None, []
+        slug = make_client_slug(client_name) or "client"
+        dsn = await self._connect_dsn_for_client(slug)
+        conn = await asyncpg.connect(dsn)
+        try:
+            await self._ensure_schema(conn)
+            rows = await conn.fetch(
+                """
+                SELECT
+                    COALESCE(NULLIF(h.hostname, ''), h.host_key) AS hostname,
+                    COALESCE(
+                        NULLIF(h.ssh_host, ''),
+                        CASE
+                            WHEN h.host_key ~ '^[0-9a-fA-F:.]+$' THEN h.host_key
+                            ELSE NULL
+                        END,
+                        '—'
+                    ) AS ip,
+                    hr.framework_id,
+                    (
+                        SELECT COUNT(*)::int FROM requirement_results rr
+                        WHERE rr.host_result_id = hr.id
+                    ) AS filled,
+                    GREATEST(
+                        (
+                            SELECT COUNT(*)::int FROM framework_requirements fr
+                            WHERE fr.session_id = hr.session_id
+                              AND fr.framework_id = hr.framework_id
+                        ),
+                        (
+                            SELECT COUNT(*)::int FROM requirement_results rr
+                            WHERE rr.host_result_id = hr.id
+                        )
+                    ) AS total,
+                    hr.source,
+                    hr.finished_at
+                FROM host_results hr
+                JOIN hosts h ON h.id = hr.host_id
+                WHERE hr.session_id = $1
+                ORDER BY hostname, hr.framework_id
+                """,
+                info.id,
+            )
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                filled = int(r["filled"] or 0)
+                total = int(r["total"] or 0)
+                row = dict(r)
+                row["ready_label"] = f"{filled}/{total} ready" if total else f"{filled}/0 ready"
+                out.append(row)
+            return info, out
+        finally:
+            await conn.close()
+
+    async def list_host_framework_results(
+        self,
+        *,
+        hostname: str,
+        framework_id: str,
+        client_names: Sequence[str] | None = None,
+        client_name: str | None = None,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """REQ cells for the newest host+framework match (``/list-host``).
+
+        Searches known client warehouses when ``client_name`` is omitted.
+
+        Args:
+            hostname: Hostname, IP, or host_key fragment.
+            framework_id: Framework id (exact or case-insensitive).
+            client_names: Clients to scan when ``client_name`` is unset.
+            client_name: Optional single-client filter.
+
+        Returns:
+            ``(meta, req_rows)`` where meta describes the matched host/session,
+            or ``(None, [])`` when nothing matched.
+        """
+        if not self.enabled:
+            return None, []
+        needle = (hostname or "").strip()
+        fw = (framework_id or "").strip()
+        if not needle or not fw:
+            return None, []
+        clients: list[str] = []
+        if client_name:
+            clients = [client_name]
+        elif client_names:
+            clients = [c for c in client_names if c]
+        if not clients and not self.settings.results_db_per_client:
+            clients = ["shared"]
+        if not clients:
+            return None, []
+
+        best_meta: dict[str, Any] | None = None
+        best_reqs: list[dict[str, Any]] = []
+        best_finished: datetime | None = None
+
+        for name in clients:
+            slug = make_client_slug(name) or "client"
+            try:
+                dsn = await self._connect_dsn_for_client(slug)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("list-host: cannot open DB for %s: %s", slug, exc)
+                continue
+            conn = await asyncpg.connect(dsn)
+            try:
+                await self._ensure_schema(conn)
+                row = await conn.fetchrow(
+                    """
+                    SELECT hr.id AS host_result_id,
+                           s.session_number,
+                           s.client_name,
+                           s.client_slug,
+                           s.status AS session_status,
+                           s.evidence_run_id,
+                           hr.framework_id,
+                           hr.finished_at,
+                           hr.pass_count, hr.fail_count, hr.partial_count,
+                           hr.error_count, hr.skipped_count, hr.assessed,
+                           hr.compliance_pct,
+                           COALESCE(NULLIF(h.hostname, ''), h.host_key) AS hostname,
+                           COALESCE(NULLIF(h.ssh_host, ''), h.host_key) AS ip,
+                           h.host_key
+                    FROM host_results hr
+                    JOIN hosts h ON h.id = hr.host_id
+                    JOIN audit_sessions s ON s.id = hr.session_id
+                    WHERE lower(hr.framework_id) = lower($1)
+                      AND (
+                            lower(h.host_key) = lower($2)
+                         OR lower(COALESCE(h.hostname, '')) = lower($2)
+                         OR lower(COALESCE(h.ssh_host, '')) = lower($2)
+                         OR h.host_key ILIKE '%' || $2 || '%'
+                         OR COALESCE(h.hostname, '') ILIKE '%' || $2 || '%'
+                         OR COALESCE(h.ssh_host, '') ILIKE '%' || $2 || '%'
+                      )
+                    ORDER BY
+                        CASE
+                            WHEN lower(h.host_key) = lower($2) THEN 0
+                            WHEN lower(COALESCE(h.hostname, '')) = lower($2) THEN 1
+                            WHEN lower(COALESCE(h.ssh_host, '')) = lower($2) THEN 2
+                            ELSE 3
+                        END,
+                        hr.finished_at DESC NULLS LAST,
+                        hr.id DESC
+                    LIMIT 1
+                    """,
+                    fw,
+                    needle,
+                )
+                if row is None:
+                    continue
+                finished = row["finished_at"]
+                if best_meta is not None and best_finished is not None:
+                    if finished is None or finished < best_finished:
+                        continue
+                reqs = await conn.fetch(
+                    """
+                    SELECT rr.req_id, rr.title, rr.category, rr.severity, rr.status,
+                           rr.observation, rr.recommendation, rr.notes
+                    FROM requirement_results rr
+                    WHERE rr.host_result_id = $1
+                    ORDER BY rr.req_id
+                    """,
+                    int(row["host_result_id"]),
+                )
+                best_meta = dict(row)
+                best_reqs = [dict(r) for r in reqs]
+                best_finished = finished
+            finally:
+                await conn.close()
+
+        return best_meta, best_reqs
+
+    async def snapshot_framework_checklist(
+        self,
+        *,
+        client_name: str,
+        evidence_run_id: str,
+        framework_id: str,
+        requirements: Mapping[str, Requirement],
+        evidence_host_id: str | None = None,
+        session_number: int | None = None,
+        hostname: str | None = None,
+        ssh_host: str | None = None,
+        evidence_relpath: str = "",
+    ) -> None:
+        """Upsert full checklist + empty host_results shell before assess.
+
+        Ensures ``/list-status`` can show ``filled/total`` with the expected
+        requirement count while cells are still being filled live.
+
+        Args:
+            client_name: Client display name.
+            evidence_run_id: Evidence folder name.
+            framework_id: Framework key.
+            requirements: Full checklist map.
+            evidence_host_id: Host slug / key.
+            session_number: Explicit session when known.
+            hostname: Resolved hostname when known.
+            ssh_host: SSH target / IP when known.
+            evidence_relpath: Relative evidence path.
+        """
+        if not self.enabled or not requirements:
+            return
+        client = (client_name or evidence_run_id or "client").strip()
+        run_id = (evidence_run_id or "").strip() or make_client_slug(client)
+        fw = (framework_id or "").strip() or "framework"
+        if "/" in fw:
+            host_from_key, bare = fw.split("/", 1)
+            fw = bare or fw
+            if not evidence_host_id:
+                evidence_host_id = host_from_key
+        host_key = (evidence_host_id or "").strip() or "_default"
+        slug = make_client_slug(client)
+        dsn = await self._connect_dsn_for_client(slug)
+        conn = await asyncpg.connect(dsn)
+        try:
+            await self._ensure_schema(conn)
+            async with conn.transaction():
+                sess = await self._resolve_session_row(
+                    conn,
+                    slug=slug,
+                    client=client,
+                    run_id=run_id,
+                    session_number=session_number,
+                    report_language=None,
+                    evidence_path=evidence_relpath or run_id,
+                    framework_id=fw,
+                )
+                session_pk = int(sess["id"])
+                sess_num = int(sess["session_number"])
+                host_pk = await self._upsert_host_identity(
+                    conn,
+                    host_key=host_key,
+                    hostname=hostname,
+                    ssh_host=ssh_host,
+                )
+                for req in requirements.values():
+                    await conn.execute(
+                        """
+                        INSERT INTO framework_requirements (
+                            session_id, session_number, framework_id, req_id,
+                            title, category, severity, how_to_verify, pass_criteria
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                        ON CONFLICT (session_id, framework_id, req_id) DO UPDATE SET
+                            title = EXCLUDED.title,
+                            category = EXCLUDED.category,
+                            severity = EXCLUDED.severity,
+                            how_to_verify = EXCLUDED.how_to_verify,
+                            pass_criteria = EXCLUDED.pass_criteria,
+                            session_number = EXCLUDED.session_number
+                        """,
+                        session_pk,
+                        sess_num,
+                        fw,
+                        req.id,
+                        req.title or "",
+                        req.category or "",
+                        req.severity or "",
+                        req.how_to_verify or "",
+                        req.pass_criteria or "",
+                    )
+                empty_metrics = {
+                    "pass": 0,
+                    "fail": 0,
+                    "partial": 0,
+                    "error": 0,
+                    "skipped": 0,
+                    "assessed": 0,
+                    "compliance_pct": 0.0,
+                }
+                await self._upsert_host_result_row(
+                    conn,
+                    session_pk=session_pk,
+                    sess_num=sess_num,
+                    host_pk=int(host_pk),
+                    framework_id=fw,
+                    source="assess_start",
+                    metrics=empty_metrics,
+                    evidence_relpath=evidence_relpath or run_id,
+                    report_relpath="",
+                    preserve_metrics_on_conflict=True,
+                )
+        finally:
+            await conn.close()
+
+    async def _upsert_host_identity(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        host_key: str,
+        hostname: str | None = None,
+        ssh_host: str | None = None,
+    ) -> int:
+        """Insert/update ``hosts`` row, preferring real hostname/IP when given."""
+        key = (host_key or "").strip() or "_default"
+        hn = (hostname or "").strip() or None
+        ip = (ssh_host or "").strip() or None
+        if key != "_default":
+            if hn is None and not _looks_like_ip(key):
+                hn = key
+            if ip is None and _looks_like_ip(key):
+                ip = key
+        return int(
+            await conn.fetchval(
+                """
+                INSERT INTO hosts (host_key, ssh_host, hostname, last_seen_at)
+                VALUES ($1, $2, $3, now())
+                ON CONFLICT (host_key) DO UPDATE SET
+                    last_seen_at = now(),
+                    ssh_host = COALESCE(EXCLUDED.ssh_host, hosts.ssh_host),
+                    hostname = COALESCE(EXCLUDED.hostname, hosts.hostname)
+                RETURNING id
+                """,
+                key,
+                ip,
+                hn,
+            )
+        )
+
     async def list_sessions(
         self,
         *,
@@ -691,19 +1045,11 @@ class ResultsStore:
                 session_pk = int(sess["id"])
                 sess_num = int(sess["session_number"])
 
-                host_pk = await conn.fetchval(
-                    """
-                    INSERT INTO hosts (host_key, ssh_host, hostname, last_seen_at)
-                    VALUES ($1, $2, $3, now())
-                    ON CONFLICT (host_key) DO UPDATE SET
-                        last_seen_at = now(),
-                        ssh_host = COALESCE(EXCLUDED.ssh_host, hosts.ssh_host),
-                        hostname = COALESCE(EXCLUDED.hostname, hosts.hostname)
-                    RETURNING id
-                    """,
-                    host_key,
-                    host_key if host_key != "_default" else None,
-                    host_key if host_key != "_default" else None,
+                host_pk = await self._upsert_host_identity(
+                    conn,
+                    host_key=host_key,
+                    hostname=None,
+                    ssh_host=None,
                 )
                 if requirements:
                     for req in requirements.values():
@@ -731,70 +1077,27 @@ class ResultsStore:
                             req.how_to_verify or "",
                             req.pass_criteria or "",
                         )
-                hr_pk = await conn.fetchval(
-                    """
-                    INSERT INTO host_results (
-                        session_id, session_number, host_id, framework_id,
-                        finished_at, source,
-                        pass_count, fail_count, partial_count, error_count,
-                        skipped_count, assessed, compliance_pct,
-                        evidence_relpath, report_relpath
-                    ) VALUES (
-                        $1,$2,$3,$4,now(),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
-                    ) RETURNING id
-                    """,
-                    session_pk,
-                    sess_num,
-                    host_pk,
-                    fw,
-                    source,
-                    int(metrics.get("pass", 0)),
-                    int(metrics.get("fail", 0)),
-                    int(metrics.get("partial", 0)),
-                    int(metrics.get("error", 0)),
-                    int(metrics.get("skipped", 0)),
-                    int(metrics.get("assessed", 0)),
-                    float(metrics.get("compliance_pct", 0.0)),
-                    evidence_relpath or run_id,
-                    report_rel,
+                hr_pk = await self._upsert_host_result_row(
+                    conn,
+                    session_pk=session_pk,
+                    sess_num=sess_num,
+                    host_pk=int(host_pk),
+                    framework_id=fw,
+                    source=source,
+                    metrics=metrics,
+                    evidence_relpath=evidence_relpath or run_id,
+                    report_relpath=report_rel,
                 )
                 req_map = requirements or {}
                 for _req_id, finding in findings.items():
                     req = req_map.get(finding.requirement_id) if req_map else None
-                    await conn.execute(
-                        """
-                        INSERT INTO requirement_results (
-                            host_result_id, session_id, session_number,
-                            req_id, title, category, severity,
-                            status, pass_criteria, how_to_verify,
-                            observation, recommendation, notes
-                        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-                        ON CONFLICT (host_result_id, req_id) DO UPDATE SET
-                            title = EXCLUDED.title,
-                            category = EXCLUDED.category,
-                            severity = EXCLUDED.severity,
-                            status = EXCLUDED.status,
-                            pass_criteria = EXCLUDED.pass_criteria,
-                            how_to_verify = EXCLUDED.how_to_verify,
-                            observation = EXCLUDED.observation,
-                            recommendation = EXCLUDED.recommendation,
-                            notes = EXCLUDED.notes,
-                            session_id = EXCLUDED.session_id,
-                            session_number = EXCLUDED.session_number
-                        """,
-                        hr_pk,
-                        session_pk,
-                        sess_num,
-                        finding.requirement_id,
-                        finding.title or (req.title if req else ""),
-                        finding.category or (req.category if req else ""),
-                        finding.severity or (req.severity if req else ""),
-                        finding.status,
-                        finding.pass_criteria or (req.pass_criteria if req else ""),
-                        (req.how_to_verify if req else ""),
-                        finding.evidence or "",
-                        finding.remediation or "",
-                        finding.notes or "",
+                    await self._upsert_requirement_cell(
+                        conn,
+                        host_result_id=hr_pk,
+                        session_pk=session_pk,
+                        sess_num=sess_num,
+                        finding=finding,
+                        requirement=req,
                     )
                 # Mark completed when finalize/update_report writes results.
                 if source in {"finalize", "update_report"}:
@@ -814,6 +1117,377 @@ class ResultsStore:
                     )
         finally:
             await conn.close()
+
+    async def upsert_requirement_result(
+        self,
+        *,
+        client_name: str,
+        evidence_run_id: str,
+        framework_id: str,
+        evidence_host_id: str | None,
+        finding: Finding,
+        requirement: Requirement | None = None,
+        evidence_relpath: str = "",
+        source: str = "live",
+        session_number: int | None = None,
+        hostname: str | None = None,
+        ssh_host: str | None = None,
+    ) -> None:
+        """Upsert one filled REQ cell during assess (does not complete session).
+
+        Creates or reuses the session's host_results row for
+        ``(session, host, framework)``, writes the cell, and refreshes
+        aggregate metrics from all cells for that host result.
+
+        Args:
+            client_name: Client display name.
+            evidence_run_id: Evidence folder name on disk.
+            framework_id: Framework key (may be ``host/fw``).
+            evidence_host_id: Host slug for multi-host runs.
+            finding: Filled finding for one requirement.
+            requirement: Optional checklist row for metadata.
+            evidence_relpath: Relative path to evidence root.
+            source: Write origin (``live``, ``refill``, …).
+            session_number: Explicit session from run meta when known.
+            hostname: Resolved hostname when known.
+            ssh_host: SSH target / IP when known.
+        """
+        if not self.enabled:
+            return
+        client = (client_name or evidence_run_id or "client").strip()
+        run_id = (evidence_run_id or "").strip() or make_client_slug(client)
+        fw = (framework_id or "").strip() or "framework"
+        if "/" in fw:
+            host_from_key, bare = fw.split("/", 1)
+            fw = bare or fw
+            if not evidence_host_id:
+                evidence_host_id = host_from_key
+        host_key = (evidence_host_id or "").strip() or "_default"
+        slug = make_client_slug(client)
+
+        dsn = await self._connect_dsn_for_client(slug)
+        conn = await asyncpg.connect(dsn)
+        try:
+            await self._ensure_schema(conn)
+            async with conn.transaction():
+                sess = await self._resolve_session_row(
+                    conn,
+                    slug=slug,
+                    client=client,
+                    run_id=run_id,
+                    session_number=session_number,
+                    report_language=None,
+                    evidence_path=evidence_relpath or run_id,
+                    framework_id=fw,
+                )
+                session_pk = int(sess["id"])
+                sess_num = int(sess["session_number"])
+
+                host_pk = await self._upsert_host_identity(
+                    conn,
+                    host_key=host_key,
+                    hostname=hostname,
+                    ssh_host=ssh_host,
+                )
+                if requirement is not None:
+                    await conn.execute(
+                        """
+                        INSERT INTO framework_requirements (
+                            session_id, session_number, framework_id, req_id,
+                            title, category, severity, how_to_verify, pass_criteria
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                        ON CONFLICT (session_id, framework_id, req_id) DO UPDATE SET
+                            title = EXCLUDED.title,
+                            category = EXCLUDED.category,
+                            severity = EXCLUDED.severity,
+                            how_to_verify = EXCLUDED.how_to_verify,
+                            pass_criteria = EXCLUDED.pass_criteria,
+                            session_number = EXCLUDED.session_number
+                        """,
+                        session_pk,
+                        sess_num,
+                        fw,
+                        requirement.id,
+                        requirement.title or "",
+                        requirement.category or "",
+                        requirement.severity or "",
+                        requirement.how_to_verify or "",
+                        requirement.pass_criteria or "",
+                    )
+
+                empty_metrics = {
+                    "pass": 0,
+                    "fail": 0,
+                    "partial": 0,
+                    "error": 0,
+                    "skipped": 0,
+                    "assessed": 0,
+                    "compliance_pct": 0.0,
+                }
+                hr_pk = await self._upsert_host_result_row(
+                    conn,
+                    session_pk=session_pk,
+                    sess_num=sess_num,
+                    host_pk=int(host_pk),
+                    framework_id=fw,
+                    source=source,
+                    metrics=empty_metrics,
+                    evidence_relpath=evidence_relpath or run_id,
+                    report_relpath="",
+                    preserve_metrics_on_conflict=True,
+                )
+                await self._upsert_requirement_cell(
+                    conn,
+                    host_result_id=hr_pk,
+                    session_pk=session_pk,
+                    sess_num=sess_num,
+                    finding=finding,
+                    requirement=requirement,
+                )
+                await self._refresh_host_result_metrics(conn, hr_pk)
+                await conn.execute(
+                    """
+                    UPDATE audit_sessions SET
+                        framework_id = COALESCE(NULLIF($2, ''), framework_id)
+                    WHERE id = $1 AND status IN ('running', 'interrupted')
+                    """,
+                    session_pk,
+                    fw,
+                )
+        finally:
+            await conn.close()
+
+    async def _upsert_host_result_row(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        session_pk: int,
+        sess_num: int,
+        host_pk: int,
+        framework_id: str,
+        source: str,
+        metrics: Mapping[str, Any],
+        evidence_relpath: str,
+        report_relpath: str,
+        preserve_metrics_on_conflict: bool = False,
+    ) -> int:
+        """Insert or update the single host_results row for session/host/fw.
+
+        Args:
+            conn: Open connection (within transaction).
+            session_pk: ``audit_sessions.id``.
+            sess_num: Session number.
+            host_pk: ``hosts.id``.
+            framework_id: Bare framework id.
+            source: Write origin label.
+            metrics: Aggregate counters (ignored on conflict when preserving).
+            evidence_relpath: Evidence path for the row.
+            report_relpath: Report path (may be empty during live writes).
+            preserve_metrics_on_conflict: When True, keep existing aggregates
+                until :meth:`_refresh_host_result_metrics` runs.
+
+        Returns:
+            ``host_results.id``.
+        """
+        if preserve_metrics_on_conflict:
+            return int(
+                await conn.fetchval(
+                    """
+                    INSERT INTO host_results (
+                        session_id, session_number, host_id, framework_id,
+                        finished_at, source,
+                        pass_count, fail_count, partial_count, error_count,
+                        skipped_count, assessed, compliance_pct,
+                        evidence_relpath, report_relpath
+                    ) VALUES (
+                        $1,$2,$3,$4,now(),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
+                    )
+                    ON CONFLICT (session_id, host_id, framework_id) DO UPDATE SET
+                        finished_at = now(),
+                        source = EXCLUDED.source,
+                        session_number = EXCLUDED.session_number,
+                        evidence_relpath = COALESCE(
+                            NULLIF(EXCLUDED.evidence_relpath, ''),
+                            host_results.evidence_relpath
+                        ),
+                        report_relpath = COALESCE(
+                            NULLIF(EXCLUDED.report_relpath, ''),
+                            host_results.report_relpath
+                        )
+                    RETURNING id
+                    """,
+                    session_pk,
+                    sess_num,
+                    host_pk,
+                    framework_id,
+                    source,
+                    int(metrics.get("pass", 0)),
+                    int(metrics.get("fail", 0)),
+                    int(metrics.get("partial", 0)),
+                    int(metrics.get("error", 0)),
+                    int(metrics.get("skipped", 0)),
+                    int(metrics.get("assessed", 0)),
+                    float(metrics.get("compliance_pct", 0.0)),
+                    evidence_relpath,
+                    report_relpath,
+                )
+            )
+        return int(
+            await conn.fetchval(
+                """
+                INSERT INTO host_results (
+                    session_id, session_number, host_id, framework_id,
+                    finished_at, source,
+                    pass_count, fail_count, partial_count, error_count,
+                    skipped_count, assessed, compliance_pct,
+                    evidence_relpath, report_relpath
+                ) VALUES (
+                    $1,$2,$3,$4,now(),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
+                )
+                ON CONFLICT (session_id, host_id, framework_id) DO UPDATE SET
+                    finished_at = now(),
+                    source = EXCLUDED.source,
+                    session_number = EXCLUDED.session_number,
+                    pass_count = EXCLUDED.pass_count,
+                    fail_count = EXCLUDED.fail_count,
+                    partial_count = EXCLUDED.partial_count,
+                    error_count = EXCLUDED.error_count,
+                    skipped_count = EXCLUDED.skipped_count,
+                    assessed = EXCLUDED.assessed,
+                    compliance_pct = EXCLUDED.compliance_pct,
+                    evidence_relpath = COALESCE(
+                        NULLIF(EXCLUDED.evidence_relpath, ''),
+                        host_results.evidence_relpath
+                    ),
+                    report_relpath = COALESCE(
+                        NULLIF(EXCLUDED.report_relpath, ''),
+                        host_results.report_relpath
+                    )
+                RETURNING id
+                """,
+                session_pk,
+                sess_num,
+                host_pk,
+                framework_id,
+                source,
+                int(metrics.get("pass", 0)),
+                int(metrics.get("fail", 0)),
+                int(metrics.get("partial", 0)),
+                int(metrics.get("error", 0)),
+                int(metrics.get("skipped", 0)),
+                int(metrics.get("assessed", 0)),
+                float(metrics.get("compliance_pct", 0.0)),
+                evidence_relpath,
+                report_relpath,
+            )
+        )
+
+    async def _upsert_requirement_cell(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        host_result_id: int,
+        session_pk: int,
+        sess_num: int,
+        finding: Finding,
+        requirement: Requirement | None,
+    ) -> None:
+        """Upsert one requirement_results row for a host result."""
+        await conn.execute(
+            """
+            INSERT INTO requirement_results (
+                host_result_id, session_id, session_number,
+                req_id, title, category, severity,
+                status, pass_criteria, how_to_verify,
+                observation, recommendation, notes
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            ON CONFLICT (host_result_id, req_id) DO UPDATE SET
+                title = EXCLUDED.title,
+                category = EXCLUDED.category,
+                severity = EXCLUDED.severity,
+                status = EXCLUDED.status,
+                pass_criteria = EXCLUDED.pass_criteria,
+                how_to_verify = EXCLUDED.how_to_verify,
+                observation = EXCLUDED.observation,
+                recommendation = EXCLUDED.recommendation,
+                notes = EXCLUDED.notes,
+                session_id = EXCLUDED.session_id,
+                session_number = EXCLUDED.session_number
+            """,
+            host_result_id,
+            session_pk,
+            sess_num,
+            finding.requirement_id,
+            finding.title or (requirement.title if requirement else ""),
+            finding.category or (requirement.category if requirement else ""),
+            finding.severity or (requirement.severity if requirement else ""),
+            finding.status,
+            finding.pass_criteria
+            or (requirement.pass_criteria if requirement else ""),
+            (requirement.how_to_verify if requirement else ""),
+            finding.evidence or "",
+            finding.remediation or "",
+            finding.notes or "",
+        )
+
+    async def _refresh_host_result_metrics(
+        self,
+        conn: asyncpg.Connection,
+        host_result_id: int,
+    ) -> None:
+        """Recompute host_results aggregates from requirement_results cells."""
+        rows = await conn.fetch(
+            """
+            SELECT req_id, status, title, severity
+            FROM requirement_results
+            WHERE host_result_id = $1
+            """,
+            host_result_id,
+        )
+        valid = {"pass", "fail", "partial", "error", "skipped"}
+        findings: dict[str, Finding] = {}
+        for r in rows:
+            status = str(r["status"] or "error").lower()
+            if status not in valid:
+                status = "error"
+            rid = str(r["req_id"] or "")
+            findings[rid] = Finding(
+                requirement_id=rid,
+                title=str(r["title"] or ""),
+                status=status,  # type: ignore[arg-type]
+                severity=str(r["severity"] or ""),
+            )
+        metrics = findings_to_compliance_metrics(findings) if findings else {
+            "pass": 0,
+            "fail": 0,
+            "partial": 0,
+            "error": 0,
+            "skipped": 0,
+            "assessed": 0,
+            "compliance_pct": 0.0,
+        }
+        await conn.execute(
+            """
+            UPDATE host_results SET
+                pass_count = $2,
+                fail_count = $3,
+                partial_count = $4,
+                error_count = $5,
+                skipped_count = $6,
+                assessed = $7,
+                compliance_pct = $8,
+                finished_at = now()
+            WHERE id = $1
+            """,
+            host_result_id,
+            int(metrics.get("pass", 0)),
+            int(metrics.get("fail", 0)),
+            int(metrics.get("partial", 0)),
+            int(metrics.get("error", 0)),
+            int(metrics.get("skipped", 0)),
+            int(metrics.get("assessed", 0)),
+            float(metrics.get("compliance_pct", 0.0)),
+        )
 
     async def _resolve_session_row(
         self,
@@ -952,10 +1626,32 @@ class ResultsStore:
     async def _ensure_schema(self, conn: asyncpg.Connection) -> None:
         """Execute schema DDL on an open connection.
 
+        Deduplicates legacy multi-row host_results before creating the
+        unique ``(session_id, host_id, framework_id)`` index.
+
         Args:
             conn: asyncpg connection with execute privileges.
         """
         await conn.execute(_SCHEMA_SQL)
+        # Older builds inserted a new host_results row on every finalize.
+        # Keep the newest id per (session, host, framework); CASCADE drops
+        # orphaned requirement_results on the deleted rows.
+        await conn.execute(
+            """
+            DELETE FROM host_results a
+            USING host_results b
+            WHERE a.session_id = b.session_id
+              AND a.host_id = b.host_id
+              AND a.framework_id = b.framework_id
+              AND a.id < b.id
+            """
+        )
+        await conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS host_results_session_host_fw_uidx
+                ON host_results (session_id, host_id, framework_id)
+            """
+        )
 
 
 _STORE: ResultsStore | None = None
@@ -1020,6 +1716,36 @@ async def record_results_safe(
         await store.record_host_framework_audit(**kwargs)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Results DB write failed: %s", exc)
+
+
+async def record_requirement_result_safe(
+    settings: Settings,
+    **kwargs: Any,
+) -> None:
+    """Best-effort live per-REQ warehouse upsert during assess.
+
+    Args:
+        settings: Auditor settings.
+        **kwargs: Forwarded to :meth:`ResultsStore.upsert_requirement_result`.
+    """
+    store = get_results_store(settings)
+    if store is None:
+        return
+    try:
+        await store.upsert_requirement_result(**kwargs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Results DB live REQ write failed: %s", exc)
+
+
+async def snapshot_checklist_safe(settings: Settings, **kwargs: Any) -> None:
+    """Best-effort checklist snapshot before assess (for N/M ready status)."""
+    store = get_results_store(settings)
+    if store is None:
+        return
+    try:
+        await store.snapshot_framework_checklist(**kwargs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Results DB checklist snapshot failed: %s", exc)
 
 
 def format_sessions_markdown(sessions: Sequence[AuditSessionInfo]) -> str:
@@ -1275,6 +2001,101 @@ def parse_list_results_request(
     return client_hint, session_num
 
 
+def parse_list_status_request(
+    user_text: str,
+) -> tuple[str | None, int | None]:
+    """Extract ``(client_name, session_number)`` from a list-status phrase.
+
+    Supports::
+
+        List status for AlphaCo session 2
+        list-status AlphaCo 2
+        /list-status
+    """
+    text = (user_text or "").strip()
+    if not text:
+        return None, None
+
+    m = re.search(
+        r"\blist[- ]?status\s+([A-Za-z0-9][A-Za-z0-9._-]{1,63})\s+#?(\d+)\b",
+        text,
+        re.I,
+    )
+    if m:
+        return m.group(1), int(m.group(2))
+
+    m = re.search(
+        r"\b(?:for|для)\s+([A-Za-z0-9][A-Za-z0-9 _.-]{1,80}?)\s+"
+        r"(?:session|сесси[яию]|#)\s*#?(\d+)\b",
+        text,
+        re.I,
+    )
+    if m:
+        return m.group(1).strip().rstrip("?.!,"), int(m.group(2))
+
+    client_hint = None
+    cm = re.search(
+        r"\b(?:for|для)\s+([A-Za-z0-9][A-Za-z0-9 _.-]{1,80})",
+        text,
+        re.I,
+    )
+    if cm:
+        client_hint = cm.group(1).strip().rstrip("?.!,")
+    session_num = None
+    sm = re.search(
+        r"(?:session|сесси[яию]|#)\s*#?(\d+)\b",
+        text,
+        re.I,
+    )
+    if sm:
+        session_num = int(sm.group(1))
+    return client_hint, session_num
+
+
+def parse_list_host_request(
+    user_text: str,
+) -> tuple[str | None, str | None, str | None]:
+    """Extract ``(hostname, framework_id, client_hint)`` from a list-host phrase.
+
+    Supports::
+
+        list-host pg-db it_audit
+        List host 10.200.29.79 framework ubuntu_cis_24_l2
+        list-host 10.0.0.1 it_audit for AlphaCo
+    """
+    text = (user_text or "").strip()
+    if not text:
+        return None, None, None
+
+    client_hint = None
+    cm = re.search(
+        r"\b(?:for|для)\s+([A-Za-z0-9][A-Za-z0-9 _.-]{1,80})",
+        text,
+        re.I,
+    )
+    if cm:
+        client_hint = cm.group(1).strip().rstrip("?.!,")
+
+    m = re.search(
+        r"\blist[- ]?host\s+(\S+)\s+(?:framework\s+)?([A-Za-z0-9][A-Za-z0-9._-]{1,80})",
+        text,
+        re.I,
+    )
+    if m:
+        return m.group(1).strip(), m.group(2).strip(), client_hint
+
+    m = re.search(
+        r"\b(?:host|хост)\s+(\S+)\s+(?:framework|фреймворк)\s+"
+        r"([A-Za-z0-9][A-Za-z0-9._-]{1,80})",
+        text,
+        re.I,
+    )
+    if m:
+        return m.group(1).strip(), m.group(2).strip(), client_hint
+
+    return None, None, client_hint
+
+
 def _truncate_cell(text: str, limit: int = 140) -> str:
     raw = re.sub(r"\s+", " ", (text or "").strip())
     if len(raw) <= limit:
@@ -1406,6 +2227,182 @@ async def list_results_report(
             f"**{client_name}**."
         )
     return format_session_results_markdown(sess, hosts, reqs)
+
+
+def format_session_status_markdown(
+    session: AuditSessionInfo,
+    host_rows: Sequence[Mapping[str, Any]],
+) -> str:
+    """Operator-facing host progress table for ``/list-status``."""
+    lines = [
+        f"## Host status — **{session.client_name or session.client_slug}** "
+        f"session **#{session.session_number}**",
+        "",
+        f"- **Session status:** `{session.status}`",
+        f"- **Evidence:** `{session.evidence_run_id or '—'}`",
+        "",
+    ]
+    if not host_rows:
+        lines.append("_No host/framework rows stored for this session yet._")
+        lines.append("")
+        lines.append(
+            "Rows appear when assess starts (checklist snapshot) and grow as "
+            "each REQ is filled live."
+        )
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "| Hostname | IP | Framework | Status |",
+            "|----------|----|-----------|--------|",
+        ]
+    )
+    for h in host_rows:
+        lines.append(
+            f"| `{h.get('hostname') or '—'}` | `{h.get('ip') or '—'}` | "
+            f"`{h.get('framework_id') or '—'}` | "
+            f"{h.get('ready_label') or '—'} |"
+        )
+    lines.append("")
+    lines.append(
+        "Next: `/list-results` for REQ cells, or `/list-host <hostname> "
+        "<framework>` for one host."
+    )
+    return "\n".join(lines)
+
+
+def format_host_framework_results_markdown(
+    meta: Mapping[str, Any],
+    req_rows: Sequence[Mapping[str, Any]],
+) -> str:
+    """Operator-facing REQ table for ``/list-host``."""
+    lines = [
+        f"## Host results — **{meta.get('hostname') or meta.get('host_key') or '—'}** "
+        f"/ `{meta.get('framework_id') or '—'}`",
+        "",
+        f"- **Client:** {meta.get('client_name') or meta.get('client_slug') or '—'}",
+        f"- **Session:** **#{meta.get('session_number') or '—'}** "
+        f"(`{meta.get('session_status') or '—'}`)",
+        f"- **IP / SSH:** `{meta.get('ip') or '—'}`",
+        f"- **Compliance:** {float(meta.get('compliance_pct') or 0):.1f}% "
+        f"(pass {int(meta.get('pass_count') or 0)} / "
+        f"fail {int(meta.get('fail_count') or 0)} / "
+        f"partial {int(meta.get('partial_count') or 0)} / "
+        f"error {int(meta.get('error_count') or 0)} / "
+        f"skip {int(meta.get('skipped_count') or 0)})",
+        "",
+    ]
+    if not req_rows:
+        lines.append("_No requirement cells stored for this host/framework yet._")
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "| REQ | Title | Status | Severity | Observation |",
+            "|-----|-------|--------|----------|-------------|",
+        ]
+    )
+    for r in req_rows:
+        title = _truncate_cell(str(r.get("title") or ""), 48).replace("|", "/")
+        obs = _truncate_cell(str(r.get("observation") or ""), 100).replace("|", "/")
+        lines.append(
+            f"| `{r.get('req_id') or '—'}` | {title or '—'} | "
+            f"`{r.get('status') or '—'}` | {r.get('severity') or '—'} | "
+            f"{obs or '—'} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+async def list_status_report(
+    settings: Settings,
+    *,
+    client_name: str | None,
+    session_number: int | None = None,
+) -> str:
+    """Build a markdown host-status table for chat (``/list-status``)."""
+    store = get_results_store(settings)
+    if store is None:
+        return (
+            "Results warehouse is disabled. Set `RESULTS_DB_ENABLED=true` and "
+            "`RESULTS_DATABASE_URL` to track host progress in PostgreSQL."
+        )
+    if not client_name:
+        return (
+            "Specify a client, e.g. `List status for AlphaCo session 2` "
+            "or slash `/list-status`."
+        )
+
+    info: AuditSessionInfo | None = None
+    if session_number is not None:
+        info = await store.get_session(
+            client_name=client_name, session_number=session_number
+        )
+        if info is None:
+            return (
+                f"No warehouse session **#{session_number}** for "
+                f"**{client_name}**.\n\n"
+                f"Try `List audit sessions for {client_name}`."
+            )
+    else:
+        info = await store.get_latest_session(client_name=client_name)
+        if info is None:
+            return (
+                f"No warehouse sessions for **{client_name}**.\n\n"
+                "Start an audit (with `RESULTS_DB_ENABLED=true`) first."
+            )
+
+    sess, rows = await store.list_session_host_status(
+        client_name=client_name,
+        session_number=info.session_number,
+    )
+    if sess is None:
+        return (
+            f"Could not load session **#{info.session_number}** for "
+            f"**{client_name}**."
+        )
+    return format_session_status_markdown(sess, rows)
+
+
+async def list_host_report(
+    settings: Settings,
+    *,
+    hostname: str | None,
+    framework_id: str | None,
+    client_name: str | None = None,
+) -> str:
+    """Build a markdown REQ dump for one host+framework (``/list-host``)."""
+    store = get_results_store(settings)
+    if store is None:
+        return (
+            "Results warehouse is disabled. Set `RESULTS_DB_ENABLED=true` and "
+            "`RESULTS_DATABASE_URL` to store host assessment results."
+        )
+    if not hostname or not framework_id:
+        return (
+            "Specify hostname and framework, e.g. "
+            "`list-host 10.200.29.79 it_audit` or slash `/list-host`."
+        )
+
+    clients = (
+        [client_name]
+        if client_name
+        else discover_evidence_client_names(settings.evidence_dir)
+    )
+    meta, reqs = await store.list_host_framework_results(
+        hostname=hostname,
+        framework_id=framework_id,
+        client_names=[c for c in clients if c],
+        client_name=client_name,
+    )
+    if meta is None:
+        scope = f" for **{client_name}**" if client_name else ""
+        return (
+            f"No warehouse results for host `{hostname}` / framework "
+            f"`{framework_id}`{scope}.\n\n"
+            "Try `/list-status` or `/list-sessions` to find a session."
+        )
+    return format_host_framework_results_markdown(meta, reqs)
 
 
 async def resolve_continue_target(

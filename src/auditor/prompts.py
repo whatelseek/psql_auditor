@@ -274,3 +274,26 @@ INTAKE_INTERPRET_AUDIT_TYPE_PROMPT = """Operator reply:
 
 Return JSON with key audit_type = it|cybersecurity|both|null.
 """
+
+INTAKE_INTERPRET_SCOPE_SYSTEM = """You map an operator reply about an audit host→framework plan.
+
+Output ONLY JSON in one of these shapes:
+{{"action":"confirm"}}
+{{"action":"exclude","exclude_frameworks":["ubuntu_cis_24_l2"],"exclude_pairs":["10.0.0.1/postgres_cis"]}}
+{{"action":"unknown"}}
+
+Rules:
+- confirm / all / run all / ok / да / все / подтвердить → confirm
+- exclude / skip / remove / исключи / убери → exclude with ids from the plan
+- host/framework pairs go in exclude_pairs; bare framework ids in exclude_frameworks
+- unknown if unclear
+"""
+
+INTAKE_INTERPRET_SCOPE_PROMPT = """Proposed plan:
+{plan}
+
+Operator reply:
+{reply}
+
+Return JSON with action confirm|exclude|unknown.
+"""

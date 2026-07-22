@@ -54,6 +54,24 @@ PROMPTS: list[dict[str, object]] = [
         "tags": ["auditor", "sessions", "results"],
     },
     {
+        "command": "list-status",
+        "name": "List host status for session",
+        "content": (
+            "List status for {{client | text:required}} session "
+            "{{n | number:required}}"
+        ),
+        "tags": ["auditor", "sessions", "status"],
+    },
+    {
+        "command": "list-host",
+        "name": "List host assessment by framework",
+        "content": (
+            "list-host {{hostname | text:required}} "
+            "{{framework | text:required}}"
+        ),
+        "tags": ["auditor", "sessions", "results"],
+    },
+    {
         "command": "continue",
         "name": "Continue latest interrupted",
         "content": "continue",

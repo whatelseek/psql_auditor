@@ -681,6 +681,10 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
     intent = classify_intent(user_text, agents_dir=settings.agents_dir)
     if intent == "list_results":
         return await auditor.alist_results(user_text)
+    if intent == "list_status":
+        return await auditor.alist_status(user_text)
+    if intent == "list_host":
+        return await auditor.alist_host(user_text)
     if intent == "list_sessions":
         return await auditor.alist_sessions(user_text)
     if intent == "revise_req":
@@ -880,6 +884,18 @@ async def _stream_audit(
     elif intent == "list_results":
         yield _sse_chunk(
             "Loading warehouse REQ results for the requested session…\n\n",
+            model,
+            completion_id,
+        )
+    elif intent == "list_status":
+        yield _sse_chunk(
+            "Loading host status for the requested session…\n\n",
+            model,
+            completion_id,
+        )
+    elif intent == "list_host":
+        yield _sse_chunk(
+            "Loading assessment results for the requested host…\n\n",
             model,
             completion_id,
         )

@@ -15,6 +15,9 @@ Requires Open WebUI up and `.env` credentials (`OPEN_WEBUI_EMAIL` /
 
 Source of truth for the catalog: [`openwebui/install_owui_prompts.py`](../openwebui/install_owui_prompts.py).
 
+**Manual QA:** end-to-end pass/fail checklist for Open WebUI →
+[`owui-test-checklist.md`](owui-test-checklist.md).
+
 ## Which model?
 
 | Slash group | Model |
@@ -34,6 +37,8 @@ Requires `RESULTS_DB_ENABLED=true`. See also [`results-database.md`](results-dat
 | `/sessions-continue` | `Which sessions need continue?` | Interrupted sessions only |
 | `/list-sessions-client` | `Show me audit sessions for {{client}}` | Filter by client name |
 | `/list-results` | `List results for {{client}} session {{n}}` | Warehouse REQ cells + host summary for that session |
+| `/list-status` | `List status for {{client}} session {{n}}` | Hostname / IP / framework / `N/M ready` progress table |
+| `/list-host` | `list-host {{hostname}} {{framework}}` | REQ assessment cells for one host+framework |
 | `/continue` | `continue` | Newest interrupted session |
 | `/continue-session` | `continue session {{n}} for {{client}}` | Explicit session number |
 
@@ -48,6 +53,21 @@ List results for AlphaCo session 2
 list-results AlphaCo 2
 Show warehouse results for AlphaCo #2
 Результаты для AlphaCo сессия 2
+```
+
+Host progress (`/list-status`):
+
+```text
+List status for AlphaCo session 2
+list-status AlphaCo 2
+```
+
+Per-host framework dump (`/list-host`):
+
+```text
+list-host 10.200.29.79 it_audit
+list-host pg-db ubuntu_cis_24_l2 for AlphaCo
+List host 10.200.29.79 framework it_audit
 ```
 
 ### Audit start
@@ -96,10 +116,11 @@ When a command has `{{…}}` fields, Open WebUI shows a form before send:
 
 | Variable | Type | Used by |
 |----------|------|---------|
-| `client` | text (required) | sessions client, report, follow-up, dashboard, `/list-results` |
-| `n` | number (required) | `/continue-session`, `/list-results` |
+| `client` | text (required) | sessions client, report, follow-up, dashboard, `/list-results`, `/list-status` |
+| `n` | number (required) | `/continue-session`, `/list-results`, `/list-status` |
+| `hostname` | text (required) | `/list-host` |
 | `req` | text (required) | `/gather-req`, `/refill-req`, `/revise-req` (e.g. `REQ-001`) |
-| `framework` | text (default `it_audit`) | gather / revise |
+| `framework` | text | `/list-host` (required); gather/revise (default `it_audit`) |
 | `hint` | textarea | optional SSH/SQL hint on gather |
 | `command` | text | `/run-command` |
 | `sql` | textarea | `/run-sql` |

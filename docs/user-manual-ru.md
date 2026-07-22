@@ -172,6 +172,8 @@ python3 openwebui/install_owui_prompts.py
 |---------|------------|--------|
 | `/list-sessions` | Список сессий аудита | auditor |
 | `/list-results` | Ячейки склада (REQ) для клиента и `#N` | auditor |
+| `/list-status` | Статус хостов сессии (`N/M ready`) | auditor |
+| `/list-host` | Результаты по hostname + framework | auditor |
 | `/continue-session` | Продолжить сессию `#N` для клиента | auditor |
 | `/update-report` | Пересобрать отчёт / ZIP | auditor |
 | `/gather-req` / `/refill-req` / `/revise-req` | Дозапрос / обновление REQ | auditor |
@@ -196,7 +198,7 @@ python3 openwebui/install_owui_prompts.py
 Проведи аудит PostgreSQL и Ubuntu
 ```
 
-3. Ответьте на опрос: клиент → есть ли NetBox → есть ли доступ → тип аудита (`CIS` / `IT` / `both`).
+3. Ответьте на опрос: клиент → есть ли NetBox → есть ли доступ → **подтвердить/исключить фреймворки** по плану хостов (или `IT` / `Cybersecurity` / `both`, если живого плана нет).
 4. При HITL ответьте `skip` / `retry` (или `пропустить` / `повторить`).
 5. Скачайте ZIP по ссылке в конце ответа (`host_facts.md` / `INVENTORY.md` при необходимости).
 

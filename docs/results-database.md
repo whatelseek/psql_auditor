@@ -70,7 +70,30 @@ list-results AlphaCo 2
 
 Slash `/list-results` prompts for `client` and session `#`. Without a session
 number, the newest warehouse session for that client is used. Cells appear
-after finalize / **Update the report**.
+**as each REQ is assessed** (live dual-write), and again after finalize /
+**Update the report**.
+
+### List status (host progress for a session)
+
+```text
+List status for AlphaCo session 2
+list-status AlphaCo 2
+/list-status
+```
+
+Table columns: Hostname, IP, Framework, Status (`15/60 ready` = filled cells /
+checklist size).
+
+### List host (assessment by hostname + framework)
+
+```text
+list-host 10.200.29.79 it_audit
+list-host pg-db it_audit for AlphaCo
+/list-host
+```
+
+Shows the newest matching host/framework REQ table (optionally scoped with
+`for <Client>`).
 
 ### Resume (same session — does not allocate a new number)
 
@@ -116,7 +139,8 @@ Use **List audit sessions** / **Which sessions need continue?** instead, then
 |-------|------------------|
 | New audit (after intake) | `INSERT` next `session_number` (`#1`, `#2`, …) with status `running` |
 | Chat disconnect / cancel | status → `interrupted` (+ pending REQ ids, continue thread) |
-| Finalize / update report | host results + requirement cells written; status → `completed` |
+| Each filled REQ (assess) | live upsert of that cell + host aggregates (session stays `running`) |
+| Finalize / update report | refresh host results + cells; status → `completed` |
 | Continue | resumes the **same** session (does not allocate a new number) |
 
 ## Layout
@@ -152,10 +176,14 @@ Set `RESULTS_DB_PER_CLIENT=false` to write into the database named in
 | Hook | Source value | Trigger |
 |------|--------------|---------|
 | Intake complete | (session start) | New audit allocates `session_number` |
+| Assess (per REQ) | `live` | Each filled checklist cell during `assess_parallel` |
+| Refill finding | `refill` | Post-audit refill of observation/recommendation |
 | Finalize | `finalize` | End of a checklist audit (per host/framework) |
 | Update report | `update_report` | Post-audit `Update the report` / `Обнови отчёт` |
 
 Writes are best-effort: warehouse errors are logged and do not fail the audit.
+Each `(session, host, framework)` has a single `host_results` row; cells
+upsert on `(host_result_id, req_id)`.
 
 Disk `meta.json` also stores `results_session_number` so continue/finalize can
 re-attach to the correct session after restart.

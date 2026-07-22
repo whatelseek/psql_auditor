@@ -49,7 +49,10 @@ from auditor.secrets_file import (
     bind_ssh_target,
     list_client_ssh_targets,
 )
-from auditor.results_store import record_results_safe
+from auditor.results_store import (
+    record_requirement_result_safe,
+    record_results_safe,
+)
 from auditor.state import Finding, render_report
 
 if TYPE_CHECKING:
@@ -526,6 +529,32 @@ async def run_refill_finding(
         response = await graph.fill_model.ainvoke(fill_messages)
         finding = graph._cells_to_finding(req_id, requirement, response, evidence)
         store.write_finding(target.framework_id, req_id, finding.model_dump())
+        session_number = None
+        raw_sess = meta.get("results_session_number")
+        if raw_sess is not None:
+            try:
+                session_number = int(raw_sess)
+            except (TypeError, ValueError):
+                session_number = None
+        evidence_rel = ""
+        try:
+            evidence_rel = str(
+                store.root.relative_to(Path(settings.evidence_dir).resolve())
+            )
+        except ValueError:
+            evidence_rel = str(store.root)
+        await record_requirement_result_safe(
+            settings,
+            client_name=str(meta.get("client_name") or store.run_id),
+            evidence_run_id=store.run_id,
+            framework_id=target.framework_id,
+            evidence_host_id=target.host_id or None,
+            finding=finding,
+            requirement=requirement,
+            evidence_relpath=evidence_rel,
+            source="refill",
+            session_number=session_number,
+        )
         refilled.append(req_id)
         sections.extend(
             [

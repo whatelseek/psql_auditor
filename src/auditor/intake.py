@@ -1,9 +1,8 @@
-"""Pre-audit intake: client, CMDB, access, audit type (chat interrupts).
+"""Pre-audit intake: client, CMDB, access, framework scope (chat interrupts).
 
 This module drives the **four-step questionnaire** that runs before a checklist
 audit when intake is enabled. It collects client name, CMDB availability,
-server access, and audit domain (IT / Cybersecurity / both), then maps answers
-to framework selection and inventory probes.
+server access, then a host→framework proposal the operator can trim.
 
 Pipeline role:
     The graph interrupts with ``[AUDIT_INTAKE:<thread>]`` markers between
@@ -13,9 +12,11 @@ Pipeline role:
 Key entry points:
     :func:`prompts_for_language` — localized step prompts (EN/RU).
     :func:`format_intake_assistant_message` — embed intake marker in chat.
-    :func:`resolve_client_name` / :func:`resolve_yes_no` / :func:`resolve_audit_type` — structured answers.
-    :func:`frameworks_for_audit_type` — map domain choice to framework ids.
-    :func:`summarize_cmdb_capabilities` / :func:`summarize_access_probe` — probe result Markdown.
+    :func:`resolve_client_name` / :func:`resolve_yes_no` / :func:`resolve_audit_type`
+    / :func:`resolve_scope_decision` — structured answers.
+    :func:`frameworks_for_audit_type` — map domain choice to framework ids
+    (no-access fallback).
+    :func:`summarize_cmdb_capabilities` / :func:`summarize_access_probe` — probe Markdown.
 """
 
 from __future__ import annotations
@@ -42,6 +43,11 @@ _NO = re.compile(
     re.I,
 )
 
+_SCOPE_CONFIRM = re.compile(
+    r"^\s*(confirm|confirmed|ok|okay|all|run\s+all|yes|да|ок|все|подтверд\w*)\s*[.!]?\s*$",
+    re.I,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class IntakePrompts:
@@ -51,12 +57,14 @@ class IntakePrompts:
         client: Step 1 — client / organization name.
         cmdb: Step 2 — CMDB / NetBox availability (yes/no).
         access: Step 3 — SSH/service access for probing.
-        audit_type: Step 4 — IT vs Cybersecurity vs both.
+        scope: Step 4 — confirm or exclude proposed host→framework jobs.
+        audit_type: Fallback step 4 when no host plan (no access) — domain pick.
     """
 
     client: str
     cmdb: str
     access: str
+    scope: str
     audit_type: str
 
 
@@ -283,15 +291,25 @@ def prompts_for_language(code: str) -> IntakePrompts:
             access=(
                 "## Предварительный опрос (3/4)\n\n"
                 "Есть ли у меня **доступ к серверам и сервисам** для проверки?\n\n"
-                "Ответьте **да** или **нет**."
+                "Ответьте **да** или **нет**.\n\n"
+                "При ответе **да** будет выполнен предварительный обход хостов "
+                "и предложен план фреймворков."
+            ),
+            scope=(
+                "## Предварительный опрос (4/4)\n\n"
+                "Ниже — предложенный план **хост → фреймворки** после проверки доступа.\n\n"
+                "Ответьте **подтвердить** / **все**, чтобы запустить весь план, "
+                "или перечислите, что **исключить** из области, например:\n"
+                "- `exclude ubuntu_cis_24_l2, postgres_cis`\n"
+                "- `exclude 10.0.0.1/ubuntu_cis_24_l2`\n"
             ),
             audit_type=(
                 "## Предварительный опрос (4/4)\n\n"
+                "Живой план хостов недоступен (нет доступа / нет хостов в inventory).\n\n"
                 "Какой **домен** аудита провести?\n\n"
                 "1. **IT** — инвентаризация и базовые IT-контроли\n"
                 "2. **Cybersecurity** — CIS / hardening (Postgres / Ubuntu / Windows)\n"
                 "3. **both** — сначала IT, затем Cybersecurity\n\n"
-                "Фреймворки на каждом хосте выбираются автоматически по ОС и ПО.\n\n"
                 "Ответьте: `IT`, `Cybersecurity`, или `both`."
             ),
         )
@@ -308,18 +326,209 @@ def prompts_for_language(code: str) -> IntakePrompts:
         access=(
             "## Pre-audit intake (3/4)\n\n"
             "Do I have **access to servers and services** to probe?\n\n"
-            "Reply **yes** or **no**."
+            "Reply **yes** or **no**.\n\n"
+            "If **yes**, I will pre-scan inventory hosts and propose frameworks "
+            "per host."
+        ),
+        scope=(
+            "## Pre-audit intake (4/4)\n\n"
+            "Below is the proposed **host → frameworks** plan after the access check.\n\n"
+            "Reply **confirm** / **all** / **run all** to accept the full plan, "
+            "or list what to **exclude** from scope, e.g.:\n"
+            "- `exclude ubuntu_cis_24_l2, postgres_cis`\n"
+            "- `exclude 10.0.0.1/ubuntu_cis_24_l2`\n"
         ),
         audit_type=(
             "## Pre-audit intake (4/4)\n\n"
+            "No live host plan is available (no access / no inventory hosts).\n\n"
             "Which audit **domain** should I run?\n\n"
             "1. **IT** — inventory + baseline IT controls\n"
             "2. **Cybersecurity** — CIS / hardening (Postgres / Ubuntu / Windows)\n"
             "3. **both** — IT first, then Cybersecurity\n\n"
-            "Frameworks on each host are selected automatically from OS and software.\n\n"
             "Reply: `IT`, `Cybersecurity`, or `both`."
         ),
     )
+
+
+def format_proposed_jobs_markdown(proposed_jobs: list[dict[str, Any]]) -> str:
+    """Render proposed host→framework rows for the scope intake step."""
+    if not proposed_jobs:
+        return "_No hosts discovered — no framework plan yet._"
+    lines = [
+        "### Proposed host → frameworks",
+        "",
+        "| Host | Hostname | Frameworks |",
+        "|------|----------|------------|",
+    ]
+    for row in proposed_jobs:
+        host = str(row.get("ssh_host") or row.get("host_id") or "—")
+        hn = str(row.get("hostname") or "—")
+        fws = row.get("frameworks") or []
+        fw_txt = ", ".join(f"`{x}`" for x in fws) if fws else "—"
+        err = str(row.get("error") or "").strip()
+        if err:
+            fw_txt = f"{fw_txt} _(error: {err[:80]})_".strip()
+        lines.append(f"| `{host}` | {hn} | {fw_txt} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def is_scope_confirm(text: str) -> bool:
+    """Return True when the operator accepts the full proposed plan."""
+    return bool(_SCOPE_CONFIRM.match((text or "").strip()))
+
+
+def parse_scope_exclusions(
+    text: str,
+    proposed_jobs: list[dict[str, Any]],
+) -> tuple[set[str], set[tuple[str, str]]] | None:
+    """Parse framework / host-framework exclusions from free text.
+
+    Recognizes ``exclude …``, bare framework ids present in the proposal,
+    and ``host/framework`` pairs.
+
+    Args:
+        text: Operator reply.
+        proposed_jobs: Rows from stage-3 preaudit.
+
+    Returns:
+        ``(excluded_framework_ids, excluded_host_fw_pairs)``, or ``None``
+        when the reply is empty / not a confirm and not parseable.
+        Confirm synonyms return empty sets.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    if is_scope_confirm(raw):
+        return set(), set()
+
+    known_fws: set[str] = set()
+    known_hosts: set[str] = set()
+    for row in proposed_jobs:
+        known_hosts.add(str(row.get("host_id") or "").lower())
+        known_hosts.add(str(row.get("ssh_host") or "").lower())
+        for fw in row.get("frameworks") or []:
+            known_fws.add(str(fw).lower())
+
+    body = re.sub(
+        r"^\s*(exclude|исключ\w*|убери|skip|remove)\s*[:\-]?\s*",
+        "",
+        raw,
+        flags=re.I,
+    ).strip()
+    if not body:
+        return None
+
+    excluded_fws: set[str] = set()
+    excluded_pairs: set[tuple[str, str]] = set()
+    tokens = re.split(r"[,;\n]+|\s+and\s+|\s+и\s+", body, flags=re.I)
+    found_any = False
+    for tok in tokens:
+        piece = tok.strip().strip("`").strip()
+        if not piece:
+            continue
+        # host/framework or host:framework
+        m = re.match(
+            r"^([A-Za-z0-9._:-]+)\s*[/:]\s*([A-Za-z0-9._-]+)$",
+            piece,
+        )
+        if m:
+            host_key = m.group(1).lower()
+            fw_id = m.group(2).lower()
+            if fw_id in known_fws or any(
+                fw_id == str(x).lower()
+                for row in proposed_jobs
+                for x in (row.get("frameworks") or [])
+            ):
+                excluded_pairs.add((host_key, fw_id))
+                found_any = True
+            continue
+        low = piece.lower()
+        if low in known_fws:
+            # Preserve canonical casing from proposal
+            for row in proposed_jobs:
+                for fw in row.get("frameworks") or []:
+                    if str(fw).lower() == low:
+                        excluded_fws.add(str(fw))
+                        found_any = True
+            continue
+        # Host-only exclude: drop all frameworks on that host
+        if low in known_hosts:
+            for row in proposed_jobs:
+                hid = str(row.get("host_id") or "").lower()
+                ssh = str(row.get("ssh_host") or "").lower()
+                if low in {hid, ssh}:
+                    for fw in row.get("frameworks") or []:
+                        excluded_pairs.add((hid or ssh, str(fw).lower()))
+                    found_any = True
+
+    if not found_any:
+        return None
+    return excluded_fws, excluded_pairs
+
+
+def apply_scope_exclusions(
+    proposed_jobs: list[dict[str, Any]],
+    excluded_frameworks: set[str],
+    excluded_pairs: set[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    """Return proposed jobs with excluded frameworks / pairs removed."""
+    excl_fw = {x.lower() for x in excluded_frameworks}
+    excl_pairs = {(h.lower(), f.lower()) for h, f in excluded_pairs}
+    out: list[dict[str, Any]] = []
+    for row in proposed_jobs:
+        host_id = str(row.get("host_id") or "")
+        ssh = str(row.get("ssh_host") or "")
+        kept: list[str] = []
+        for fw in row.get("frameworks") or []:
+            fw_s = str(fw)
+            low = fw_s.lower()
+            if low in excl_fw:
+                continue
+            if (host_id.lower(), low) in excl_pairs or (ssh.lower(), low) in excl_pairs:
+                continue
+            kept.append(fw_s)
+        if not kept:
+            continue
+        out.append({**row, "frameworks": kept})
+    return out
+
+
+def resolve_scope_decision(
+    text: str,
+    proposed_jobs: list[dict[str, Any]],
+    llm_payload: dict[str, Any] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Resolve selected jobs from confirm / exclude reply (+ optional LLM).
+
+    Returns:
+        Filtered job list, or ``None`` when the reply is unclear (re-prompt).
+        Empty list means everything was excluded (caller should re-prompt).
+    """
+    parsed = parse_scope_exclusions(text, proposed_jobs)
+    if parsed is not None:
+        excl_fw, excl_pairs = parsed
+        return apply_scope_exclusions(proposed_jobs, excl_fw, excl_pairs)
+
+    if isinstance(llm_payload, dict):
+        action = str(llm_payload.get("action") or "").strip().lower()
+        if action in {"confirm", "all", "run_all", "accept"}:
+            return [dict(r) for r in proposed_jobs]
+        if action in {"exclude", "trim"}:
+            excl_fw = {
+                str(x).strip()
+                for x in (llm_payload.get("exclude_frameworks") or [])
+                if str(x).strip()
+            }
+            excl_pairs: set[tuple[str, str]] = set()
+            for pair in llm_payload.get("exclude_pairs") or []:
+                if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                    excl_pairs.add((str(pair[0]).lower(), str(pair[1]).lower()))
+                elif isinstance(pair, str) and "/" in pair:
+                    h, f = pair.split("/", 1)
+                    excl_pairs.add((h.strip().lower(), f.strip().lower()))
+            return apply_scope_exclusions(proposed_jobs, excl_fw, excl_pairs)
+    return None
 
 
 def format_intake_assistant_message(prompt: str, thread_id: str) -> str:

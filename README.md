@@ -160,6 +160,9 @@ Workspace prompts for auditor chat (`/list-sessions`, `/list-results`,
 `/continue-session`, `/update-report`, `/gather-req`, …). Full catalog:
 [`docs/owui-slash-commands.md`](docs/owui-slash-commands.md).
 
+Manual QA checklist (intake, live warehouse, continue, follow-up):
+[`docs/owui-test-checklist.md`](docs/owui-test-checklist.md).
+
 ```bash
 python3 openwebui/install_owui_prompts.py
 ```

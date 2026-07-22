@@ -18,15 +18,17 @@ Agent — intake (chat Q&A, marker [AUDIT_INTAKE:…])
   ├─ Has CMDB / NetBox?
   │     ├─ yes → probe NetBox MCP
   │     └─ no  → inventory only (never call NetBox)
-  ├─ Access to servers/services? → probe SSH + Postgres MCP
-  └─ Domain: IT / Cybersecurity / both
+  ├─ Access to servers/services?
+  │     ├─ yes → probe SSH + Postgres MCP, discover inventory hosts,
+  │     │         propose host → frameworks plan
+  │     └─ no  → no live host plan
+  └─ Scope (step 4)
+        ├─ with plan → confirm all, or exclude frameworks / host-fw pairs
+        └─ without plan → IT / Cybersecurity / both (legacy domain pick)
   │
   ▼
-Agent — discovery & assessment
-  ├─ Load all SSH hosts from inventory/<Client>/INVENTORY.md
-  ├─ Per host: OS + software signals → match agents/*.md detect rules
-  ├─ Announce host → framework map
-  ├─ Assess each (host, framework) under artifacts/<Client>/<host>/…
+Agent — assessment
+  ├─ Run selected (host, framework) jobs under artifacts/<Client>/<host>/…
   └─ Finalize → combined report.md + ZIP
 ```
 
@@ -39,9 +41,14 @@ Disable intake with `INTAKE_ENABLED=false` (Compose / `.env`).
    - `Start an audit`
    - `Run IT audit`
    - `Conduct cybersecurity audit`
-3. Answer intake questions (client name → CMDB → access → IT / Cybersecurity / both).
+3. Answer intake questions (client name → CMDB → access → **confirm/exclude frameworks**).
 4. If HITL prompts appear during the run, reply **skip** / **retry**.
 5. Download the **audit ZIP** from the chat reply.
+
+After access = **yes**, the agent pre-scans inventory hosts and shows a
+**host → frameworks** table. Reply `confirm` (or `all`) to run everything, or
+`exclude ubuntu_cis_24_l2, postgres_cis` / `exclude 10.0.0.1/ubuntu_cis_24_l2`
+to trim scope before assessment starts.
 
 When CMDB = **no**, the agent uses **inventory only** (no NetBox tools). Host list
 and credentials come from the client `INVENTORY.md` credentials table.
