@@ -46,6 +46,10 @@ Update the report
 Revise REQ-002 on ubuntu_cis for host 10.200.29.78
 ```
 
+Open WebUI slash shortcuts (model **auditor**): `/gather-req`,
+`/refill-req`, `/revise-req`, `/update-report` — see
+[`owui-slash-commands.md`](owui-slash-commands.md).
+
 ## Behaviour
 
 | Ask | What happens |

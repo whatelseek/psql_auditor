@@ -37,6 +37,9 @@ LiteLLM (self-signed) works.
    - Function calling: Default or Native (not Legacy)
 4. User Settings → Interface → enable **Allow iframe same origin** (required for streaming).
 
+Slash shortcut `/dashboard` (model **Visualizer**): see
+[`docs/owui-slash-commands.md`](../../docs/owui-slash-commands.md).
+
 Does not conflict with CIS compliance chart Tool/Filter under `openwebui/functions/`.
 
 To refresh from upstream:

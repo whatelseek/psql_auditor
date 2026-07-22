@@ -156,8 +156,9 @@ Bar charts of **compliance % by severity** (Overall / Critical / High / …):
 
 ## Open WebUI slash prompts
 
-Workspace prompts for auditor chat (`/list-sessions`, `/continue-session`,
-`/update-report`, `/gather-req`, …):
+Workspace prompts for auditor chat (`/list-sessions`, `/list-results`,
+`/continue-session`, `/update-report`, `/gather-req`, …). Full catalog:
+[`docs/owui-slash-commands.md`](docs/owui-slash-commands.md).
 
 ```bash
 python3 openwebui/install_owui_prompts.py

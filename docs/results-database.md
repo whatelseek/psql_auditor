@@ -28,8 +28,9 @@ routing. Prefer the examples below.
 
 Slash shortcuts (Workspace → Prompts) are installed by
 `python3 openwebui/install_owui_prompts.py` — e.g. `/list-sessions`,
-`/continue-session`, `/update-report`. Use model **auditor** (except
-`/dashboard` → **Visualizer**).
+`/continue-session`, `/update-report`. Full list:
+[`owui-slash-commands.md`](owui-slash-commands.md). Use model **auditor**
+(except `/dashboard` → **Visualizer**).
 
 ### List sessions / which need continue
 
@@ -56,6 +57,20 @@ interrupted rows.
 
 Requires `RESULTS_DB_ENABLED=true`. If the warehouse is off, the agent explains
 how to enable it.
+
+### List results (REQ cells for a session)
+
+Show filled warehouse cells for one client session (host summary + REQ table):
+
+```text
+List results for AlphaCo session 2
+list-results AlphaCo 2
+/list-results
+```
+
+Slash `/list-results` prompts for `client` and session `#`. Without a session
+number, the newest warehouse session for that client is used. Cells appear
+after finalize / **Update the report**.
 
 ### Resume (same session — does not allocate a new number)
 

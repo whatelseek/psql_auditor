@@ -13,9 +13,11 @@ from auditor.intent import classify_intent
 from auditor.results_store import (
     AuditSessionInfo,
     ResultsStore,
+    format_session_results_markdown,
     format_sessions_markdown,
     get_results_store,
     parse_continue_session_request,
+    parse_list_results_request,
     record_results_safe,
     resolve_session_evidence,
     sanitize_db_name,
@@ -29,6 +31,69 @@ def test_parse_continue_session_request() -> None:
     )
     assert num == 1
     assert client == "TestCompany"
+
+
+def test_parse_list_results_request() -> None:
+    client, num = parse_list_results_request(
+        "List results for AlphaCo session 2"
+    )
+    assert client == "AlphaCo"
+    assert num == 2
+    client, num = parse_list_results_request("list-results AlphaCo 2")
+    assert client == "AlphaCo"
+    assert num == 2
+    client, num = parse_list_results_request(
+        "Результаты для BetaCo сессия 1"
+    )
+    assert client == "BetaCo"
+    assert num == 1
+
+
+def test_intent_list_results() -> None:
+    assert classify_intent("List results for AlphaCo session 2") == "list_results"
+    assert classify_intent("list-results AlphaCo 2") == "list_results"
+    assert classify_intent("Show warehouse results for Acme") == "list_results"
+    assert classify_intent("List audit sessions") == "list_sessions"
+
+
+def test_format_session_results_markdown() -> None:
+    text = format_session_results_markdown(
+        AuditSessionInfo(
+            id=1,
+            session_number=2,
+            client_name="AlphaCo",
+            client_slug="alphaco",
+            evidence_run_id="AlphaCo",
+            status="completed",
+            framework_id="it_audit",
+        ),
+        [
+            {
+                "host_label": "10.200.29.79",
+                "framework_id": "it_audit",
+                "pass_count": 4,
+                "fail_count": 1,
+                "partial_count": 0,
+                "error_count": 2,
+                "skipped_count": 0,
+                "compliance_pct": 57.1,
+            }
+        ],
+        [
+            {
+                "req_id": "REQ-001",
+                "title": "Inventory completeness",
+                "status": "pass",
+                "severity": "High",
+                "framework_id": "it_audit",
+                "host_label": "10.200.29.79",
+                "observation": "Hostname pg-server recorded",
+            }
+        ],
+    )
+    assert "session **#2**" in text
+    assert "REQ-001" in text
+    assert "57.1" in text
 
 
 def test_resolve_session_evidence_prefers_client_folder(tmp_path) -> None:

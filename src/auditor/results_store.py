@@ -472,6 +472,72 @@ class ResultsStore:
         )
         return sessions[0] if sessions else None
 
+    async def list_session_requirement_results(
+        self,
+        *,
+        client_name: str,
+        session_number: int,
+    ) -> tuple[AuditSessionInfo | None, list[dict[str, Any]], list[dict[str, Any]]]:
+        """Load session meta, host aggregates, and REQ cells for one session.
+
+        Args:
+            client_name: Client display name (slug derived internally).
+            session_number: Per-client session number.
+
+        Returns:
+            ``(session, host_rows, req_rows)``. Empty lists when missing/disabled.
+        """
+        if not self.enabled:
+            return None, [], []
+        info = await self.get_session(
+            client_name=client_name, session_number=session_number
+        )
+        if info is None:
+            return None, [], []
+        slug = make_client_slug(client_name) or "client"
+        dsn = await self._connect_dsn_for_client(slug)
+        conn = await asyncpg.connect(dsn)
+        try:
+            await self._ensure_schema(conn)
+            host_rows = await conn.fetch(
+                """
+                SELECT hr.framework_id,
+                       COALESCE(NULLIF(h.hostname, ''), NULLIF(h.ssh_host, ''),
+                                h.host_key) AS host_label,
+                       hr.pass_count, hr.fail_count, hr.partial_count,
+                       hr.error_count, hr.skipped_count, hr.assessed,
+                       hr.compliance_pct, hr.source, hr.finished_at,
+                       hr.evidence_relpath
+                FROM host_results hr
+                JOIN hosts h ON h.id = hr.host_id
+                WHERE hr.session_id = $1
+                ORDER BY hr.framework_id, host_label
+                """,
+                info.id,
+            )
+            req_rows = await conn.fetch(
+                """
+                SELECT rr.req_id, rr.title, rr.category, rr.severity, rr.status,
+                       rr.observation, rr.recommendation, rr.notes,
+                       hr.framework_id,
+                       COALESCE(NULLIF(h.hostname, ''), NULLIF(h.ssh_host, ''),
+                                h.host_key) AS host_label
+                FROM requirement_results rr
+                JOIN host_results hr ON hr.id = rr.host_result_id
+                JOIN hosts h ON h.id = hr.host_id
+                WHERE rr.session_id = $1
+                ORDER BY hr.framework_id, host_label, rr.req_id
+                """,
+                info.id,
+            )
+            return (
+                info,
+                [dict(r) for r in host_rows],
+                [dict(r) for r in req_rows],
+            )
+        finally:
+            await conn.close()
+
     async def list_sessions(
         self,
         *,
@@ -1151,6 +1217,195 @@ def parse_continue_session_request(
     if cm:
         client_hint = cm.group(1).strip().rstrip("?.!,")
     return session_num, client_hint
+
+
+def parse_list_results_request(
+    user_text: str,
+) -> tuple[str | None, int | None]:
+    """Extract ``(client_name, session_number)`` from a list-results phrase.
+
+    Supports::
+
+        List results for AlphaCo session 2
+        list-results AlphaCo 2
+        Show warehouse results for AlphaCo #2
+        Результаты для AlphaCo сессия 2
+
+    Session number may be omitted (caller uses latest session for the client).
+    """
+    text = (user_text or "").strip()
+    if not text:
+        return None, None
+
+    # ``list-results Client 2`` / ``list results Client 2``
+    m = re.search(
+        r"\blist[- ]?results\s+([A-Za-z0-9][A-Za-z0-9._-]{1,63})\s+#?(\d+)\b",
+        text,
+        re.I,
+    )
+    if m:
+        return m.group(1), int(m.group(2))
+
+    # ``… for Client session 2`` / ``… для Client сессия 2``
+    m = re.search(
+        r"\b(?:for|для)\s+([A-Za-z0-9][A-Za-z0-9 _.-]{1,80}?)\s+"
+        r"(?:session|сесси[яию]|#)\s*#?(\d+)\b",
+        text,
+        re.I,
+    )
+    if m:
+        return m.group(1).strip().rstrip("?.!,"), int(m.group(2))
+
+    client_hint = None
+    cm = re.search(
+        r"\b(?:for|для)\s+([A-Za-z0-9][A-Za-z0-9 _.-]{1,80})",
+        text,
+        re.I,
+    )
+    if cm:
+        client_hint = cm.group(1).strip().rstrip("?.!,")
+    session_num = None
+    sm = re.search(
+        r"(?:session|сесси[яию]|#)\s*#?(\d+)\b",
+        text,
+        re.I,
+    )
+    if sm:
+        session_num = int(sm.group(1))
+    return client_hint, session_num
+
+
+def _truncate_cell(text: str, limit: int = 140) -> str:
+    raw = re.sub(r"\s+", " ", (text or "").strip())
+    if len(raw) <= limit:
+        return raw
+    return raw[: limit - 1] + "…"
+
+
+def format_session_results_markdown(
+    session: AuditSessionInfo,
+    host_rows: Sequence[Mapping[str, Any]],
+    req_rows: Sequence[Mapping[str, Any]],
+) -> str:
+    """Operator-facing warehouse results for one session (chat)."""
+    lines = [
+        f"## Audit results — **{session.client_name or session.client_slug}** "
+        f"session **#{session.session_number}**",
+        "",
+        f"- **Status:** `{session.status}`",
+        f"- **Framework:** `{session.framework_id or '—'}`",
+        f"- **Evidence:** `{session.evidence_run_id or '—'}`",
+    ]
+    if session.started_at:
+        lines.append(f"- **Started:** {session.started_at.isoformat()}")
+    if session.finished_at:
+        lines.append(f"- **Finished:** {session.finished_at.isoformat()}")
+    lines.append("")
+
+    if host_rows:
+        lines.extend(
+            [
+                "### Host / framework summary",
+                "",
+                "| Host | Framework | Compliance % | Pass | Fail | Partial | Error | Skip |",
+                "|------|-----------|-------------:|-----:|-----:|--------:|------:|-----:|",
+            ]
+        )
+        for h in host_rows:
+            lines.append(
+                f"| `{h.get('host_label') or '—'}` | `{h.get('framework_id') or '—'}` | "
+                f"{float(h.get('compliance_pct') or 0):.1f} | "
+                f"{int(h.get('pass_count') or 0)} | {int(h.get('fail_count') or 0)} | "
+                f"{int(h.get('partial_count') or 0)} | {int(h.get('error_count') or 0)} | "
+                f"{int(h.get('skipped_count') or 0)} |"
+            )
+        lines.append("")
+
+    if not req_rows:
+        lines.append("_No requirement cells stored for this session yet._")
+        lines.append("")
+        lines.append(
+            "Cells are written on **finalize** / **Update the report**. "
+            "Interrupted sessions may have empty results until the audit finishes."
+        )
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "### Requirement cells",
+            "",
+            "| REQ | Title | Status | Severity | Framework | Host | Observation |",
+            "|-----|-------|--------|----------|-----------|------|-------------|",
+        ]
+    )
+    for r in req_rows:
+        title = _truncate_cell(str(r.get("title") or ""), 48)
+        obs = _truncate_cell(str(r.get("observation") or ""), 100)
+        # Escape pipes in markdown cells
+        title = title.replace("|", "/")
+        obs = obs.replace("|", "/")
+        lines.append(
+            f"| `{r.get('req_id') or '—'}` | {title or '—'} | "
+            f"`{r.get('status') or '—'}` | {r.get('severity') or '—'} | "
+            f"`{r.get('framework_id') or '—'}` | `{r.get('host_label') or '—'}` | "
+            f"{obs or '—'} |"
+        )
+    lines.append("")
+    lines.append(
+        "Next: `/update-report` for the Markdown/ZIP, or `/gather-req` / "
+        "`/refill-req` to refine a REQ on this client's evidence."
+    )
+    return "\n".join(lines)
+
+
+async def list_results_report(
+    settings: Settings,
+    *,
+    client_name: str | None,
+    session_number: int | None = None,
+) -> str:
+    """Build a markdown report of warehouse REQ cells for chat."""
+    store = get_results_store(settings)
+    if store is None:
+        return (
+            "Results warehouse is disabled. Set `RESULTS_DB_ENABLED=true` and "
+            "`RESULTS_DATABASE_URL` to store filled REQ cells in PostgreSQL."
+        )
+    if not client_name:
+        return (
+            "Specify a client, e.g. `List results for AlphaCo session 2` "
+            "or slash `/list-results`."
+        )
+
+    info: AuditSessionInfo | None = None
+    if session_number is not None:
+        info = await store.get_session(
+            client_name=client_name, session_number=session_number
+        )
+        if info is None:
+            return (
+                f"No warehouse session **#{session_number}** for "
+                f"**{client_name}**.\n\n"
+                f"Try `List audit sessions for {client_name}`."
+            )
+    else:
+        info = await store.get_latest_session(client_name=client_name)
+        if info is None:
+            return (
+                f"No warehouse sessions for **{client_name}**.\n\n"
+                "Start an audit (with `RESULTS_DB_ENABLED=true`) first."
+            )
+
+    sess, hosts, reqs = await store.list_session_requirement_results(
+        client_name=client_name,
+        session_number=info.session_number,
+    )
+    if sess is None:
+        return (
+            f"Could not load session **#{info.session_number}** for "
+            f"**{client_name}**."
+        )
+    return format_session_results_markdown(sess, hosts, reqs)
 
 
 async def resolve_continue_target(

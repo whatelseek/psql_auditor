@@ -24,6 +24,7 @@ IntentKind = Literal[
     "refill_finding",
     "update_report",
     "list_sessions",
+    "list_results",
 ]
 
 # Deterministic playbook / freeform command path (not REQ evidence-gather revise).
@@ -81,6 +82,16 @@ _UPDATE_REPORT = (
     re.compile(r"\bобнов(и|ить)\s+отч[её]т\b", re.I),
     re.compile(r"\bпересобер(и|ить)\s+отч[её]т\b", re.I),
     re.compile(r"\bобнов(и|ить)\s+отч[её]т\s+по\s+новым\s+данным\b", re.I),
+)
+
+# Warehouse REQ cells for a finished/running session (must win over list_sessions).
+_LIST_RESULTS = (
+    re.compile(r"\blist[- ]?results\b", re.I),
+    re.compile(r"\bshow\s+(me\s+)?(warehouse\s+)?results\b", re.I),
+    re.compile(r"\bwarehouse\s+results\b", re.I),
+    re.compile(r"\bрезультаты\s+(сессии|аудита|склада)\b", re.I),
+    re.compile(r"\bсписок\s+результатов\b", re.I),
+    re.compile(r"\bпокажи\s+результаты\b", re.I),
 )
 
 # Which warehouse sessions exist / need continue (Postgres tracker).
@@ -215,6 +226,10 @@ def classify_intent(text: str, *, agents_dir: Path | None = None) -> IntentKind:
     raw = (text or "").strip()
     if not raw:
         return "audit"
+
+    # Prefer REQ warehouse dump over session listing when both match.
+    if any(pat.search(raw) for pat in _LIST_RESULTS):
+        return "list_results"
 
     if any(pat.search(raw) for pat in _LIST_SESSIONS):
         return "list_sessions"

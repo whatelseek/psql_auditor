@@ -8,6 +8,8 @@ intent phrases in ``auditor.intent``.
 Usage (repo root, Open WebUI up)::
 
     python3 openwebui/install_owui_prompts.py
+
+Operator docs: ``docs/owui-slash-commands.md``.
 """
 
 from __future__ import annotations
@@ -41,6 +43,15 @@ PROMPTS: list[dict[str, object]] = [
         "name": "List sessions for client",
         "content": "Show me audit sessions for {{client | text:required}}",
         "tags": ["auditor", "sessions"],
+    },
+    {
+        "command": "list-results",
+        "name": "List warehouse results for session",
+        "content": (
+            "List results for {{client | text:required}} session "
+            "{{n | number:required}}"
+        ),
+        "tags": ["auditor", "sessions", "results"],
     },
     {
         "command": "continue",

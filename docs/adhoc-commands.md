@@ -29,6 +29,9 @@ Run this command: `grep PermitRootLogin /etc/ssh/sshd_config`
 Execute SQL: SELECT name, setting FROM pg_settings WHERE name = 'ssl'
 ```
 
+Open WebUI shortcuts: `/run-command`, `/run-sql` (model **auditor**) — see
+[`owui-slash-commands.md`](owui-slash-commands.md).
+
 ### 2) Playbook / REQ
 
 Name a requirement (and framework). Seed or learned playbook tools run **deterministically**, then a short summary is written:

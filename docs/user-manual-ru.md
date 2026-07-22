@@ -13,6 +13,7 @@
 3. [Развёртывание (Docker)](#3-развёртывание-docker)
 4. [Настройка `.env`](#4-настройка-env)
 5. [Подключение Open WebUI](#5-подключение-open-webui)
+5.1. [Slash-команды Workspace](#51-slash-команды-workspace)
 6. [Как провести аудит](#6-как-провести-аудит)
 7. [Человек в контуре (HITL)](#7-человек-в-контуре-hitl)
 8. [Отчёт, ZIP и артефакты](#8-отчёт-zip-и-артефакты)
@@ -158,6 +159,27 @@ MODEL_ID=auditor
 3. (Рекомендуется) для файлов-целей отключите «сжатие» вложения до RAG-фрагментов — нужен **полный текст** файла в контексте чата (см. [docs/starting-an-audit.md](starting-an-audit.md))
 
 Если модели нет в списке: Admin → Connections / OpenAI → проверьте base URL и API key, обновите список моделей (`GET /v1/models` на агенте).
+
+### 5.1. Slash-команды Workspace
+
+В чате наберите `/` — появятся сохранённые prompts (сессии, отчёт, follow-up, ad-hoc).
+
+```bash
+python3 openwebui/install_owui_prompts.py
+```
+
+| Команда | Назначение | Модель |
+|---------|------------|--------|
+| `/list-sessions` | Список сессий аудита | auditor |
+| `/list-results` | Ячейки склада (REQ) для клиента и `#N` | auditor |
+| `/continue-session` | Продолжить сессию `#N` для клиента | auditor |
+| `/update-report` | Пересобрать отчёт / ZIP | auditor |
+| `/gather-req` / `/refill-req` / `/revise-req` | Дозапрос / обновление REQ | auditor |
+| `/run-command` / `/run-sql` | Ad-hoc SSH / SQL | auditor |
+| `/dashboard` | Дашборд в чате | **Visualizer** |
+| `/start-it-audit` | Старт IT-аудита | auditor |
+
+Полный каталог (EN): [owui-slash-commands.md](owui-slash-commands.md).
 
 ---
 
@@ -324,6 +346,12 @@ List audit sessions
 continue session 3 for Acme
 продолжи сессию 3 для Acme
 ```
+
+Slash-команды Open WebUI (Workspace → Prompts): `/list-sessions`,
+`/continue-session`, `/update-report`, `/gather-req`, … — установка
+`python3 openwebui/install_owui_prompts.py`. Полный каталог (EN):
+[owui-slash-commands.md](owui-slash-commands.md). Модель **auditor**
+(для `/dashboard` — **Visualizer**).
 
 Не сработает как список сессий: «какой последний checkpoint?», «where did we leave off?» —
 используйте фразы про **sessions/сессии**, затем **continue**.
@@ -497,16 +525,22 @@ docker compose up --build
 
 # Перезапуск агента после правок env
 docker compose up -d --build agent
+
+# Slash-команды Open WebUI (Workspace → Prompts)
+python3 openwebui/install_owui_prompts.py
+# в чате: /list-sessions, /continue-session, /update-report, …
 ```
 
 ---
 
 ## Связанные документы (EN)
 
+- [owui-slash-commands.md](owui-slash-commands.md) — slash-команды Open WebUI  
 - [starting-an-audit.md](starting-an-audit.md) — старт аудита и формат target-файла  
 - [long-term-memory.md](long-term-memory.md) — playbook-память  
 - [cis-compliance-charts.md](cis-compliance-charts.md) — графики соответствия  
 - [results-database.md](results-database.md) — склад результатов в PostgreSQL  
+- [post-audit-followup.md](post-audit-followup.md) — дозапрос REQ после аудита  
 - [README.md](../README.md) — обзор на английском  
 
 ---

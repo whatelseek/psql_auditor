@@ -2519,6 +2519,22 @@ class AuditorGraph:
             "awaiting_hitl": False,
         }
 
+    async def alist_results(self, user_text: str = "") -> dict[str, Any]:
+        """Show warehouse REQ cells for a client session (``/list-results``)."""
+        from auditor.results_store import list_results_report, parse_list_results_request
+
+        client, session_num = parse_list_results_request(user_text or "")
+        text = await list_results_report(
+            self.settings,
+            client_name=client,
+            session_number=session_num,
+        )
+        return {
+            "report": text,
+            "messages": [AIMessage(content=text)],
+            "awaiting_hitl": False,
+        }
+
     async def _discover_inventory_hosts(
         self,
         *,
