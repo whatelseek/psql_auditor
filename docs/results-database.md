@@ -132,6 +132,15 @@ results_<client_slug>
   requirement_results       -- filled cells (also carry session_number)
 ```
 
+Learned **playbook memory** (preferred SSH/SQL recipes) is stored once on the
+**shared** database from `RESULTS_DATABASE_URL`:
+
+```text
+playbook_memory             -- framework_id + entry_key (REQ-* / _framework)
+```
+
+See [`long-term-memory.md`](long-term-memory.md).
+
 ## Config
 
 ```env
@@ -154,6 +163,7 @@ Set `RESULTS_DB_PER_CLIENT=false` to write into the database named in
 | Intake complete | (session start) | New audit allocates `session_number` |
 | Finalize | `finalize` | End of a checklist audit (per host/framework) |
 | Update report | `update_report` | Post-audit `Update the report` / `Обнови отчёт` |
+| Successful tool (learn) | `playbook_memory` | Learned SSH/SQL recipes (shared DB) |
 
 Writes are best-effort: warehouse errors are logged and do not fail the audit.
 
@@ -167,5 +177,6 @@ re-attach to the correct session after restart.
 - Aggregate pass/fail/partial/error/skipped + compliance %
 - Full requirement list (title, category, severity, how_to_verify, pass_criteria)
 - Per-REQ status, observation, recommendation, notes — **all with session_number**
+- Learned playbook recipes (`playbook_memory` on the shared DB)
 
 **Not stored:** SSH/MCP tool output, passwords, private keys, raw evidence files.

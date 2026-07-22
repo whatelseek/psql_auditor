@@ -321,6 +321,7 @@ class AuditorGraph:
                 playbooks_dir=self.settings.playbooks_dir,
                 memory_dir=self.settings.memory_dir,
                 learn=self.settings.memory_learn,
+                settings=self.settings,
             )
             if self.settings.memory_enabled
             else None
