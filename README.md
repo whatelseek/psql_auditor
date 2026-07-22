@@ -154,12 +154,31 @@ Bar charts of **compliance % by severity** (Overall / Critical / High / …):
 - Open WebUI **Tool** + auto **Filter**: [`docs/cis-compliance-charts.md`](docs/cis-compliance-charts.md)
 - Also appended in the agent report when `COMPLIANCE_CHARTS_IN_REPORT=true`
 
+## Open WebUI slash prompts
+
+Workspace prompts for auditor chat (`/list-sessions`, `/continue-session`,
+`/update-report`, `/gather-req`, …):
+
+```bash
+python3 openwebui/install_owui_prompts.py
+```
+
+Type `/` in chat to pick a command. Use model **auditor** (or **Visualizer**
+for `/dashboard`).
+
 ## Inline Visualizer v2 (Open WebUI)
 
 Vendored from [Classic298/open-webui-plugins](https://github.com/Classic298/open-webui-plugins/tree/main/inline-visualizer-v2):
 streaming HTML/SVG canvases in chat (`@@@VIZ-START` / `@@@VIZ-END`).
 
-Install from [`openwebui/inline-visualizer-v2/`](openwebui/inline-visualizer-v2/) — see [`INSTALL.md`](openwebui/inline-visualizer-v2/INSTALL.md). Attach to a general chat model; enable **Allow iframe same origin**.
+Install from [`openwebui/inline-visualizer-v2/`](openwebui/inline-visualizer-v2/) — see [`INSTALL.md`](openwebui/inline-visualizer-v2/INSTALL.md).
+
+```bash
+python3 openwebui/install_inline_visualizer.py
+python3 scripts/owui_inline_visualizer_test.py
+```
+
+Creates workspace model **`visualizer`** (LiteLLM + tool/skill). Enable **Allow iframe same origin** (installer sets it). Not required on `auditor`.
 
 ## Ad-hoc commands (Open WebUI)
 

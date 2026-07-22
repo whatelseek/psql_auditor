@@ -61,6 +61,11 @@ def test_extract_and_latest_client_named_run(tmp_path: Path):
     assert extract_run_id("see `artifacts/TestCompany` for evidence") == "TestCompany"
     assert extract_run_id("/v1/downloads/TestCompany_audit.zip") == "TestCompany"
     assert latest_run_id(tmp_path) == rid
+    # Bare ``for <Client>`` when artifacts/<Client> exists
+    (tmp_path / "AlphaCo").mkdir()
+    (tmp_path / "AlphaCo" / "meta.json").write_text("{}", encoding="utf-8")
+    assert extract_run_id("Gather evidence for REQ-001 for AlphaCo", evidence_dir=tmp_path) == "AlphaCo"
+    assert extract_run_id("Gather evidence for REQ-001 for AlphaCo") is None
 
 
 @pytest.mark.asyncio

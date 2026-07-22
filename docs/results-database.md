@@ -26,6 +26,11 @@ phrases below, then **continue**.
 Intent matching is **phrase-based** (EN/RU patterns), not full free-form LLM
 routing. Prefer the examples below.
 
+Slash shortcuts (Workspace → Prompts) are installed by
+`python3 openwebui/install_owui_prompts.py` — e.g. `/list-sessions`,
+`/continue-session`, `/update-report`. Use model **auditor** (except
+`/dashboard` → **Visualizer**).
+
 ### List sessions / which need continue
 
 Works when the message clearly mentions sessions (or “need continue”):

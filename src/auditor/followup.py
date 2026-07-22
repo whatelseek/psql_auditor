@@ -128,7 +128,8 @@ def _ssh_bind_for_target(
 
     Resolves the inventory SSH target for ``target.host_id`` and enters
     :func:`~auditor.secrets_file.bind_ssh_target` for the duration of the
-    context. Yields ``None`` when no matching inventory row exists.
+    context. When ``host_id`` is empty (single-host runs such as ``it_audit``),
+    falls back to the first SSH row in the client inventory.
 
     Args:
         settings: Auditor settings (``inventory_dir``).
@@ -142,6 +143,12 @@ def _ssh_bind_for_target(
         client_run_id=target.run_id,
         host_id=target.host_id,
     )
+    if ssh is None and not target.host_id:
+        try:
+            targets = list_client_ssh_targets(settings.inventory_dir, target.run_id)
+        except (OSError, ValueError, FileNotFoundError):
+            targets = []
+        ssh = targets[0] if targets else None
     if ssh is None:
         yield None
         return
@@ -602,10 +609,12 @@ async def run_update_report(
         )
         from auditor.evidence_store import EvidenceStore
 
-        run_id = extract_run_id(user_request)
+        run_id = extract_run_id(user_request, evidence_dir=settings.evidence_dir)
         source = "explicit"
         if not run_id and messages:
-            run_id = extract_run_id_from_messages(messages)
+            run_id = extract_run_id_from_messages(
+                messages, evidence_dir=settings.evidence_dir
+            )
             if run_id:
                 source = "history"
         if not run_id:

@@ -205,14 +205,16 @@ def _key_matches_host(evidence_key: str, host_hint: str) -> bool:
     return hint in evidence_key.lower()
 
 
-def extract_run_id(text: str) -> str | None:
+def extract_run_id(text: str, *, evidence_dir: Path | str | None = None) -> str | None:
     """Pull a run id (timestamp or client folder name) from free text.
 
     Matches ISO timestamp run ids, explicit evidence paths, artifact folder
-    names, and Open WebUI download URL segments.
+    names, Open WebUI download URL segments, and ``for <Client>`` when that
+    client folder exists under ``evidence_dir``.
 
     Args:
         text: Operator or assistant message content.
+        evidence_dir: Optional artifacts root used to validate client names.
 
     Returns:
         Run id string, or ``None`` when not found.
@@ -233,14 +235,35 @@ def extract_run_id(text: str) -> str | None:
     dl = _DOWNLOAD.search(text)
     if dl:
         return dl.group(1)
+    # ``for AlphaCo`` / ``для AlphaCo`` when artifacts/<name> exists
+    if evidence_dir is not None:
+        root = Path(evidence_dir)
+        for m in re.finditer(
+            r"\b(?:for|для)\s+([A-Za-z0-9][A-Za-z0-9._-]{1,63})\b",
+            text,
+            re.I,
+        ):
+            name = m.group(1)
+            if (root / name).is_dir():
+                return name
+            # Case-insensitive folder match
+            lowered = name.lower()
+            for child in root.iterdir() if root.is_dir() else []:
+                if child.is_dir() and child.name.lower() == lowered:
+                    return child.name
     return None
 
 
-def extract_run_id_from_messages(messages: Sequence[Any]) -> str | None:
+def extract_run_id_from_messages(
+    messages: Sequence[Any],
+    *,
+    evidence_dir: Path | str | None = None,
+) -> str | None:
     """Scan chat messages (newest first) for an evidence run id.
 
     Args:
         messages: Chat history (dicts or LangChain messages).
+        evidence_dir: Optional artifacts root for ``for <Client>`` matching.
 
     Returns:
         First run id found in assistant/user/system content, or ``None``.
@@ -254,7 +277,7 @@ def extract_run_id_from_messages(messages: Sequence[Any]) -> str | None:
             role = msg.get("role")
         if role not in (None, "assistant", "user", "system"):
             continue
-        found = extract_run_id(str(content or ""))
+        found = extract_run_id(str(content or ""), evidence_dir=evidence_dir)
         if found:
             return found
     return None
@@ -473,9 +496,9 @@ def resolve_target(
         raise ValueError("Name at least one requirement id, e.g. `REQ-002`.")
 
     source = "explicit"
-    run_id = extract_run_id(user_text)
+    run_id = extract_run_id(user_text, evidence_dir=evidence_dir)
     if not run_id and messages:
-        run_id = extract_run_id_from_messages(messages)
+        run_id = extract_run_id_from_messages(messages, evidence_dir=evidence_dir)
         if run_id:
             source = "history"
     if not run_id:

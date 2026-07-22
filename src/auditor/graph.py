@@ -1839,6 +1839,7 @@ class AuditorGraph:
         Returns:
             Truncated ``Finding`` ready for state and disk.
         """
+        data = _extract_json(str(ai.content or "")) or {}
         observation = str(
             data.get("observation")
             or data.get("evidence")
@@ -2630,10 +2631,13 @@ class AuditorGraph:
         }
 
         # New audit → allocate next results warehouse session_number (Postgres tracker).
+        # Prefer the post-intake client folder name (after rebind_run_id), not the
+        # temporary ``YYYYMMDD…`` id — continue must find evidence on disk.
+        evidence_run = store.run_id or run_id
         session_info = await start_session_safe(
             self.settings,
-            client_name=str(intake.get("client_name") or run_id),
-            evidence_run_id=run_id,
+            client_name=str(intake.get("client_name") or evidence_run),
+            evidence_run_id=evidence_run,
             continue_thread_id=base_thread,
             evidence_path=str(store.root),
         )

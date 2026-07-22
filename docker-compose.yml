@@ -14,6 +14,22 @@ services:
     command: ["--config", "/app/config.yaml", "--host", "0.0.0.0", "--port", "4000"]
     restart: unless-stopped
 
+  # Results warehouse (sessions + filled REQ cells). Separate from audit-target PG_*.
+  results-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${RESULTS_DB_USER:-results_admin}
+      POSTGRES_PASSWORD: ${RESULTS_DB_PASSWORD:-results_lab_secret}
+      POSTGRES_DB: ${RESULTS_DB_NAME:-postgres}
+    volumes:
+      - results-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${RESULTS_DB_USER:-results_admin} -d ${RESULTS_DB_NAME:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   agent:
     build: .
     ports:
@@ -48,6 +64,11 @@ services:
       INVENTORY_DIR: /app/inventory
       # Lab default: skip known_hosts (set true for production)
       SSH_STRICT_HOST_KEY: ${SSH_STRICT_HOST_KEY:-false}
+      # Results warehouse (not the audited Postgres target)
+      RESULTS_DB_ENABLED: ${RESULTS_DB_ENABLED:-true}
+      RESULTS_DATABASE_URL: ${RESULTS_DATABASE_URL:-postgresql://results_admin:results_lab_secret@results-db:5432/postgres}
+      RESULTS_DB_PER_CLIENT: ${RESULTS_DB_PER_CLIENT:-true}
+      RESULTS_DB_NAME_PREFIX: ${RESULTS_DB_NAME_PREFIX:-results_}
     volumes:
       - ./agents:/app/agents:ro
       - ./memory:/app/memory
@@ -55,6 +76,9 @@ services:
       - ./secrets:/app/secrets:ro
       - ./inventory:/app/inventory
       - ${SSH_KEY_HOST_PATH:-./.keys}:/keys:ro
+    depends_on:
+      results-db:
+        condition: service_healthy
     restart: unless-stopped
 
   open-webui:
@@ -72,6 +96,8 @@ services:
       ENABLE_API_KEYS: ${ENABLE_API_KEYS:-true}
       # Long audits; default Open WebUI client timeout is too short
       AIOHTTP_CLIENT_TIMEOUT: ${AIOHTTP_CLIENT_TIMEOUT:-3600}
+      # Lab LiteLLM uses HTTPS with a private CA / self-signed cert
+      AIOHTTP_CLIENT_SESSION_SSL: ${AIOHTTP_CLIENT_SESSION_SSL:-false}
     volumes:
       - open-webui-data:/app/backend/data
     depends_on:
@@ -80,3 +106,4 @@ services:
 
 volumes:
   open-webui-data:
+  results-db-data:

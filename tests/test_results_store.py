@@ -15,10 +15,47 @@ from auditor.results_store import (
     ResultsStore,
     format_sessions_markdown,
     get_results_store,
+    parse_continue_session_request,
     record_results_safe,
+    resolve_session_evidence,
     sanitize_db_name,
 )
 from auditor.state import Finding
+
+
+def test_parse_continue_session_request() -> None:
+    num, client = parse_continue_session_request(
+        "continue session 1 for TestCompany"
+    )
+    assert num == 1
+    assert client == "TestCompany"
+
+
+def test_resolve_session_evidence_prefers_client_folder(tmp_path) -> None:
+    client_dir = tmp_path / "testcompany"
+    client_dir.mkdir()
+    (client_dir / "meta.json").write_text(
+        '{"thread_id":"audit-abc:10.0.0.1:ubuntu_cis_24_l2",'
+        '"continue_thread_id":"audit-abc:10.0.0.1:ubuntu_cis_24_l2",'
+        '"client_name":"TestCompany"}',
+        encoding="utf-8",
+    )
+    # Stale temp folder left behind after rename
+    (tmp_path / "20260722T043018Z_deadbeef").mkdir()
+
+    settings = SimpleNamespace(evidence_dir=tmp_path)
+    info = AuditSessionInfo(
+        id=1,
+        session_number=1,
+        client_name="TestCompany",
+        client_slug="testcompany",
+        evidence_run_id="20260722T043018Z_deadbeef",
+        status="running",
+        continue_thread_id="audit-abc",
+    )
+    tid, run_id = resolve_session_evidence(settings, info)  # type: ignore[arg-type]
+    assert run_id == "testcompany"
+    assert tid == "audit-abc:10.0.0.1:ubuntu_cis_24_l2"
 
 
 def test_sanitize_db_name_prefix_and_slug() -> None:

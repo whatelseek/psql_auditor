@@ -371,6 +371,7 @@ class ResultsStore:
         continue_thread_id: str | None = None,
         pending_ids: Sequence[str] | None = None,
         framework_id: str | None = None,
+        evidence_run_id: str | None = None,
     ) -> None:
         """Update lifecycle fields for an existing session (running/interrupted/completed).
 
@@ -384,6 +385,7 @@ class ResultsStore:
             continue_thread_id: Optional new continue thread id.
             pending_ids: Optional replacement pending REQ id list.
             framework_id: Optional active framework id update.
+            evidence_run_id: Optional evidence folder name (after client rename).
         """
         if not self.enabled:
             return
@@ -404,6 +406,7 @@ class ResultsStore:
                     continue_thread_id = COALESCE($4, continue_thread_id),
                     pending_ids = COALESCE($5::jsonb, pending_ids),
                     framework_id = COALESCE(NULLIF($6, ''), framework_id),
+                    evidence_run_id = COALESCE(NULLIF($8, ''), evidence_run_id),
                     finished_at = CASE
                         WHEN $7::timestamptz IS NOT NULL THEN $7
                         WHEN $3 = 'running' THEN NULL
@@ -418,6 +421,7 @@ class ResultsStore:
                 json.dumps(list(pending_ids)) if pending_ids is not None else None,
                 framework_id,
                 finished,
+                evidence_run_id,
             )
         finally:
             await conn.close()
@@ -1057,19 +1061,78 @@ async def list_sessions_report(
     return format_sessions_markdown(sessions)
 
 
-async def resolve_continue_target(
+def _disk_meta_for_run(evidence_dir: Path | str, run_id: str) -> dict[str, Any]:
+    """Load ``meta.json`` for an evidence run when present."""
+    meta_path = Path(evidence_dir) / run_id / "meta.json"
+    if not meta_path.is_file():
+        return {}
+    try:
+        raw = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def resolve_session_evidence(
     settings: Settings,
-    user_text: str = "",
-) -> tuple[str, str, AuditSessionInfo | None] | None:
-    """Resolve ``(thread_id, run_id, session)`` for a continue request.
+    info: AuditSessionInfo,
+) -> tuple[str, str]:
+    """Map a warehouse session to the real on-disk ``(thread_id, run_id)``.
 
-    Prefers an explicit ``continue session N for Client`` from the warehouse,
-    then the newest interrupted warehouse session among known clients, then
-    falls back to disk ``find_interrupted_run``.
+    After intake the evidence folder is renamed to the client slug, but the
+    warehouse may still store the temporary run id and a short base thread.
+    Prefer the client-slug folder / ``meta.json`` thread when available.
     """
-    from auditor.session_store import find_interrupted_run
+    evidence_dir = Path(settings.evidence_dir)
+    candidates: list[str] = []
+    for cand in (
+        info.client_slug,
+        make_client_slug(info.client_name),
+        info.evidence_run_id,
+    ):
+        c = (cand or "").strip()
+        if c and c not in candidates:
+            candidates.append(c)
 
-    store = get_results_store(settings)
+    chosen_run = ""
+    meta: dict[str, Any] = {}
+    for cand in candidates:
+        path = evidence_dir / cand
+        if not path.is_dir():
+            continue
+        # Prefer folders that still have checklist evidence / meta.
+        m = _disk_meta_for_run(evidence_dir, cand)
+        if m or any(path.iterdir()):
+            chosen_run = cand
+            meta = m
+            if m:
+                break
+    if not chosen_run:
+        chosen_run = (info.evidence_run_id or info.client_slug or "").strip()
+        meta = _disk_meta_for_run(evidence_dir, chosen_run) if chosen_run else {}
+
+    tid = str(
+        meta.get("continue_thread_id")
+        or meta.get("thread_id")
+        or info.continue_thread_id
+        or ""
+    ).strip()
+    # Prefer host/framework-scoped thread from session.json when warehouse
+    # only has the short base id (``audit-<hex>``).
+    if chosen_run and (":" not in tid or tid.count(":") < 2):
+        from auditor.session_store import load_all_multi_sessions
+
+        sessions = load_all_multi_sessions(evidence_dir, chosen_run)
+        if sessions:
+            # Newest / only active thread key.
+            tid = next(iter(sessions.keys()))
+    return tid, chosen_run
+
+
+def parse_continue_session_request(
+    user_text: str,
+) -> tuple[int | None, str | None]:
+    """Extract ``(session_number, client_hint)`` from a continue phrase."""
     session_num: int | None = None
     m = re.search(
         r"(?:continue|resume|продолж\w*)\s+(?:audit\s+)?session\s+#?(\d+)"
@@ -1087,13 +1150,46 @@ async def resolve_continue_target(
     )
     if cm:
         client_hint = cm.group(1).strip().rstrip("?.!,")
+    return session_num, client_hint
+
+
+async def resolve_continue_target(
+    settings: Settings,
+    user_text: str = "",
+) -> tuple[str, str, AuditSessionInfo | None] | None:
+    """Resolve ``(thread_id, run_id, session)`` for a continue request.
+
+    Prefers an explicit ``continue session N for Client`` from the warehouse,
+    then the newest interrupted warehouse session among known clients, then
+    falls back to disk ``find_interrupted_run``.
+
+    Always remaps warehouse ``evidence_run_id`` / short thread ids to the
+    current on-disk client folder and host-scoped LangGraph thread when possible.
+    """
+    from auditor.session_store import find_interrupted_run
+
+    store = get_results_store(settings)
+    session_num, client_hint = parse_continue_session_request(user_text)
 
     if store is not None and session_num is not None and client_hint:
         info = await store.get_session(
             client_name=client_hint, session_number=session_num
         )
-        if info and info.continue_thread_id:
-            return info.continue_thread_id, info.evidence_run_id, info
+        if info is not None:
+            tid, run_id = resolve_session_evidence(settings, info)
+            if tid and run_id:
+                # Keep warehouse pointers fresh for the next continue.
+                try:
+                    await store.update_session_status(
+                        client_name=client_hint,
+                        session_number=session_num,
+                        status=info.status or "interrupted",
+                        continue_thread_id=tid,
+                        evidence_run_id=run_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not refresh session resume pointers: %s", exc)
+                return tid, run_id, info
 
     if store is not None:
         clients = (
@@ -1110,9 +1206,9 @@ async def resolve_continue_target(
             ]
         if interrupted:
             info = interrupted[0]
-            tid = info.continue_thread_id
-            if tid:
-                return tid, info.evidence_run_id, info
+            tid, run_id = resolve_session_evidence(settings, info)
+            if tid and run_id:
+                return tid, run_id, info
 
     found = find_interrupted_run(settings.evidence_dir)
     if not found:
@@ -1165,6 +1261,7 @@ async def sync_session_status_from_run_meta(
             continue_thread_id=thread_id or None,
             pending_ids=pending_ids,
             framework_id=framework_id or None,
+            evidence_run_id=run_id or None,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Results session sync failed: %s", exc)

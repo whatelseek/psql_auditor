@@ -47,7 +47,10 @@ from auditor.api.stream_progress import (
     responses_progress_events,
 )
 from auditor.report_archive import archive_filename, verify_download_token
-from auditor.results_store import resolve_continue_target
+from auditor.results_store import (
+    parse_continue_session_request,
+    resolve_continue_target,
+)
 
 router = APIRouter(prefix="/v1")
 
@@ -59,6 +62,8 @@ class ChatMessage(BaseModel):
         role: Message author — ``system``, ``user``, ``assistant``, or ``tool``.
         content: Plain-text body; may be empty for tool-call-only assistant turns.
     """
+
+    role: str = "user"
     content: str | None = ""
 
 
@@ -637,6 +642,31 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
         Graph result dict with ``report``, ``messages``, and optional pause flags.
     """
     user_text = _latest_user_text(body.messages)
+    settings = get_settings()
+
+    # Explicit ``continue session N for Client`` must win over stale
+    # ``[AUDIT_INTAKE|/HITL]`` markers still present in Open WebUI history —
+    # otherwise resume starts intake again and allocates a new warehouse session.
+    session_num, client_hint = parse_continue_session_request(user_text)
+    explicit_continue = session_num is not None and bool(client_hint)
+    if is_continue_reply(user_text) or explicit_continue:
+        target = await resolve_continue_target(settings, user_text)
+        if target:
+            tid, run_id, _sess = target
+            return await auditor.acontinue(tid, run_id=run_id)
+        if explicit_continue:
+            slug = (client_hint or "client").strip().lower().replace(" ", "_")
+            return {
+                "report": (
+                    f"Could not resume session **#{session_num}** for "
+                    f"**{client_hint}**.\n\n"
+                    f"Try `List audit sessions for {client_hint}` and ensure "
+                    f"`artifacts/{slug}/` still exists."
+                ),
+                "awaiting_hitl": False,
+                "messages": [],
+            }
+
     paused = resolve_pause_resume(body.messages)
     if paused:
         kind, thread_id = paused
@@ -644,18 +674,10 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
             return await auditor.acontinue(thread_id)
         return await auditor.aresume(thread_id, user_text)
 
-    # Free-text continue when an interrupted run / warehouse session exists.
-    if is_continue_reply(user_text):
-        target = await resolve_continue_target(get_settings(), user_text)
-        if target:
-            tid, run_id, _sess = target
-            return await auditor.acontinue(tid, run_id=run_id)
-
     thread_id = None
     if body.user:
         thread_id = f"user-{body.user}"
 
-    settings = get_settings()
     intent = classify_intent(user_text, agents_dir=settings.agents_dir)
     if intent == "list_sessions":
         return await auditor.alist_sessions(user_text)
@@ -819,10 +841,23 @@ async def _stream_audit(
     settings = get_settings()
     user_text = _latest_user_text(body.messages)
     paused = resolve_pause_resume(body.messages)
+    session_num, client_hint = parse_continue_session_request(user_text)
+    explicit_continue = session_num is not None and bool(client_hint)
 
     yield _sse_chunk(None, model, completion_id)
     intent = classify_intent(user_text, agents_dir=settings.agents_dir)
-    if paused and paused[0] == "intake":
+    if is_continue_reply(user_text) or explicit_continue:
+        label = (
+            f"session #{session_num} for {client_hint}"
+            if explicit_continue
+            else "interrupted audit"
+        )
+        yield _sse_chunk(
+            f"Continuing {label} from checkpoint…\n\n",
+            model,
+            completion_id,
+        )
+    elif paused and paused[0] == "intake":
         yield _sse_chunk(
             f"Continuing pre-audit intake (`{paused[1]}`)…\n\n",
             model,

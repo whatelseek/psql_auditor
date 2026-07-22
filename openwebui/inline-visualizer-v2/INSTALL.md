@@ -10,6 +10,25 @@ Upstream: [Classic298/open-webui-plugins/inline-visualizer-v2](https://github.co
 
 ## Setup (this stack)
 
+### Automated (preferred)
+
+From the repo root (Open WebUI must be up; uses `.env` credentials):
+
+```bash
+python3 openwebui/install_inline_visualizer.py
+python3 scripts/owui_inline_visualizer_test.py
+```
+
+This upserts the **tool** + **skill**, enables **Allow iframe same origin**,
+adds the LiteLLM OpenAI connection, and creates workspace model **`visualizer`**
+with the tool/skill attached. Smoke-test asks for a small dashboard and checks
+for `@@@VIZ-START` / `@@@VIZ-END` markers.
+
+Compose note: `AIOHTTP_CLIENT_SESSION_SSL=false` on `open-webui` so lab HTTPS
+LiteLLM (self-signed) works.
+
+### Manual
+
 1. Paste `tool.py` into a new Tool; save.
 2. Import or paste `SKILL.md` as skill **`visualize`**.
 3. Admin → Models → your **general** chat model (not required on `auditor`):
