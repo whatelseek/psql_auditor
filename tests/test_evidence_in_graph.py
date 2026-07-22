@@ -27,14 +27,14 @@ async def test_execute_tool_calls_writes_full_result_to_req_folder(tmp_path: Pat
                 "id": "call-1",
             }
         ],
-        framework_id="ubuntu_cis",
+        framework_id="ubuntu_cis_24_l2",
         req_id="REQ-001",
         store=store,
     )
 
     assert len(messages) == 1
     assert "hello-world" in messages[0].content
-    req_dir = store.root / "ubuntu_cis" / "REQ-001"
+    req_dir = store.root / "ubuntu_cis_24_l2" / "REQ-001"
     txt = next(req_dir.glob("001_ssh_run.txt"))
     body = txt.read_text(encoding="utf-8")
     assert "echo hello-world" in body

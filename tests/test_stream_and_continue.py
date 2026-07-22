@@ -101,7 +101,7 @@ def test_session_store_roundtrip(tmp_path: Path):
         tmp_path,
         run_id,
         "tid-1",
-        {"run_id": run_id, "remaining": ["ubuntu_cis"], "ssh_target": None},
+        {"run_id": run_id, "remaining": ["ubuntu_cis_24_l2"], "ssh_target": None},
     )
     loaded = load_all_multi_sessions(tmp_path, run_id)
     assert "tid-1" in loaded

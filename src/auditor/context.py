@@ -12,7 +12,7 @@ Design goals:
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage
 
 from auditor.state import Finding
 
@@ -34,36 +34,6 @@ def truncate_text(text: str, max_chars: int, label: str = "output") -> str:
     return (
         f"{text[:keep]}\n\n…[truncated {label}: kept {keep} of {len(text)} chars]"
     )
-
-
-def truncate_tool_messages(
-    messages: list[BaseMessage],
-    max_chars: int,
-) -> list[BaseMessage]:
-    """Return a copy of ``messages`` with ToolMessage contents truncated.
-
-    Args:
-        messages: Messages possibly containing large tool results.
-        max_chars: Per-tool-message character budget.
-
-    Returns:
-        New list; non-tool messages are left unchanged (same instances).
-    """
-    out: list[BaseMessage] = []
-    for msg in messages:
-        if isinstance(msg, ToolMessage):
-            content = truncate_text(str(msg.content or ""), max_chars, "tool")
-            out.append(
-                ToolMessage(
-                    content=content,
-                    tool_call_id=msg.tool_call_id,
-                    name=getattr(msg, "name", None),
-                    id=getattr(msg, "id", None),
-                )
-            )
-        else:
-            out.append(msg)
-    return out
 
 
 def count_tool_rounds(messages: list[BaseMessage]) -> int:

@@ -401,11 +401,6 @@ class PostgresMcpPool:
 _POOL = PostgresMcpPool()
 
 
-def get_mcp_pool() -> PostgresMcpPool:
-    """Return the process-wide Postgres MCP session pool."""
-    return _POOL
-
-
 async def reconnect_mcp_session() -> str:
     """Public helper to recycle every pooled Postgres MCP session.
 

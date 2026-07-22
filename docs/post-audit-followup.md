@@ -24,7 +24,7 @@ One-shot alternative: `Revise REQ-…` still gathers **and** refills in a single
 
 ```text
 # Step 1 — tools only (no cell overwrite); include host when multi-host
-Evaluate REQ-001 on ubuntu_cis for host 10.200.29.78.
+Evaluate REQ-001 on ubuntu_cis_24_l2 for host 10.200.29.78.
 Look for PermitRootLogin. Use: sshd -T | grep -i permitrootlogin
 
 Gather evidence for REQ-002: `sshd -T | grep -i permitrootlogin`
@@ -35,7 +35,7 @@ Prepare new observation and recommendation for REQ-001
 Обнови наблюдение для REQ-002
 
 # (optional) another REQ before rebuilding
-Evaluate REQ-005 on ubuntu_cis for host 10.200.29.78. Check …
+Evaluate REQ-005 on ubuntu_cis_24_l2 for host 10.200.29.78. Check …
 Prepare new observation and recommendation for REQ-005
 
 # Step 3 — rebuild report / ZIP once
@@ -43,7 +43,7 @@ Update the report
 Обнови отчёт
 
 # One-shot (gather + refill)
-Revise REQ-002 on ubuntu_cis for host 10.200.29.78
+Revise REQ-002 on ubuntu_cis_24_l2 for host 10.200.29.78
 ```
 
 Open WebUI slash shortcuts (model **auditor**): `/gather-req`,
@@ -62,7 +62,7 @@ Open WebUI slash shortcuts (model **auditor**): `/gather-req`,
 Run selection order: explicit `run_id` / client folder in the message → evidence path / download link in chat history → newest folder under `EVIDENCE_DIR`.
 
 When the same REQ exists on **multiple hosts**, name the host (and framework), e.g.
-`for host 10.200.29.78` or `` `10.200.29.78/ubuntu_cis` ``.
+`for host 10.200.29.78` or `` `10.200.29.78/ubuntu_cis_24_l2` ``.
 
 If no prior audit exists, a REQ revise falls back to an **ad-hoc** run (new folder) and says so.
 

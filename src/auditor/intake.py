@@ -340,26 +340,6 @@ def format_intake_assistant_message(prompt: str, thread_id: str) -> str:
     )
 
 
-def extract_intake_thread_id(messages: list[Any]) -> str | None:
-    """Find intake thread only when it is the newest pause marker.
-
-    Delegates to :func:`~auditor.hitl.resolve_pause_resume` and returns the
-    thread id only when the active pause kind is ``intake``.
-
-    Args:
-        messages: Chat message history.
-
-    Returns:
-        Intake thread id string, or ``None`` when intake is not paused.
-    """
-    from auditor.hitl import resolve_pause_resume
-
-    resolved = resolve_pause_resume(messages)
-    if resolved and resolved[0] == "intake":
-        return resolved[1]
-    return None
-
-
 def intake_interrupt_payload(*, step: str, prompt: str, **extra: Any) -> dict[str, Any]:
     """Build a LangGraph interrupt payload dict for an intake step.
 

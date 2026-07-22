@@ -9,7 +9,6 @@ from auditor.config import Settings
 from auditor.graph import AuditorGraph, _hitl_candidates
 from auditor.hitl import (
     build_hitl_prompt,
-    extract_hitl_thread_id,
     format_hitl_assistant_message,
     interpret_hitl_decision,
     parse_hitl_decision,
@@ -45,7 +44,6 @@ def test_resolve_pause_resume_prefers_newest_hitl_over_old_intake():
         "hitl",
         "audit-1:10.0.0.1:postgres_cis",
     )
-    assert extract_hitl_thread_id(messages) == "audit-1:10.0.0.1:postgres_cis"
 
 
 @pytest.mark.asyncio
@@ -76,16 +74,16 @@ async def test_interpret_hitl_decision_skips_llm_for_clear_skip():
     mock_llm.ainvoke.assert_not_called()
 
 
-def test_extract_hitl_thread_id_from_history():
+def test_resolve_hitl_thread_id_from_history():
     messages = [
         {"role": "assistant", "content": "hello"},
         {
             "role": "assistant",
-            "content": format_hitl_assistant_message("prompt", "audit-abc:ubuntu_cis"),
+            "content": format_hitl_assistant_message("prompt", "audit-abc:ubuntu_cis_24_l2"),
         },
         {"role": "user", "content": "skip"},
     ]
-    assert extract_hitl_thread_id(messages) == "audit-abc:ubuntu_cis"
+    assert resolve_pause_resume(messages) == ("hitl", "audit-abc:ubuntu_cis_24_l2")
 
 
 def test_build_hitl_prompt_includes_why_and_options():
@@ -103,7 +101,7 @@ def test_build_hitl_prompt_includes_why_and_options():
         remediation="Fix SSH_HOST",
     )
     text = build_hitl_prompt(
-        framework_id="ubuntu_cis",
+        framework_id="ubuntu_cis_24_l2",
         requirement=req,
         finding=finding,
     )

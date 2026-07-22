@@ -1,10 +1,9 @@
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from auditor.context import (
     compact_findings_for_summary,
     count_tool_rounds,
     truncate_text,
-    truncate_tool_messages,
 )
 from auditor.state import Finding
 
@@ -14,17 +13,6 @@ def test_truncate_text_adds_marker():
     out = truncate_text(text, 50, "output")
     assert len(out) < 100
     assert "truncated" in out
-
-
-def test_truncate_tool_messages():
-    messages = [
-        HumanMessage(content="hi"),
-        ToolMessage(content="x" * 500, tool_call_id="1"),
-    ]
-    out = truncate_tool_messages(messages, 80)
-    assert isinstance(out[1], ToolMessage)
-    assert len(str(out[1].content)) < 200
-    assert "truncated" in str(out[1].content)
 
 
 def test_count_tool_rounds():

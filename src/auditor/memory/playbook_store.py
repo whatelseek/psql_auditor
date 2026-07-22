@@ -92,11 +92,6 @@ class PlaybookMemory:
         self._dirty = False
         self.reload()
 
-    @property
-    def store(self) -> InMemoryStore:
-        """Underlying LangGraph in-memory key-value store."""
-        return self._store
-
     def reload(self) -> None:
         """Load seed YAML then overlay learned JSON from ``memory_dir``.
 

@@ -75,7 +75,6 @@ Operators start audits in Open WebUI. The agent runs a **pre-audit intake**
 
 → **[`docs/starting-an-audit.md`](docs/starting-an-audit.md)**  
 → NetBox MCP: [`docs/netbox-mcp.md`](docs/netbox-mcp.md)  
-→ Example target file: [`docs/examples/target.example.yaml`](docs/examples/target.example.yaml)  
 → Connection secrets: [`secrets/connection.example.md`](secrets/connection.example.md)
 
 Short version:
@@ -100,7 +99,7 @@ Procedural memory remembers **how to verify** each REQ (SSH/SQL recipes) per fra
 
 - `Run a PostgreSQL CIS audit`
 - `Audit this Ubuntu host against CIS`
-- `Windows Server CIS hardening check`
+- `Conduct IT audit`
 - `Conduct PostgreSQL and Ubuntu audit` → **two separate graphs**, merged report + ZIP
 
 ## Stack

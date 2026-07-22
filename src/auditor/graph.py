@@ -94,9 +94,7 @@ from auditor.hitl import (
     interrupt_payload_to_prompt,
 )
 from auditor.progress import (
-    bind_progress_sink,
     emit_phase,
-    emit_reasoning,
     emit_req_status,
     emit_tool_call,
     emit_tool_result,
