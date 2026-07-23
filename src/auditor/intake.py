@@ -332,10 +332,8 @@ def prompts_for_language(code: str) -> IntakePrompts:
                 "## Предварительный опрос (4/4)\n\n"
                 "Живой план хостов недоступен (нет доступа / нет хостов в inventory).\n\n"
                 "Какой **домен** аудита провести?\n\n"
-                "1. **IT** — инвентаризация и базовые IT-контроли\n"
-                "2. **Cybersecurity** — CIS / hardening (Postgres / Ubuntu / Windows)\n"
-                "3. **both** — сначала IT, затем Cybersecurity\n\n"
-                "Можно ответить `IT`, `Cybersecurity`, `both` или своими словами."
+                "Опишите своими словами "
+                "(например: «только IT», «кибербезопасность / CIS», «и то и другое»)."
             ),
         )
     return IntakePrompts(
@@ -371,10 +369,8 @@ def prompts_for_language(code: str) -> IntakePrompts:
             "## Pre-audit intake (4/4)\n\n"
             "No live host plan is available (no access / no inventory hosts).\n\n"
             "Which audit **domain** should I run?\n\n"
-            "1. **IT** — inventory + baseline IT controls\n"
-            "2. **Cybersecurity** — CIS / hardening (Postgres / Ubuntu / Windows)\n"
-            "3. **both** — IT first, then Cybersecurity\n\n"
-            "Reply `IT`, `Cybersecurity`, `both`, or in your own words."
+            "Describe it in your own words "
+            "(e.g. \"IT only\", \"cybersecurity / CIS\", \"both\")."
         ),
     )
 
