@@ -27,7 +27,6 @@ Operator and developer docs for **auditor** (`psql_auditor`).
 | Doc | Topic |
 |-----|--------|
 | [LangChain MCP](langchain-mcp.md) | Postgres MCP pool / read-only SQL |
-| [NetBox MCP](netbox-mcp.md) | CMDB probe during intake |
 
 ## Architecture snapshot
 

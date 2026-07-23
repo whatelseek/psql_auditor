@@ -30,8 +30,6 @@ Intent = audit
       ▼
 intake_gate (may interrupt between steps)
   1. Client name          → artifacts/<Client>/ …
-  2. Has CMDB / NetBox?   → yes: probe NetBox MCP
-                          → no:  inventory only (never call NetBox)
   3. Access to servers?   → probe SSH (+ Postgres MCP when configured)
   4. Domain               → IT / Cybersecurity / both
       │
@@ -66,16 +64,6 @@ hints only).
 - Becomes the evidence root: `artifacts/<ClientName>/`
 - Used for results-warehouse session numbering (`results_<client_slug>`)
 - Clear short names work best (EN or RU)
-
-### 2. CMDB / NetBox
-
-| Answer | Behaviour |
-|--------|-----------|
-| **Yes** | Probe NetBox MCP (`NETBOX_URL` / `NETBOX_TOKEN` in `secrets/connection.md`) |
-| **No** | Inventory-only; NetBox tools stay blocked for the run |
-
-See [`netbox-mcp.md`](netbox-mcp.md). Without CMDB, hosts come from
-[`inventory/`](../inventory/INVENTORY.example.md) (per-client `INVENTORY.md`).
 
 ### 3. Access probe
 
@@ -116,12 +104,11 @@ Newest pause marker in chat history wins when resolving resume.
 |-----|---------|------|
 | `INTAKE_ENABLED` | `true` | Master switch for the questionnaire |
 | `INVENTORY_DIR` | `inventory` | Working inventory when CMDB = no |
-| NetBox / SSH / PG | `secrets/connection.md` | Credentials (not Compose env for secrets) |
+| SSH / PG | `secrets/connection.md` | Credentials (not Compose env for secrets) |
 
 ## Related
 
 - Chat routing: [`chat-intent.md`](chat-intent.md)
 - Starting an audit (operator guide): [`starting-an-audit.md`](starting-an-audit.md)
-- NetBox: [`netbox-mcp.md`](netbox-mcp.md)
 - Results sessions: [`results-database.md`](results-database.md)
 - Russian manual: [`user-manual-ru.md`](user-manual-ru.md)

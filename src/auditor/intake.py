@@ -1,12 +1,13 @@
-"""Предварительный опрос (intake): клиент, CMDB, доступ, план фреймворков.
+"""Предварительный опрос (intake): клиент, доступ, план фреймворков.
 
-Модуль ведёт **четыре шага опросника** перед checklist-аудитом (если intake
-включён). Собирает название клиента, наличие CMDB, доступ к серверам, затем
-предложение host→framework, которое оператор может урезать.
+Модуль ведёт **трёхшаговый опросник** перед checklist-аудитом (если intake
+включён). Собирает название клиента, доступ к серверам, затем предложение
+host→framework, которое оператор может урезать. Inventory — единственный
+источник хостов (без CMDB/NetBox).
 
 Роль в пайплайне:
     Граф прерывается маркерами ``[AUDIT_INTAKE:<thread>]`` между шагами.
-    Шаг 1 — детерминированный; шаги 2–4 разбираются только из JSON LLM
+    Шаг 1 — детерминированный; шаги 2–3 разбираются только из JSON LLM
     (без regex-fallback на пути intake).
 
 Ключевые точки входа:
@@ -14,10 +15,10 @@
     :func:`format_intake_assistant_message` — маркер intake в чате.
     :func:`resolve_client_name` — детерминированный шаг 1 (без LLM).
     :func:`resolve_yes_no` / :func:`resolve_audit_type`
-    / :func:`resolve_scope_decision` — только JSON LLM для шагов 2–4.
+    / :func:`resolve_scope_decision` — только JSON LLM для шагов 2–3.
     :func:`frameworks_for_audit_type` — домен → id фреймворков
     (fallback без доступа).
-    :func:`summarize_cmdb_capabilities` / :func:`summarize_access_probe` — Markdown проб.
+    :func:`summarize_access_probe` — Markdown access-пробы.
 """
 
 from __future__ import annotations
@@ -37,10 +38,10 @@ class IntakePrompts:
 
     Attributes:
         client: Шаг 1 — название клиента / организации.
-        cmdb: Шаг 2 — наличие CMDB / NetBox (да/нет).
-        access: Шаг 3 — доступ SSH/сервисов для пробы.
-        scope: Шаг 4 — подтвердить или исключить host→framework.
-        audit_type: Fallback шага 4 без плана хостов (нет доступа) — выбор домена.
+        cmdb: Устарело (CMDB/NetBox удалён); пустая строка для совместимости.
+        access: Шаг 2 — доступ SSH/сервисов для пробы.
+        scope: Шаг 3 — подтвердить или исключить host→framework.
+        audit_type: Fallback шага 3 без плана хостов — выбор домена.
     """
 
     client: str
@@ -300,17 +301,12 @@ def prompts_for_language(code: str) -> IntakePrompts:
     if (code or "en").startswith("ru"):
         return IntakePrompts(
             client=(
-                "## Предварительный опрос (1/4)\n\n"
+                "## Предварительный опрос (1/3)\n\n"
                 "Укажите **название клиента** (организация / проект)."
             ),
-            cmdb=(
-                "## Предварительный опрос (2/4)\n\n"
-                "Есть ли у клиента **CMDB / NetBox**?\n\n"
-                "Опишите ситуацию своими словами "
-                "(например: «NetBox есть в проде», «ведём учёт в Excel»)."
-            ),
+            cmdb="",
             access=(
-                "## Предварительный опрос (3/4)\n\n"
+                "## Предварительный опрос (2/3)\n\n"
                 "Есть ли у меня **доступ к серверам и сервисам** для проверки?\n\n"
                 "Опишите ситуацию своими словами "
                 "(например: «SSH на .79», «ты можешь туда попасть», "
@@ -319,7 +315,7 @@ def prompts_for_language(code: str) -> IntakePrompts:
                 "(сервис / IP / порт / статус / применимые фреймворки)."
             ),
             scope=(
-                "## Предварительный опрос (4/4)\n\n"
+                "## Предварительный опрос (3/3)\n\n"
                 "Ниже — предложенный план **хост → фреймворки**.\n\n"
                 "Ответьте **подтвердить** / **все**, чтобы запустить весь план, "
                 "или опишите, что **исключить** (свободный текст ок), например:\n"
@@ -329,7 +325,7 @@ def prompts_for_language(code: str) -> IntakePrompts:
                 "- «убери ubuntu на .78»\n"
             ),
             audit_type=(
-                "## Предварительный опрос (4/4)\n\n"
+                "## Предварительный опрос (3/3)\n\n"
                 "Живой план хостов недоступен (нет доступа / нет хостов в inventory).\n\n"
                 "Какой **домен** аудита провести?\n\n"
                 "Опишите своими словами "
@@ -338,17 +334,12 @@ def prompts_for_language(code: str) -> IntakePrompts:
         )
     return IntakePrompts(
         client=(
-            "## Pre-audit intake (1/4)\n\n"
+            "## Pre-audit intake (1/3)\n\n"
             "What is the **client name** (organization / engagement)?"
         ),
-        cmdb=(
-            "## Pre-audit intake (2/4)\n\n"
-            "Does the client have a **CMDB / NetBox**?\n\n"
-            "Describe the situation in your own words "
-            "(e.g. \"We use NetBox in prod\", \"We track assets in Excel only\")."
-        ),
+        cmdb="",
         access=(
-            "## Pre-audit intake (3/4)\n\n"
+            "## Pre-audit intake (2/3)\n\n"
             "Do I have **access to servers and services** to probe?\n\n"
             "Describe the situation in your own words "
             "(e.g. \"SSH on .79\", \"you can get in\", \"docs only for now\").\n\n"
@@ -356,7 +347,7 @@ def prompts_for_language(code: str) -> IntakePrompts:
             "(service / IP / port / status / applicable frameworks)."
         ),
         scope=(
-            "## Pre-audit intake (4/4)\n\n"
+            "## Pre-audit intake (3/3)\n\n"
             "Below is the proposed **host → frameworks** plan.\n\n"
             "Reply **confirm** / **all** / **run all** to accept the full plan, "
             "or say what to **exclude** (free-form OK), e.g.:\n"
@@ -366,7 +357,7 @@ def prompts_for_language(code: str) -> IntakePrompts:
             "- \"skip ubuntu on .78\"\n"
         ),
         audit_type=(
-            "## Pre-audit intake (4/4)\n\n"
+            "## Pre-audit intake (3/3)\n\n"
             "No live host plan is available (no access / no inventory hosts).\n\n"
             "Which audit **domain** should I run?\n\n"
             "Describe it in your own words "
@@ -700,74 +691,6 @@ def intake_interrupt_payload(*, step: str, prompt: str, **extra: Any) -> dict[st
         Dict с ``type``, ``step``, ``prompt`` и любыми extra-ключами.
     """
     return {"type": "intake", "step": step, "prompt": prompt, **extra}
-
-
-def summarize_cmdb_capabilities(probe: dict[str, Any], *, language: str = "en") -> str:
-    """Сформировать Markdown-таблицу результатов пробы NetBox/CMDB.
-
-    Args:
-        probe: Dict с ``reachable``, опционально ``error`` и картой ``fields``.
-        language: ``"en"`` или русский при префиксе ``ru``.
-
-    Returns:
-        Markdown-секция о доступности полей CMDB.
-    """
-    reachable = bool(probe.get("reachable"))
-    fields = probe.get("fields") or {}
-    if language.startswith("ru"):
-        lines = ["### Результат проверки NetBox", ""]
-        if not reachable:
-            lines.append(f"**Недоступен:** {probe.get('error') or 'нет ответа'}")
-            return "\n".join(lines)
-        lines.append("**Подключение:** успешно")
-        lines.append("")
-        lines.append("| Поле | Доступно |")
-        lines.append("|---|---|")
-        labels = {
-            "hostname": "Hostname",
-            "ip": "IP",
-            "subnet": "Subnet",
-            "owner": "Owner",
-            "cpu": "CPU",
-            "ram": "RAM",
-            "storage": "HDD/SSD",
-            "location": "Location",
-            "access_port": "Access port",
-            "access_method": "Access method",
-        }
-        for key, label in labels.items():
-            info = fields.get(key) or {}
-            ok = "да" if info.get("available") else "нет"
-            note = info.get("note") or ""
-            lines.append(f"| {label} | {ok}" + (f" — {note}" if note else "") + " |")
-        return "\n".join(lines)
-
-    lines = ["### NetBox probe result", ""]
-    if not reachable:
-        lines.append(f"**Unreachable:** {probe.get('error') or 'no response'}")
-        return "\n".join(lines)
-    lines.append("**Connection:** ok")
-    lines.append("")
-    lines.append("| Field | Available |")
-    lines.append("|---|---|")
-    labels = {
-        "hostname": "Hostname",
-        "ip": "IP",
-        "subnet": "Subnet",
-        "owner": "Owner",
-        "cpu": "CPU",
-        "ram": "RAM",
-        "storage": "HDD/SSD",
-        "location": "Location",
-        "access_port": "Access port",
-        "access_method": "Access method",
-    }
-    for key, label in labels.items():
-        info = fields.get(key) or {}
-        ok = "yes" if info.get("available") else "no"
-        note = info.get("note") or ""
-        lines.append(f"| {label} | {ok}" + (f" — {note}" if note else "") + " |")
-    return "\n".join(lines)
 
 
 def summarize_access_probe(probe: dict[str, Any], *, language: str = "en") -> str:

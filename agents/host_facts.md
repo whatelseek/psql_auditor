@@ -14,7 +14,7 @@ Prefer SSH tools; do not invent values.
 ## REQ-001: Inventory completeness
 **Category:** Inventory
 **Severity:** High
-**How to verify:** Collect hostname (`hostname -f`), IPv4 addresses (`hostname -I` or `ip -4 addr`), OS name (`hostnamectl`), and hardware UUID (`dmidecode -s system-uuid` when permitted). Record location/owner from CMDB (NetBox) or INVENTORY.md.
+**How to verify:** Collect hostname (`hostname -f`), IPv4 addresses (`hostname -I` or `ip -4 addr`), OS name (`hostnamectl`), and hardware UUID (`dmidecode -s system-uuid` when permitted). Record location/owner from INVENTORY.md.
 **Pass criteria:** Hostname, OS version, and at least one non-loopback IPv4 address are recorded in evidence.
 
 ---

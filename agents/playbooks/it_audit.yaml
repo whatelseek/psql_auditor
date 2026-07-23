@@ -1,8 +1,8 @@
 framework_id: it_audit
 framework_tips:
-  - Prefer deterministic ssh_run / netbox_* / mcp_query over freeform exploration.
+  - Prefer deterministic ssh_run / mcp_query over freeform exploration.
   - Host facts may already be in host_facts.md from the pre-assess collector.
-  - Do not mutate NetBox (read-only MCP).
+  - Use inventory/<client>/INVENTORY.md for host and credential scope.
 requirements:
   REQ-001:
     tools:
@@ -33,14 +33,8 @@ requirements:
         arguments:
           command: "df -h 2>/dev/null | head -n 20"
   REQ-006:
-    # When CMDB=no, graph resolves this REQ deterministically from INVENTORY.md
-    # (no NetBox call). Tools below apply only when CMDB/NetBox is in use.
-    tools:
-      - name: netbox_get_objects
-        arguments:
-          object_type: devices
-          filters_json: "{}"
-          fields_json: "[\"id\",\"name\",\"primary_ip4\",\"site\",\"tenant\"]"
+    # Graph resolves this REQ deterministically from INVENTORY.md (inventory-only).
+    tools: []
   REQ-007:
     # Resolved from intake access_probe (no remote command required).
     tools: []

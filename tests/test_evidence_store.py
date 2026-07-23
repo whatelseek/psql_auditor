@@ -73,8 +73,8 @@ def test_deterministic_it_audit_req006_without_cmdb(tmp_path: Path):
     (store.root / "INVENTORY.md").write_text("# inv\n", encoding="utf-8")
     req = Requirement(
         id="REQ-006",
-        title="CMDB consistency (NetBox)",
-        category="CMDB",
+        title="Inventory consistency",
+        category="Inventory",
         severity="High",
         how_to_verify="x",
         pass_criteria="y",

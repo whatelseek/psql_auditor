@@ -1,13 +1,12 @@
-"""Host inventory facts: LLM gather, deterministic parsers, CMDB drift, inventory I/O.
+"""Host inventory facts: LLM gather, deterministic parsers, inventory I/O.
 
 Collects and normalizes target-host metadata during pre-audit intake and host-
 facts nodes. Intake discovery assesses ``agents/host_facts.md`` (then fills
-JSON); parsers merge tool stdout into :class:`HostFacts`. Optional NetBox CMDB
-compare, disk JSON, and Markdown for graph state (``host_facts_md``,
-``cmdb_drift_md``).
+JSON); parsers merge tool stdout into :class:`HostFacts`. Writes disk JSON and
+Markdown for graph state (``host_facts_md``).
 
-Also maintains per-client ``INVENTORY.md`` files when no CMDB is available.
-Framework auto-selection (:mod:`auditor.frameworks`) consumes ``os_id``,
+Also maintains per-client ``INVENTORY.md`` files used as the host/credential
+source. Framework auto-selection (:mod:`auditor.frameworks`) consumes ``os_id``,
 ``binaries``, and ``listening_ports`` from :class:`HostFacts`.
 """
 
@@ -68,7 +67,7 @@ class HostFacts:
 
 @dataclass
 class DriftItem:
-    """One CMDB comparison row between expected (NetBox) and observed host data.
+    """One optional drift comparison row (legacy host_facts JSON compatibility).
 
   Attributes:
       field: Compared attribute name (``hostname``, ``ip``, ``device``, …).
@@ -417,86 +416,6 @@ def merge_facts_from_raw(facts: HostFacts, raw: dict[str, str] | None = None) ->
     return facts
 
 
-def compare_to_netbox(
-    facts: HostFacts,
-    netbox_device: dict[str, Any] | None,
-) -> list[DriftItem]:
-    """Highlight hostname and primary IP differences vs a NetBox device record.
-
-  Compares case-insensitive hostname equality and checks whether the NetBox
-  primary IPv4 appears in ``facts.ips``.
-
-  Args:
-      facts: Live host facts from probes.
-      netbox_device: NetBox API device dict, or ``None`` when CMDB has no match.
-
-  Returns:
-      List of :class:`DriftItem` rows (may be a single ``missing_cmdb`` row).
-  """
-    if not netbox_device:
-        return [
-            DriftItem(
-                field="device",
-                expected="(none)",
-                observed=facts.hostname or "(unknown)",
-                status="missing_cmdb",
-            )
-        ]
-    items: list[DriftItem] = []
-    nb_name = str(
-        netbox_device.get("name")
-        or netbox_device.get("display")
-        or netbox_device.get("hostname")
-        or ""
-    ).strip()
-    if facts.hostname and nb_name:
-        status = "match" if facts.hostname.lower() == nb_name.lower() else "mismatch"
-        items.append(
-            DriftItem(
-                field="hostname",
-                expected=nb_name,
-                observed=facts.hostname,
-                status=status,
-            )
-        )
-    elif facts.hostname and not nb_name:
-        items.append(
-            DriftItem(
-                field="hostname",
-                expected="(missing in NetBox)",
-                observed=facts.hostname,
-                status="missing_cmdb",
-            )
-        )
-
-    nb_ip = ""
-    primary = netbox_device.get("primary_ip4") or netbox_device.get("primary_ip")
-    if isinstance(primary, dict):
-        nb_ip = str(primary.get("address") or primary.get("display") or "").split("/")[0]
-    elif isinstance(primary, str):
-        nb_ip = primary.split("/")[0]
-    nb_ip = nb_ip.strip()
-    if facts.ips and nb_ip:
-        status = "match" if nb_ip in facts.ips else "mismatch"
-        items.append(
-            DriftItem(
-                field="ip",
-                expected=nb_ip,
-                observed=", ".join(facts.ips),
-                status=status,
-            )
-        )
-    elif facts.ips and not nb_ip:
-        items.append(
-            DriftItem(
-                field="ip",
-                expected="(missing in NetBox)",
-                observed=", ".join(facts.ips),
-                status="missing_cmdb",
-            )
-        )
-    return items
-
 
 def facts_to_dict(facts: HostFacts) -> dict[str, Any]:
     """Serialize :class:`HostFacts` to a plain dict via :func:`dataclasses.asdict`.
@@ -511,7 +430,7 @@ def facts_to_dict(facts: HostFacts) -> dict[str, Any]:
 
 
 def write_host_facts_json(path: Path, facts: HostFacts, drift: list[DriftItem]) -> Path:
-    """Write host facts and CMDB drift rows to a JSON artifact file.
+    """Write host facts (and optional empty drift list) to a JSON artifact file.
 
   Creates parent directories as needed. Payload includes ``written_at`` UTC
   timestamp metadata.
@@ -519,7 +438,7 @@ def write_host_facts_json(path: Path, facts: HostFacts, drift: list[DriftItem]) 
   Args:
       path: Destination ``.json`` file path.
       facts: Host facts to persist.
-      drift: CMDB comparison rows from :func:`compare_to_netbox`.
+      drift: Optional drift rows (usually empty; kept for artifact shape).
 
   Returns:
       The same ``path`` after writing.
@@ -540,14 +459,14 @@ def format_host_facts_markdown(
     *,
     language: str = "en",
 ) -> str:
-    """Render host facts (and optional CMDB drift) as Markdown for graph state.
+    """Render host facts as Markdown for graph state.
 
   Produces a section suitable for ``AuditorState.host_facts_md`` with hostname,
   OS, network, binaries, ports, resource excerpts, and an optional drift table.
 
   Args:
       facts: Host facts to display.
-      drift: Optional CMDB comparison rows.
+      drift: Optional legacy drift rows (usually unused).
       language: ``"ru"`` prefix selects Russian section headings; else English.
 
   Returns:
@@ -588,7 +507,7 @@ def format_host_facts_markdown(
         ]
     )
     if drift:
-        title = "Расхождения с CMDB (NetBox)" if ru else "CMDB drift (NetBox)"
+        title = "Расхождения с inventory" if ru else "Inventory drift"
         lines.extend([f"## {title}", "", "| Field | Expected | Observed | Status |", "|---|---|---|---|"])
         for item in drift:
             mark = item.status
@@ -778,7 +697,7 @@ def resolve_client_inventory(
         (
             f"No inventory file found at `{path}`.\n\n"
             f"Create that file with audit scope **and** a credentials table "
-            f"(SSH/PG/NetBox hosts, ports, users), or copy from "
+            f"(SSH/PG hosts, ports, users), or copy from "
             f"`inventory/INVENTORY.example.md`, then continue."
         ),
         False,

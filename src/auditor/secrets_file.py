@@ -1,7 +1,7 @@
 """Load connection credentials from ``secrets/*.md`` (not from Compose).
 
 This module parses **Markdown credential tables** and fenced ``KEY=VALUE`` blocks
-from operator-maintained secret files. It loads SSH, PostgreSQL, and NetBox
+from operator-maintained secret files. It loads SSH and PostgreSQL
 settings into the process environment without requiring them in ``docker-compose``.
 
 Pipeline role:
@@ -46,11 +46,6 @@ _SECRET_ENV_KEYS = frozenset(
         "PG_DATABASE",
         "MCP_POSTGRES_COMMAND",
         "MCP_POSTGRES_ARGS",
-        "NETBOX_URL",
-        "NETBOX_TOKEN",
-        "NETBOX_VERIFY_SSL",
-        "MCP_NETBOX_COMMAND",
-        "MCP_NETBOX_ARGS",
     }
 )
 
@@ -121,7 +116,7 @@ def _parse_extra(extra: str) -> dict[str, str]:
 
 
 def _access_kind(label: str) -> str | None:
-    """Map an inventory ``Access`` column label to ``ssh``, ``pg``, or ``netbox``.
+    """Map an inventory ``Access`` column label to ``ssh`` or ``pg``.
 
     Args:
         label: Access/service type cell (e.g. ``SSH``, ``PostgreSQL``, ``1C Ubuntu``).
@@ -150,8 +145,6 @@ def _access_kind(label: str) -> str | None:
         return "ssh"
     if low.startswith("postgres") or low in {"pg", "psql", "database", "db"}:
         return "pg"
-    if "netbox" in low or low in {"cmdb", "dcim"}:
-        return "netbox"
     return None
 
 
@@ -263,18 +256,6 @@ def _parse_credentials_table(text: str) -> dict[str, str]:
                 db = extra.get("bare") or ""
             if db:
                 out["PG_DATABASE"] = db
-        elif kind == "netbox":
-            if host:
-                out["NETBOX_URL"] = host
-            if secret:
-                out["NETBOX_TOKEN"] = secret
-            if (
-                port
-                and host
-                and "://" not in host
-                and port not in {"443", "80", ""}
-            ):
-                out["NETBOX_URL"] = f"https://{host}:{port}"
     return out
 
 
@@ -602,7 +583,7 @@ def read_client_credentials(
     inventory_dir: Path | str,
     client_slug_name: str,
 ) -> dict[str, str]:
-    """Parse SSH/PG/NetBox keys from the client inventory without mutating env.
+    """Parse SSH/PG keys from the client inventory without mutating env.
 
     Same file order as :func:`load_inventory_credentials` (``INVENTORY.md`` then
     ``connection.md``), but returns a new dict only — safe for concurrent runs.
@@ -685,7 +666,7 @@ def load_inventory_credentials(
     environ: dict[str, str] | None = None,
     override_existing: bool = True,
 ) -> dict[str, str]:
-    """Load SSH/PG/NetBox keys from the client inventory folder.
+    """Load SSH/PG keys from the client inventory folder.
 
     Reads, in order (later files override earlier for the same key when
     ``override_existing`` is true within this load):

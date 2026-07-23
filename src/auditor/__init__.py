@@ -13,7 +13,7 @@ Pipeline role:
 Key subpackages:
     * ``checklist`` — Parse Markdown requirements into structured objects.
     * ``graph`` — LangGraph workflow: route → assess → reconnect / HITL → finalize.
-    * ``tools`` — SSH host inspection and LangChain MCP adapters (Postgres, NetBox).
+    * ``tools`` — SSH host inspection and LangChain MCP adapters (Postgres).
     * ``memory`` — Long-term procedural playbooks (preferred tool recipes per REQ).
     * ``llm`` — LiteLLM-backed chat model factory.
     * ``api`` — OpenAI-compatible HTTP API for Open WebUI.

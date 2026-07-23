@@ -4,7 +4,6 @@ from pathlib import Path
 
 from auditor.host_facts import (
     HostFacts,
-    compare_to_netbox,
     parse_binaries_present,
     parse_hostname,
     parse_ips,
@@ -86,22 +85,6 @@ def test_parse_os_and_software():
         "docker",
     ]
     assert 5432 in parse_listening_ports("LISTEN 0 128 0.0.0.0:5432 0.0.0.0:*\n")
-
-
-def test_compare_drift_mismatch():
-    facts = HostFacts(hostname="live-host", ips=["10.0.0.9"])
-    nb = {"name": "cmdb-host", "primary_ip4": {"address": "10.0.0.8/24"}}
-    items = compare_to_netbox(facts, nb)
-    by_field = {i.field: i for i in items}
-    assert by_field["hostname"].status == "mismatch"
-    assert by_field["ip"].status == "mismatch"
-
-
-def test_compare_drift_match():
-    facts = HostFacts(hostname="db-01", ips=["10.0.0.8", "10.0.0.9"])
-    nb = {"name": "db-01", "primary_ip4": "10.0.0.8/24"}
-    items = compare_to_netbox(facts, nb)
-    assert all(i.status == "match" for i in items)
 
 
 def test_upsert_inventory(tmp_path: Path):

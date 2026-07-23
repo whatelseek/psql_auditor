@@ -191,14 +191,6 @@ class Settings(BaseSettings):
     mcp_postgres_command: str = "npx"
     mcp_postgres_args: str = "-y mcp-postgres-server"
     mcp_postgres_pool_size: int = Field(default=3, ge=1, le=16)
-    # --- NetBox CMDB via netboxlabs/netbox-mcp-server ---
-    netbox_url: str | None = None
-    netbox_token: str | None = None
-    netbox_verify_ssl: bool = True
-    mcp_netbox_command: str = "uv"
-    mcp_netbox_args: str = (
-        "--directory /opt/netbox-mcp-server run netbox-mcp-server"
-    )
 
     # --- Context window / quality / parallelism guards ---
     # One requirement per LLM window; truncate tools; cap ReAct depth.

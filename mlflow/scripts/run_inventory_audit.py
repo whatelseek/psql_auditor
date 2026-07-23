@@ -87,31 +87,30 @@ def _step_kind(content: str) -> str:
 def _reply_for_intake(content: str, client: str) -> str:
     """Choose the next intake answer from the assistant prompt.
 
-    Step markers (``1/4`` … ``4/4``) win over keywords — later steps often
-    echo earlier answers (e.g. NetBox unreachable text inside step 3).
+    Step markers (``1/3`` … ``3/3``) win over keywords — later steps often
+    echo earlier answers.
     """
     lower = content.lower()
-    if "1/4" in lower or (
-        "client name" in lower and "2/4" not in lower and "3/4" not in lower
-    ):
-        return client
-    if "4/4" in lower or (
-        ("confirm" in lower or "exclude" in lower)
-        and "1/4" not in lower
+    if "1/3" in lower or "1/4" in lower or (
+        "client name" in lower
+        and "2/3" not in lower
+        and "3/3" not in lower
         and "2/4" not in lower
         and "3/4" not in lower
     ):
+        return client
+    if "3/3" in lower or "4/4" in lower or (
+        ("confirm" in lower or "exclude" in lower)
+        and "1/3" not in lower
+        and "2/3" not in lower
+        and "1/4" not in lower
+        and "2/4" not in lower
+    ):
         return "confirm"
-    if "3/4" in lower or (
+    if "2/3" in lower or "3/4" in lower or (
         "access to servers" in lower or "access to servers and services" in lower
     ):
         return "yes"
-    if "2/4" in lower or (
-        ("cmdb" in lower or "netbox" in lower)
-        and "3/4" not in lower
-        and "4/4" not in lower
-    ):
-        return "no"
     if "yes" in lower and "no" in lower:
         return "yes"
     return "confirm"

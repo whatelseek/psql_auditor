@@ -329,9 +329,9 @@ Critical — who the question is about:
 - "SSH на .79" / "ты можешь туда попасть" / "go ahead and connect" → yes
 - "пока только документы, без SSH" / "агенту доступа нет" → no
 
-CMDB examples:
-- "We use NetBox in prod" / "NetBox есть" → yes
-- "ведём учёт в Excel" / "CMDB нет" → no
+Inventory / access examples (when the question is about CMDB-style systems):
+- "We track assets in Excel only" / "ведём учёт в Excel" → no
+- "CMDB нет" / "только бумажный учёт" → no
 
 Other rules:
 - Answering a yes/no availability question with a colloquial affirmative

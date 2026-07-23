@@ -10,7 +10,6 @@ loads that table after you answer the client name during intake.
 |--------|------------|------|----------|------------------|----------|
 | SSH | 10.0.0.10 | 22 | auditor | | |
 | PostgreSQL | 10.0.0.10 | 5432 | postgres | changeme | postgres |
-| NetBox | https://netbox.example.com | 443 | | nb_token_here | |
 
 `Database` is only needed for PostgreSQL rows. Optional private-key path: put
 `SSH_PRIVATE_KEY_PATH=…` in a short ``env`` fence under this table, or in

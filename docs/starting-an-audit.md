@@ -21,14 +21,11 @@ Open WebUI chat (model: auditor)
   ▼
 Agent — intake (chat Q&A, marker [AUDIT_INTAKE:…])   ← pre-audit-intake.md
   ├─ Client name
-  ├─ Has CMDB / NetBox?
-  │     ├─ yes → probe NetBox MCP
-  │     └─ no  → inventory only (never call NetBox)
   ├─ Access to servers/services?
   │     ├─ yes → probe SSH + Postgres MCP, discover inventory hosts,
   │     │         propose host → frameworks plan
   │     └─ no  → no live host plan
-  └─ Scope (step 4)
+  └─ Scope
         ├─ with plan → confirm all, or exclude frameworks / host-fw pairs
         └─ without plan → IT / Cybersecurity / both (legacy domain pick)
   │
@@ -48,7 +45,7 @@ follow-up intents never run intake.
    - `Start an audit`
    - `Run IT audit`
    - `Conduct cybersecurity audit`
-3. Answer intake questions (client name → CMDB → access → **confirm/exclude frameworks**).
+3. Answer intake questions (client name → access → **confirm/exclude frameworks**).
 4. If HITL prompts appear during the run, reply **skip** / **retry**.
 5. Download the **audit ZIP** from the chat reply.
 
@@ -57,11 +54,8 @@ After access = **yes**, the agent pre-scans inventory hosts and shows a
 `exclude ubuntu_cis_24_l2, postgres_cis` / `exclude 10.0.0.1/ubuntu_cis_24_l2`
 to trim scope before assessment starts.
 
-When CMDB = **no**, the agent uses **inventory only** (no NetBox tools). Host list
-and credentials come from the client `INVENTORY.md` credentials table.
-
-NetBox credentials (only when CMDB = yes): [`secrets/connection.md`](../secrets/connection.example.md)
-(`NETBOX_URL`, `NETBOX_TOKEN`). See [`netbox-mcp.md`](netbox-mcp.md).
+Host list and credentials come from the client `INVENTORY.md` credentials table
+(and optional `secrets/connection.md` for SSH/PG defaults).
 
 ## Target file format
 

@@ -28,7 +28,7 @@ def test_resolve_yes_no_llm_payload():
     # Steps 2–3: intake interpret model decides; we only normalize its answer.
     assert resolve_yes_no("yes", {"answer": "no"}) == "no"
     assert resolve_yes_no("no", {"answer": "yes"}) == "yes"
-    assert resolve_yes_no("We use NetBox in prod", {"answer": "yes"}) == "yes"
+    assert resolve_yes_no("We track assets in Excel", {"answer": "no"}) == "no"
     assert resolve_yes_no("nayn", {"answer": "no"}) == "no"
     assert resolve_yes_no("yep!", {"answer": "yes"}) == "yes"
     assert resolve_yes_no("Follow white rabbit", {"answer": "unknown"}) == "unknown"
@@ -59,8 +59,8 @@ def test_intake_clarification_from_payload():
         == "Это вопрос про доступ по SSH."
     )
     assert (
-        intake_clarification_from_payload({"help": "CMDB means NetBox inventory."})
-        == "CMDB means NetBox inventory."
+        intake_clarification_from_payload({"help": "Explain what access means."})
+        == "Explain what access means."
     )
 
 

@@ -32,7 +32,6 @@ def test_parse_credentials_table():
 |--------|------------|------|----------|------------------|----------|
 | SSH | 10.200.29.79 | 22 | user | EDCrfv123 | |
 | PostgreSQL | 10.200.29.79 | 5432 | hermes_ro | EDCrfv123 | test_1c |
-| NetBox | https://nb.example | 443 | | tok123 | |
 """
     parsed = parse_inventory_credentials(text)
     assert parsed["SSH_HOST"] == "10.200.29.79"
@@ -44,8 +43,6 @@ def test_parse_credentials_table():
     assert parsed["PG_USER"] == "hermes_ro"
     assert parsed["PG_PASSWORD"] == "EDCrfv123"
     assert parsed["PG_DATABASE"] == "test_1c"
-    assert parsed["NETBOX_URL"] == "https://nb.example"
-    assert parsed["NETBOX_TOKEN"] == "tok123"
 
 
 def test_list_inventory_ssh_targets_multi_host():
@@ -57,7 +54,6 @@ def test_list_inventory_ssh_targets_multi_host():
 | SSH | 10.200.29.79 | 22 | user | EDCrfv123 | |
 | PostgreSQL | 10.200.29.79 | 5432 | hermes_ro | EDCrfv123 | test_1c |
 | 1C Ubuntu | 10.200.29.78 | 22 | hermes_ro | EDCrfv123 | |
-| NetBox | | | | | |
 """
     targets = list_inventory_ssh_targets(text)
     hosts = [t.host for t in targets]

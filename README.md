@@ -80,23 +80,22 @@ Configure `PUBLIC_BASE_URL` (browser → agent) and `OPEN_WEBUI_URL` (agent → 
 
 Operators start audits in Open WebUI. Messages are **routed by intent**
 ([`docs/chat-intent.md`](docs/chat-intent.md)). A full audit then runs
-**pre-audit intake** (client → CMDB/NetBox → access → IT / Cybersecurity / both)
+**pre-audit intake** (client → access → host→framework plan / domain)
 ([`docs/pre-audit-intake.md`](docs/pre-audit-intake.md)), then assesses.
 
 → **[`docs/starting-an-audit.md`](docs/starting-an-audit.md)**  
 → Docs index: [`docs/README.md`](docs/README.md)  
-→ NetBox MCP: [`docs/netbox-mcp.md`](docs/netbox-mcp.md)  
 → Connection secrets: [`secrets/connection.example.md`](secrets/connection.example.md)
 
 Short version:
 
 1. Open WebUI → model `auditor`
 2. Chat: `Start PostgreSQL CIS audit` (or IT audit / both)
-3. Answer intake questions; agent probes NetBox / SSH / Postgres as applicable
+3. Answer intake questions; agent probes SSH / Postgres as applicable
 4. Report + **Download ZIP** (includes host facts / INVENTORY.md when relevant)
 
 Without a CMDB, scope comes from [`inventory/INVENTORY.md`](inventory/INVENTORY.example.md).
-SSH/PG/NetBox credentials live only in [`secrets/connection.md`](secrets/connection.example.md).
+SSH/PG credentials live only in [`secrets/connection.md`](secrets/connection.example.md).
 
 ### Long-term memory (command playbooks)
 

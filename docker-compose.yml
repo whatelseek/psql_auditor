@@ -58,7 +58,7 @@ services:
       OPEN_WEBUI_PASSWORD: ${OPEN_WEBUI_PASSWORD:-admin}
       MAX_SESSION_RETRIES: ${MAX_SESSION_RETRIES:-2}
       API_KEY: ${API_KEY:-sk-auditor-local}
-      # SSH / PG / NetBox / MCP: secrets/connection.md only (mounted below)
+      # SSH / PG / MCP: secrets/connection.md only (mounted below)
       SECRETS_DIR: /app/secrets
       INTAKE_ENABLED: ${INTAKE_ENABLED:-true}
       INVENTORY_DIR: /app/inventory

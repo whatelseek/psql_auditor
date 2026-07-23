@@ -76,8 +76,6 @@ Tips:
 - For faster DB-heavy audits, raise both `MAX_PARALLEL_ASSESSMENTS` (e.g. `10`)
   and `MCP_POSTGRES_POOL_SIZE` toward that value (hard cap `16`).
 - Each pool worker is an extra Node/`npx` process — keep the pool modest.
-- NetBox CMDB uses the same adapter pattern but a **single** stateful session
-  (see [`netbox-mcp.md`](netbox-mcp.md)); CMDB calls are infrequent.
 
 ## Reconnect
 

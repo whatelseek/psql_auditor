@@ -11,7 +11,7 @@ Per-client audit scope **and credentials**.
 During intake, after you give the **client name**, the agent:
 
 1. Resolves `inventory/<ClientName>/` (case-insensitive)
-2. Loads SSH / Postgres / NetBox from the **Credentials & access** table
+2. Loads SSH / Postgres from the **Credentials & access** table
 3. Checks whether `INVENTORY.md` exists for scope
 
 Do **not** put client passwords in `docker-compose.yml`. Global

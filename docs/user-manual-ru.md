@@ -197,7 +197,7 @@ ad-hoc команда, доработка REQ, список сессий и т.�
 
 ### 6.1. Базовый сценарий
 
-1. Убедитесь, что в `secrets/connection.md` заданы `SSH_*` и/или `PG_*` (и при наличии CMDB — `NETBOX_URL` / `NETBOX_TOKEN`).
+1. Убедитесь, что в `secrets/connection.md` заданы `SSH_*` и/или `PG_*` (SSH/PG).
 2. В чате с моделью `auditor` напишите, **какой фреймворк** запускать, например:
 
 ```text
@@ -206,13 +206,13 @@ ad-hoc команда, доработка REQ, список сессий и т.�
 Проведи аудит PostgreSQL и Ubuntu
 ```
 
-3. Ответьте на опрос: клиент → есть ли NetBox → есть ли доступ → **подтвердить/исключить фреймворки** по плану хостов (или `IT` / `Cybersecurity` / `both`, если живого плана нет).
+3. Ответьте на опрос: клиент → есть ли доступ → **подтвердить/исключить фреймворки** по плану хостов (или `IT` / `Cybersecurity` / `both`, если живого плана нет).
 4. При HITL ответьте `skip` / `retry` (или `пропустить` / `повторить`).
 5. Скачайте ZIP по ссылке в конце ответа (`host_facts.md` / `INVENTORY.md` при необходимости).
 
 ### 6.2. Креденшелы и инвентарь
 
-Храните SSH / Postgres / NetBox в [`secrets/connection.md`](../secrets/connection.example.md).
+Храните SSH / Postgres в [`secrets/connection.md`](../secrets/connection.example.md).
 Без CMDB используйте [`inventory/INVENTORY.md`](../inventory/INVENTORY.example.md).
 В чате можно описать хост текстом; отдельный парсер «target-файла» не используется —
 источник истины: secrets + inventory.

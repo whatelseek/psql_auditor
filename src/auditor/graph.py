@@ -2102,6 +2102,8 @@ class AuditorGraph:
         if framework_id != "it_audit":
             return None
 
+        intake = state.get("intake") or {}
+
         if req_id == "REQ-006":
             inv_path = store.root / "INVENTORY.md" if store is not None else None
             if inv_path is not None and inv_path.is_file():
