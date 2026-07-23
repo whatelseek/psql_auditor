@@ -1,23 +1,23 @@
-"""Pre-audit intake: client, CMDB, access, framework scope (chat interrupts).
+"""Предварительный опрос (intake): клиент, CMDB, доступ, план фреймворков.
 
-This module drives the **four-step questionnaire** that runs before a checklist
-audit when intake is enabled. It collects client name, CMDB availability,
-server access, then a host→framework proposal the operator can trim.
+Модуль ведёт **четыре шага опросника** перед checklist-аудитом (если intake
+включён). Собирает название клиента, наличие CMDB, доступ к серверам, затем
+предложение host→framework, которое оператор может урезать.
 
-Pipeline role:
-    The graph interrupts with ``[AUDIT_INTAKE:<thread>]`` markers between
-    steps. Step 1 is deterministic; steps 2–4 resolve from LLM JSON only
-    (no regex fallback on the intake path).
+Роль в пайплайне:
+    Граф прерывается маркерами ``[AUDIT_INTAKE:<thread>]`` между шагами.
+    Шаг 1 — детерминированный; шаги 2–4 разбираются только из JSON LLM
+    (без regex-fallback на пути intake).
 
-Key entry points:
-    :func:`prompts_for_language` — localized step prompts (EN/RU).
-    :func:`format_intake_assistant_message` — embed intake marker in chat.
-    :func:`resolve_client_name` — deterministic step 1 (no LLM).
+Ключевые точки входа:
+    :func:`prompts_for_language` — локализованные промпты шагов (EN/RU).
+    :func:`format_intake_assistant_message` — маркер intake в чате.
+    :func:`resolve_client_name` — детерминированный шаг 1 (без LLM).
     :func:`resolve_yes_no` / :func:`resolve_audit_type`
-    / :func:`resolve_scope_decision` — LLM JSON only for steps 2–4.
-    :func:`frameworks_for_audit_type` — map domain choice to framework ids
-    (no-access fallback).
-    :func:`summarize_cmdb_capabilities` / :func:`summarize_access_probe` — probe Markdown.
+    / :func:`resolve_scope_decision` — только JSON LLM для шагов 2–4.
+    :func:`frameworks_for_audit_type` — домен → id фреймворков
+    (fallback без доступа).
+    :func:`summarize_cmdb_capabilities` / :func:`summarize_access_probe` — Markdown проб.
 """
 
 from __future__ import annotations
@@ -26,21 +26,21 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
-# ``cis`` retained as alias of ``cybersecurity`` for backward compatibility.
+# ``cis`` оставлен как алиас ``cybersecurity`` для обратной совместимости.
 AuditType = Literal["cis", "cybersecurity", "it", "both"]
 YesNo = Literal["yes", "no", "unknown"]
 
 
 @dataclass(frozen=True, slots=True)
 class IntakePrompts:
-    """Localized Markdown prompts for each intake questionnaire step.
+    """Локализованные Markdown-промпты для каждого шага опросника intake.
 
     Attributes:
-        client: Step 1 — client / organization name.
-        cmdb: Step 2 — CMDB / NetBox availability (yes/no).
-        access: Step 3 — SSH/service access for probing.
-        scope: Step 4 — confirm or exclude proposed host→framework jobs.
-        audit_type: Fallback step 4 when no host plan (no access) — domain pick.
+        client: Шаг 1 — название клиента / организации.
+        cmdb: Шаг 2 — наличие CMDB / NetBox (да/нет).
+        access: Шаг 3 — доступ SSH/сервисов для пробы.
+        scope: Шаг 4 — подтвердить или исключить host→framework.
+        audit_type: Fallback шага 4 без плана хостов (нет доступа) — выбор домена.
     """
 
     client: str
@@ -51,16 +51,16 @@ class IntakePrompts:
 
 
 def client_slug(name: str) -> str:
-    """Derive a filesystem-safe slug from a client display name.
+    """Сформировать безопасный для ФС slug из отображаемого имени клиента.
 
-    Replaces non-alphanumeric characters with underscores, truncates to 64
-    chars, and lowercases. Used for evidence and inventory folder names.
+    Неалфавитно-цифровые символы заменяются на ``_``, обрезка до 64 символов,
+    нижний регистр. Используется для каталогов evidence и inventory.
 
     Args:
-        name: Raw client or organization name from intake.
+        name: Сырое название клиента / организации из intake.
 
     Returns:
-        Safe slug string; defaults to ``"client"`` when empty after cleaning.
+        Безопасный slug; ``"client"``, если после очистки пусто.
     """
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", (name or "").strip()).strip("_")
     return (slug[:64] or "client").lower()
@@ -106,7 +106,7 @@ _NO_ANSWERS = frozenset(
 
 
 def _normalize_yes_no_token(value: str) -> YesNo:
-    """Map a short label/token to yes/no/unknown (no free-form regex)."""
+    """Сопоставить короткий ярлык/токен с yes/no/unknown (без free-form regex)."""
     token = str(value or "").strip().lower().strip(".,!;:")
     if not token:
         return "unknown"
@@ -118,18 +118,18 @@ def _normalize_yes_no_token(value: str) -> YesNo:
 
 
 def resolve_yes_no(text: str, llm_payload: dict[str, Any] | None = None) -> YesNo:
-    """Resolve availability intent from the intake LLM JSON only (steps 2–3).
+    """Разобрать ответ о наличии только из JSON LLM intake (шаги 2–3).
 
-    The interpret model decides yes/no/unknown. This helper only normalizes the
-    model's ``answer`` label (including when it echoes slang like ``ага``).
-    Raw operator text is not pattern-matched.
+    Модель интерпретации решает yes/no/unknown. Хелпер лишь нормализует
+    ярлык ``answer`` (в т.ч. сленг вроде ``ага``). Сырой текст оператора
+    по regex не разбирается.
 
     Args:
-        text: Raw operator reply (unused; kept for call-site compatibility).
-        llm_payload: Dict from intake interpret model with ``answer`` key.
+        text: Сырой ответ (не используется; для совместимости вызовов).
+        llm_payload: Dict от модели интерпретации с ключом ``answer``.
 
     Returns:
-        ``"yes"``, ``"no"``, or ``"unknown"``.
+        ``"yes"``, ``"no"`` или ``"unknown"``.
     """
     del text
     if not isinstance(llm_payload, dict):
@@ -140,16 +140,16 @@ def resolve_yes_no(text: str, llm_payload: dict[str, Any] | None = None) -> YesN
 def intake_clarification_from_payload(
     llm_payload: dict[str, Any] | None,
 ) -> str:
-    """Extract optional clarification text when the operator asked a question.
+    """Извлечь текст уточнения, если оператор задал вопрос.
 
-    The yes/no interpreter may return ``clarification`` (or ``help``) explaining
-    the current intake step so the re-prompt is useful (e.g. reply «что это?»).
+    Интерпретатор да/нет может вернуть ``clarification`` (или ``help``) с
+    пояснением текущего шага intake (например, ответ «что это?»).
 
     Args:
-        llm_payload: JSON from the intake interpret model.
+        llm_payload: JSON от модели интерпретации intake.
 
     Returns:
-        Trimmed clarification Markdown, or empty string.
+        Урезанный Markdown-уточнение или пустая строка.
     """
     if not isinstance(llm_payload, dict):
         return ""
@@ -163,16 +163,16 @@ def intake_clarification_from_payload(
 def resolve_client_name(
     text: str, llm_payload: dict[str, Any] | None = None
 ) -> str:
-    """Resolve client name deterministically (intake step 1 — no LLM).
+    """Определить имя клиента детерминированно (шаг 1 intake — без LLM).
 
-    ``llm_payload`` is ignored; kept for call-site compatibility.
+    ``llm_payload`` игнорируется; оставлен для совместимости вызовов.
 
     Args:
-        text: Raw operator reply.
-        llm_payload: Unused (step 1 is regex/parser only).
+        text: Сырой ответ оператора.
+        llm_payload: Не используется (шаг 1 — только парсер).
 
     Returns:
-        Trimmed client name (max 120 chars), or empty string.
+        Урезанное имя клиента (макс. 120 символов) или пустая строка.
     """
     del llm_payload
     return parse_client_name(text)
@@ -181,16 +181,16 @@ def resolve_client_name(
 def resolve_audit_type(
     text: str, llm_payload: dict[str, Any] | None = None
 ) -> AuditType | None:
-    """Resolve audit domain from LLM JSON only (intake step 4).
+    """Определить домен аудита только из JSON LLM (шаг 4 intake).
 
-    No regex fallback. Normalizes ``cis`` / ``cyber`` aliases to ``cybersecurity``.
+    Без regex-fallback. Алиасы ``cis`` / ``cyber`` → ``cybersecurity``.
 
     Args:
-        text: Raw operator reply (unused; kept for call-site compatibility).
-        llm_payload: Dict with ``audit_type`` key from the intake interpret model.
+        text: Сырой ответ (не используется; для совместимости вызовов).
+        llm_payload: Dict с ключом ``audit_type`` от модели интерпретации.
 
     Returns:
-        ``"it"``, ``"cybersecurity"``, ``"both"``, or ``None`` when unclear.
+        ``"it"``, ``"cybersecurity"``, ``"both"`` или ``None``, если неясно.
     """
     del text
     if not isinstance(llm_payload, dict) or "audit_type" not in llm_payload:
@@ -218,13 +218,13 @@ def resolve_scope_decision(
     proposed_jobs: list[dict[str, Any]],
     llm_payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
-    """Resolve selected jobs from LLM JSON only (intake step 4).
+    """Выбрать задания только из JSON LLM (шаг 4 intake).
 
-    No regex fallback. Unclear / missing payload → ``None`` (re-prompt).
+    Без regex-fallback. Неясный / отсутствующий payload → ``None`` (повтор вопроса).
 
     Returns:
-        Filtered job list, or ``None`` when the reply is unclear (re-prompt).
-        Empty list means everything was excluded (caller should re-prompt).
+        Отфильтрованный список заданий или ``None``, если ответ неясен.
+        Пустой список — всё исключено (вызывающий должен переспросить).
     """
     del text
     if not isinstance(llm_payload, dict):
@@ -250,18 +250,18 @@ def resolve_scope_decision(
 
 
 def parse_client_name(text: str) -> str:
-    """Extract client name from free text, stripping common label prefixes.
+    """Извлечь имя клиента из свободного текста, убрав типичные префиксы.
 
-    Removes leading patterns like "Client:", "клиент:", etc.
+    Удаляет ведущие шаблоны вроде «Client:», «клиент:» и т.п.
 
     Args:
-        text: Operator reply to the client name intake step.
+        text: Ответ оператора на шаг имени клиента.
 
     Returns:
-        Trimmed name (max 120 chars), or empty string.
+        Урезанное имя (макс. 120 символов) или пустая строка.
     """
     raw = (text or "").strip()
-    # Strip common prefixes
+    # Убрать типичные префиксы
     raw = re.sub(
         r"^(client(\s+name)?|клиент|название)\s*[:=-]?\s*",
         "",
@@ -272,13 +272,13 @@ def parse_client_name(text: str) -> str:
 
 
 def domains_for_audit_type(audit_type: AuditType | str) -> list[str]:
-    """Map intake scope to framework ``domain`` values (``it`` / ``cybersecurity``).
+    """Сопоставить область intake со значениями ``domain`` фреймворков.
 
     Args:
-        audit_type: One of ``it``, ``cybersecurity``, ``cis``, or ``both``.
+        audit_type: Одно из ``it``, ``cybersecurity``, ``cis`` или ``both``.
 
     Returns:
-        List of domain strings used by framework routing (one or two elements).
+        Список строк domain для маршрутизации фреймворков (один или два).
     """
     at = (audit_type or "both").strip().lower()
     if at in {"it"}:
@@ -289,13 +289,13 @@ def domains_for_audit_type(audit_type: AuditType | str) -> list[str]:
 
 
 def prompts_for_language(code: str) -> IntakePrompts:
-    """Return localized intake step prompts for a language code.
+    """Вернуть локализованные промпты шагов intake по коду языка.
 
     Args:
-        code: BCP-47 or ISO language code; Russian when starting with ``ru``.
+        code: Код BCP-47 / ISO; русский, если начинается с ``ru``.
 
     Returns:
-        :class:`IntakePrompts` with Markdown for all four intake steps.
+        :class:`IntakePrompts` с Markdown для всех четырёх шагов.
     """
     if (code or "en").startswith("ru"):
         return IntakePrompts(
@@ -384,15 +384,15 @@ def format_discovered_software_markdown(
     *,
     language: str = "en",
 ) -> str:
-    """Render prerun software inventory used to choose audit frameworks.
+    """Сформировать prerun-инвентарь ПО для выбора фреймворков аудита.
 
     Args:
-        proposed_jobs: Host rows that may include ``binaries``, ``packages``,
+        proposed_jobs: Строки хостов с ``binaries``, ``packages``,
             ``key_files``, ``os_pretty_name``.
-        language: ``en`` or Russian when starting with ``ru``.
+        language: ``en`` или русский при префиксе ``ru``.
 
     Returns:
-        Markdown sections per host, or empty-state text.
+        Markdown-секции по хостам или текст пустого состояния.
     """
     ru = (language or "en").startswith("ru")
     if not proposed_jobs:
@@ -460,18 +460,18 @@ def enrich_facts_from_access_rows(
     host: str,
     access_rows: list[dict[str, Any]] | None,
 ) -> Any:
-    """Merge reachable inventory endpoints into host facts for framework detect.
+    """Дополнить факты хоста достижимыми endpoint'ами inventory для detect.
 
-    Access probe already knows ``kind=pg`` / port ``5432`` is up even when
-    checklist-filled ``listening_ports`` / binaries missed PostgreSQL.
+    Access-проба уже знает, что ``kind=pg`` / порт ``5432`` доступен, даже если
+    в ``listening_ports`` / binaries PostgreSQL не попал.
 
     Args:
-        facts: :class:`~auditor.host_facts.HostFacts`-like object (mutated).
-        host: SSH / inventory IP for this host.
-        access_rows: Rows from :func:`~auditor.access_probe.probe_access_endpoints`.
+        facts: Объект вроде :class:`~auditor.host_facts.HostFacts` (мутируется).
+        host: SSH / IP хоста из inventory.
+        access_rows: Строки из :func:`~auditor.access_probe.probe_access_endpoints`.
 
     Returns:
-        The same ``facts`` object after enrichment.
+        Тот же объект ``facts`` после обогащения.
     """
     if facts is None or not host:
         return facts
@@ -521,16 +521,16 @@ def format_host_access_list_markdown(
     language: str = "en",
     proposed_jobs: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Render intake step-3 table: service / IP / port / status / frameworks.
+    """Таблица шага 3 intake: сервис / IP / порт / статус / фреймворки.
 
     Args:
-        rows: Dicts with ``service`` (hostname or Access label), ``host``,
-            ``port``, ``status``, optional ``frameworks``.
-        language: ``en`` or Russian when starting with ``ru``.
-        proposed_jobs: Optional host→framework rows; matched to access rows by IP.
+        rows: Dict с ``service`` (hostname или Access), ``host``,
+            ``port``, ``status``, опционально ``frameworks``.
+        language: ``en`` или русский при префиксе ``ru``.
+        proposed_jobs: Опциональные host→framework; сопоставление по IP.
 
     Returns:
-        Markdown table, or a short empty-state line.
+        Markdown-таблица или короткая строка пустого состояния.
     """
     ru = (language or "en").startswith("ru")
     if not rows:
@@ -568,7 +568,7 @@ def format_host_access_list_markdown(
         status = str(row.get("status") or "—").strip() or "—"
         row_fws = [str(x).strip() for x in (row.get("frameworks") or []) if str(x).strip()]
         fws = row_fws or fw_by_host.get(ip) or []
-        # PG endpoint: prefer DB frameworks when present on that host.
+        # PG endpoint: предпочитать DB-фреймворки, если они есть на хосте.
         if str(row.get("kind") or "").lower() == "pg" and fws:
             dbish = [f for f in fws if "postgres" in f.lower() or "pgsql" in f.lower()]
             if dbish:
@@ -580,7 +580,7 @@ def format_host_access_list_markdown(
 
 
 def format_proposed_jobs_markdown(proposed_jobs: list[dict[str, Any]]) -> str:
-    """Render proposed host→framework rows for the scope intake step."""
+    """Сформировать строки host→framework для шага scope intake."""
     if not proposed_jobs:
         return "_No hosts discovered — no framework plan yet._"
     lines = [
@@ -603,33 +603,33 @@ def format_proposed_jobs_markdown(proposed_jobs: list[dict[str, Any]]) -> str:
 
 
 def extract_management_summary(report_text: str) -> str:
-    """Pull the executive/management summary from a full framework report.
+    """Выделить executive/management summary из полного отчёта фреймворка.
 
-    Framework reports are stored as ``summary + --- + full checklist``.
-    Chat delivery should use the summary only.
+    Отчёты хранятся как ``summary + --- + full checklist``.
+    В чат отдаём только summary.
 
     Args:
-        report_text: Full or partial report Markdown.
+        report_text: Полный или частичный Markdown отчёта.
 
     Returns:
-        Summary section, or a truncated fallback when no separator exists.
+        Секция summary или урезанный fallback без разделителя.
     """
     text = (report_text or "").strip()
     if not text:
         return ""
-    # Drop archive / follow-up appendices if present.
+    # Убрать приложения archive / follow-up, если есть.
     for marker in ("\n## Audit archive", "\n---\n\n**Next steps"):
         if marker in text:
             text = text.split(marker, 1)[0].rstrip()
-    # Primary layout from finalize: summary before the first horizontal rule.
+    # Основной layout finalize: summary до первого горизонтального правила.
     if "\n---\n" in text:
         head, tail = text.split("\n---\n", 1)
         head = head.strip()
-        # Prefer head when it looks like a short summary (not the checklist table).
+        # Брать head, если это короткий summary (не таблица checklist).
         if head and "| REQ-" not in head and "### REQ-" not in head:
             return head
         text = tail.strip() or head
-    # Fallback: keep a short lead-in without the summary table dump.
+    # Fallback: короткое вступление без дампа таблицы summary.
     lines = text.splitlines()
     clipped: list[str] = []
     for line in lines:
@@ -649,7 +649,7 @@ def apply_scope_exclusions(
     excluded_frameworks: set[str],
     excluded_pairs: set[tuple[str, str]],
 ) -> list[dict[str, Any]]:
-    """Return proposed jobs with excluded frameworks / pairs removed."""
+    """Вернуть proposed jobs без исключённых фреймворков / пар."""
     excl_fw = {x.lower() for x in excluded_frameworks}
     excl_pairs = {(h.lower(), f.lower()) for h, f in excluded_pairs}
     out: list[dict[str, Any]] = []
@@ -672,14 +672,14 @@ def apply_scope_exclusions(
 
 
 def format_intake_assistant_message(prompt: str, thread_id: str) -> str:
-    """Wrap an intake step prompt with ``[AUDIT_INTAKE:<thread>]`` marker.
+    """Обернуть промпт шага intake маркером ``[AUDIT_INTAKE:<thread>]``.
 
     Args:
-        prompt: Step question Markdown from :func:`prompts_for_language`.
-        thread_id: LangGraph thread id for resume correlation.
+        prompt: Markdown вопроса из :func:`prompts_for_language`.
+        thread_id: Id потока LangGraph для resume.
 
     Returns:
-        Assistant message with marker and continuation hint.
+        Сообщение ассистента с маркером и подсказкой продолжения.
     """
     return (
         f"{prompt.strip()}\n\n"
@@ -690,16 +690,16 @@ def format_intake_assistant_message(prompt: str, thread_id: str) -> str:
 
 
 def extract_intake_thread_id(messages: list[Any]) -> str | None:
-    """Find intake thread only when it is the newest pause marker.
+    """Найти поток intake только если это самый новый маркер паузы.
 
-    Delegates to :func:`~auditor.hitl.resolve_pause_resume` and returns the
-    thread id only when the active pause kind is ``intake``.
+    Делегирует :func:`~auditor.hitl.resolve_pause_resume` и возвращает
+    thread id только когда активная пауза — ``intake``.
 
     Args:
-        messages: Chat message history.
+        messages: История сообщений чата.
 
     Returns:
-        Intake thread id string, or ``None`` when intake is not paused.
+        Id потока intake или ``None``, если intake не на паузе.
     """
     from auditor.hitl import resolve_pause_resume
 
@@ -710,28 +710,28 @@ def extract_intake_thread_id(messages: list[Any]) -> str | None:
 
 
 def intake_interrupt_payload(*, step: str, prompt: str, **extra: Any) -> dict[str, Any]:
-    """Build a LangGraph interrupt payload dict for an intake step.
+    """Собрать dict payload interrupt LangGraph для шага intake.
 
     Args:
-        step: Intake step identifier (e.g. ``client``, ``cmdb``).
-        prompt: Display prompt shown to the operator.
-        **extra: Additional fields merged into the payload.
+        step: Идентификатор шага (например ``client``, ``cmdb``).
+        prompt: Текст вопроса оператору.
+        **extra: Доп. поля, сливаемые в payload.
 
     Returns:
-        Dict with ``type``, ``step``, ``prompt``, and any extra keys.
+        Dict с ``type``, ``step``, ``prompt`` и любыми extra-ключами.
     """
     return {"type": "intake", "step": step, "prompt": prompt, **extra}
 
 
 def summarize_cmdb_capabilities(probe: dict[str, Any], *, language: str = "en") -> str:
-    """Render NetBox/CMDB probe results as a Markdown table for the operator.
+    """Сформировать Markdown-таблицу результатов пробы NetBox/CMDB.
 
     Args:
-        probe: Dict with ``reachable``, optional ``error``, and ``fields`` map.
-        language: ``"en"`` or Russian when starting with ``ru``.
+        probe: Dict с ``reachable``, опционально ``error`` и картой ``fields``.
+        language: ``"en"`` или русский при префиксе ``ru``.
 
     Returns:
-        Markdown section listing which CMDB fields are available.
+        Markdown-секция о доступности полей CMDB.
     """
     reachable = bool(probe.get("reachable"))
     fields = probe.get("fields") or {}
@@ -792,14 +792,14 @@ def summarize_cmdb_capabilities(probe: dict[str, Any], *, language: str = "en") 
 
 
 def summarize_access_probe(probe: dict[str, Any], *, language: str = "en") -> str:
-    """Render access probe results as a Markdown table for the operator.
+    """Сформировать Markdown-таблицу результатов access-пробы.
 
     Args:
-        probe: Dict with ``services`` list of ``name`` / ``status`` / ``detail``.
-        language: ``"en"`` or Russian when starting with ``ru``.
+        probe: Dict со списком ``services``: ``name`` / ``status`` / ``detail``.
+        language: ``"en"`` или русский при префиксе ``ru``.
 
     Returns:
-        Markdown section summarizing per-service reachability.
+        Markdown-секция о достижимости сервисов.
     """
     services = probe.get("services") or []
     if language.startswith("ru"):
@@ -835,10 +835,10 @@ def frameworks_for_audit_type(
     user_request: str,
     agents_dir: Any,
 ) -> list[str]:
-    """Resolve ordered framework ids from intake domain (NLP fallback without hosts).
+    """Упорядоченные id фреймворков по домену intake (NLP fallback без хостов).
 
-    Prefer host-driven ``select_frameworks_for_host`` after discovery; this helper
-    remains for intake-disabled / no-SSH fallbacks.
+    После discovery предпочтителен host-driven ``select_frameworks_for_host``;
+    этот хелпер — для fallback без intake / без SSH.
     """
     from auditor.frameworks import list_frameworks, route_frameworks
 
@@ -852,7 +852,7 @@ def frameworks_for_audit_type(
             all_fw = list_frameworks(agents_dir)
             ids = [f.id for f in all_fw if f.id.endswith("_cis") or "cis" in f.id]
         return ids or ["postgres_cis"]
-    # both: IT first, then cybersecurity frameworks
+    # both: сначала IT, затем cybersecurity-фреймворки
     cis_ids = frameworks_for_audit_type(
         "cybersecurity", user_request=user_request, agents_dir=agents_dir
     )
