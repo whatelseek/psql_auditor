@@ -88,7 +88,6 @@ from auditor.frameworks import (
 )
 from auditor.host_facts import (
     HostFacts,
-    compare_to_netbox,
     format_host_facts_markdown,
     merge_facts_from_raw,
     parse_host_facts_json,
@@ -133,7 +132,6 @@ from auditor.intake import (
     resolve_audit_type,
     resolve_scope_decision,
     resolve_yes_no,
-    summarize_cmdb_capabilities,
 )
 from auditor.language import (
     ReportLanguage,
@@ -190,12 +188,6 @@ from auditor.runtime_target import (
 )
 from auditor.state import AuditorState, Finding, render_report
 from auditor.tools.mcp_client import get_mcp_tools, reconnect_mcp_session
-from auditor.tools.netbox_mcp import (
-    fetch_netbox_device_by_name,
-    get_netbox_tools,
-    probe_netbox_capabilities,
-    reconnect_netbox_session,
-)
 from auditor.tools.ssh import get_ssh_tools
 
 # Tight markers only — bare "session" / "timeout" / "eof" caused false reconnects.
@@ -212,19 +204,13 @@ _RECOVERABLE_MARKERS = (
 )
 
 
-def _all_tools(*, has_cmdb: bool = True) -> list:
+def _all_tools() -> list:
     """Collect LangChain tools for evidence gathering.
 
-    Args:
-        has_cmdb: When ``False``, omit NetBox tools (no CMDB in scope).
-
     Returns:
-        SSH tools, Postgres MCP tools, and optionally NetBox MCP tools.
+        SSH tools and Postgres MCP tools.
     """
-    tools = [*get_ssh_tools(), *get_mcp_tools()]
-    if has_cmdb:
-        tools.extend(get_netbox_tools())
-    return tools
+    return [*get_ssh_tools(), *get_mcp_tools()]
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
@@ -330,10 +316,8 @@ class AuditorGraph:
             settings: Application settings; defaults to ``get_settings()``.
         """
         self.settings = settings or get_settings()
-        # Full tool set registered; NetBox calls are blocked when has_cmdb=false.
-        self.tools = _all_tools(has_cmdb=True)
+        self.tools = _all_tools()
         self.tools_by_name = {t.name: t for t in self.tools}
-        self._tools_no_netbox = _all_tools(has_cmdb=False)
         # Evidence stores keyed by run_id (safe for parallel multi-framework).
         self._evidence_by_run: dict[str, EvidenceStore] = {}
         # Multi-framework orchestration while a HITL pause is active.
@@ -355,9 +339,6 @@ class AuditorGraph:
             else None
         )
         self.evidence_model = build_chat_model(self.settings).bind_tools(self.tools)
-        self.evidence_model_no_netbox = build_chat_model(self.settings).bind_tools(
-            self._tools_no_netbox
-        )
         self.evidence_model_ssh = build_chat_model(self.settings).bind_tools(
             get_ssh_tools()
         )
@@ -500,16 +481,9 @@ class AuditorGraph:
             if tid not in self._multi_sessions:
                 self._multi_sessions[tid] = sess
 
-    def _evidence_llm(self, *, has_cmdb: bool):
-        """Return the tool-bound chat model appropriate for CMDB scope.
-
-        Args:
-            has_cmdb: When ``False``, use the model without NetBox tools.
-
-        Returns:
-            LangChain runnable with SSH + MCP (+ optional NetBox) tools.
-        """
-        return self.evidence_model if has_cmdb else self.evidence_model_no_netbox
+    def _evidence_llm(self):
+        """Return the inventory-only evidence model bound to SSH + MCP tools."""
+        return self.evidence_model
 
     def _build(self):
         """Compile the main audit StateGraph with reconnect and HITL cycles.
@@ -646,7 +620,7 @@ class AuditorGraph:
         LangGraph при каждом resume заново выполняет весь узел ``intake_gate``;
         без записи на диск при access=yes снова шёл бы rediscovery хостов.
         Мержит в существующий dict ``intake``, чтобы частичная запись не стёрла
-        ранние ключи (например ``has_cmdb``).
+        ранние ключи (например совместимые поля inventory-only).
         """
         store = self._store_from_state(state)
         if store is None:
@@ -674,8 +648,8 @@ class AuditorGraph:
 
         LangGraph restarts ``intake_gate`` on every resume and assigns
         ``Command(resume=…)`` by interrupt call order. Restoring
-        ``has_cmdb`` / ``has_access`` from disk and skipping earlier
-        ``interrupt()`` calls mis-assigns answers (CMDB ``no`` → access).
+        yes/no answers from disk and skipping earlier ``interrupt()`` calls
+        mis-assigns replayed answers between intake steps.
         Questionnaire answers must come from interrupt replay; disk is only
         for expensive discovery so SSH is not repeated.
         """
@@ -693,7 +667,7 @@ class AuditorGraph:
         saved = meta.get("intake")
         if not isinstance(saved, dict):
             return intake
-        # Discovery / plan outputs only — not client/cmdb/access/scope answers.
+        # Discovery / plan outputs only — not client/access/scope answers.
         keep_keys = (
             "artifacts_run_id",
             "discovery_complete",
@@ -779,67 +753,24 @@ class AuditorGraph:
                     if lang.code == "en"
                     else "\n\n_Укажите непустое название клиента._"
                 ),
-                cmdb=prompts.cmdb,
+                cmdb="",
                 access=prompts.access,
                 scope=prompts.scope,
                 audit_type=prompts.audit_type,
             )
 
-        # 2) CMDB / NetBox (сначала LLM, свободная форма да/нет)
-        cmdb_prompt = prompts.cmdb
-        while "has_cmdb" not in intake:
-            raw = interrupt(
-                intake_interrupt_payload(step="cmdb", prompt=cmdb_prompt)
-            )
-            yn, clarification = await self._intake_resolve_yes_no(
-                str(raw or ""), question_hint="Does the client have CMDB/NetBox?"
-            )
-            if yn == "unknown":
-                if clarification:
-                    clarify_block = f"\n\n### Пояснение\n\n{clarification}\n" if lang.code.startswith("ru") else f"\n\n### Clarification\n\n{clarification}\n"
-                    hint = (
-                        "\n\n_После пояснения опишите ситуацию своими словами._"
-                        if lang.code.startswith("ru")
-                        else "\n\n_After this clarification, describe the situation "
-                        "in your own words._"
-                    )
-                    cmdb_prompt = f"{prompts.cmdb}{clarify_block}{hint}"
-                else:
-                    hint = (
-                        "\n\n_Could not interpret that. Please describe whether "
-                        "CMDB/NetBox is available, in your own words._"
-                        if lang.code == "en"
-                        else "\n\n_Не понял ответ. Опишите своими словами, "
-                        "есть ли у клиента CMDB/NetBox._"
-                    )
-                    cmdb_prompt = f"{prompts.cmdb}{hint}"
-                continue
-            intake["has_cmdb"] = yn == "yes"
-            if yn == "yes":
-                probe = await probe_netbox_capabilities(self.settings)
-                intake["cmdb_probe"] = probe
-                intake["inventory_scope"] = ""
-                intake["inventory_found"] = False
-                intake["inventory_path"] = ""
-            else:
-                inv_path, scope, found = resolve_client_inventory(
-                    Path(self.settings.inventory_dir),
-                    str(intake.get("client_slug") or ""),
-                )
-                intake["cmdb_probe"] = {
-                    "reachable": False,
-                    "error": "operator reported no CMDB",
-                    "fields": {},
-                }
-                intake["inventory_scope"] = scope
-                intake["inventory_found"] = found
-                intake["inventory_path"] = str(inv_path) if inv_path else ""
-            self._persist_intake_progress(state, intake, thread_id=thread_hint)
-
-        # 3) Доступ — спросить да/нет, затем список достижимости хостов/сервисов (один раз).
-        cmdb_summary = summarize_cmdb_capabilities(
-            intake.get("cmdb_probe") or {}, language=lang.code
+        # 2) Доступ — спросить да/нет, затем список достижимости хостов/сервисов (один раз).
+        inv_path, scope, found = resolve_client_inventory(
+            Path(self.settings.inventory_dir),
+            str(intake.get("client_slug") or ""),
         )
+        intake["has_cmdb"] = False
+        intake["cmdb_probe"] = {}
+        intake["inventory_scope"] = scope
+        intake["inventory_found"] = found
+        intake["inventory_path"] = str(inv_path) if inv_path else ""
+        self._persist_intake_progress(state, intake, thread_id=thread_hint)
+
         cred_keys = intake.get("credentials_loaded") or []
         if lang.code.startswith("ru"):
             cred_line = (
@@ -851,28 +782,23 @@ class AuditorGraph:
                 f"**Credentials loaded from inventory** ({len(cred_keys)} keys): "
                 + (", ".join(cred_keys) if cred_keys else "none — add a Credentials table to INVENTORY.md")
             )
-        if not intake.get("has_cmdb"):
-            found = bool(intake.get("inventory_found"))
-            inv_path = intake.get("inventory_path") or ""
-            if lang.code.startswith("ru"):
-                status = (
-                    f"**Инвентарь найден:** `{inv_path}`"
-                    if found
-                    else f"**Инвентарь не найден** по пути `{inv_path}`"
-                )
-            else:
-                status = (
-                    f"**Inventory found:** `{inv_path}`"
-                    if found
-                    else f"**Inventory not found** at `{inv_path}`"
-                )
-            # Keep this short — a full inventory dump in the prompt confused yes/no.
-            scope_block = (
-                f"\n\n### Client inventory check\n\n{status}\n\n{cred_line}\n"
+        inv_found = bool(intake.get("inventory_found"))
+        inv_display_path = intake.get("inventory_path") or ""
+        if lang.code.startswith("ru"):
+            status = (
+                f"**Инвентарь найден:** `{inv_display_path}`"
+                if inv_found
+                else f"**Инвентарь не найден** по пути `{inv_display_path}`"
             )
         else:
-            scope_block = f"\n\n{cred_line}\n"
-        access_prompt = f"{prompts.access}\n\n{cmdb_summary}{scope_block}"
+            status = (
+                f"**Inventory found:** `{inv_display_path}`"
+                if inv_found
+                else f"**Inventory not found** at `{inv_display_path}`"
+            )
+        # Keep this short — a full inventory dump in the prompt confused yes/no.
+        scope_block = f"\n\n### Client inventory check\n\n{status}\n\n{cred_line}\n"
+        access_prompt = f"{prompts.access}{scope_block}"
         while "has_access" not in intake:
             raw = interrupt(
                 intake_interrupt_payload(step="access", prompt=access_prompt)
@@ -898,8 +824,7 @@ class AuditorGraph:
                         "your own words._"
                     )
                     access_prompt = (
-                        f"{prompts.access}\n\n{cmdb_summary}{scope_block}"
-                        f"{clarify_block}{hint}"
+                        f"{prompts.access}{scope_block}{clarify_block}{hint}"
                     )
                 else:
                     hint = (
@@ -910,7 +835,7 @@ class AuditorGraph:
                         "есть ли доступ по SSH/БД._"
                     )
                     access_prompt = (
-                        f"{prompts.access}\n\n{cmdb_summary}{scope_block}{hint}"
+                        f"{prompts.access}{scope_block}{hint}"
                     )
                 continue
             intake["access_raw"] = str(raw or "").strip()
@@ -921,7 +846,7 @@ class AuditorGraph:
                 intake.pop("host_access_rows", None)
             self._persist_intake_progress(state, intake, thread_id=thread_hint)
 
-        # 3b) Probe endpoints + discover hosts once (skipped on exclude resume).
+        # 2b) Probe endpoints + discover hosts once (skipped on exclude resume).
         if intake.get("has_access") and not intake.get("discovery_complete"):
             slug = str(intake.get("client_slug") or "").strip()
             try:
@@ -1083,18 +1008,18 @@ class AuditorGraph:
             proposed_jobs=proposed_jobs,
         )
 
-        # 3c) Reachability + applicable frameworks (no full package dump).
+        # 2c) Reachability + applicable frameworks (no full package dump).
         if intake.get("has_access") and "access_list_acked" not in intake:
             if lang.code.startswith("ru"):
                 access_list_prompt = (
-                    "## Предварительный опрос (3/4) — доступность и фреймворки\n\n"
+                    "## План предаудита — доступность и фреймворки\n\n"
                     f"{host_access_md}\n"
                     "Ответьте **продолжить** / **ok**, чтобы подтвердить или "
                     "исключить фреймворки на следующем шаге."
                 )
             else:
                 access_list_prompt = (
-                    "## Pre-audit intake (3/4) — reachability & frameworks\n\n"
+                    "## Pre-audit plan — reachability & frameworks\n\n"
                     f"{host_access_md}\n"
                     "Reply **continue** / **ok** to confirm or exclude frameworks "
                     "in the next step."
@@ -1110,7 +1035,7 @@ class AuditorGraph:
                     state, intake, thread_id=thread_hint
                 )
 
-        # 4) Scope: подтвердить / исключить предложенные фреймворки (или fallback по домену).
+        # 3) Scope: подтвердить / исключить предложенные фреймворки (или fallback по домену).
         if has_plan:
             plan_md = format_proposed_jobs_markdown(proposed_jobs)
             scope_prompt = f"{prompts.scope}\n\n{host_access_md}\n\n{plan_md}"
@@ -1338,7 +1263,6 @@ class AuditorGraph:
                 framework_id=evidence_fw,
                 req_id=evidence_req,
                 store=store,
-                has_cmdb=False,
             )
             messages.extend(tool_messages)
             for tm in tool_messages:
@@ -1369,7 +1293,7 @@ class AuditorGraph:
     ) -> HostFacts:
         """Assess ``agents/host_facts.md`` then fill ``HostFacts`` for routing.
 
-        Intake step 3 (access=yes) uses this path so discovery follows the same
+        Intake step 2 (access=yes) uses this path so discovery follows the same
         checklist REQs as a normal host_facts audit. Falls back to compact SSH
         discovery when the framework file is missing.
         """
@@ -1423,7 +1347,6 @@ class AuditorGraph:
                         user_request=user_req,
                         framework_id="host_facts",
                         store=store,
-                        has_cmdb=False,
                         ssh_only=True,
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -1492,13 +1415,12 @@ class AuditorGraph:
         return facts
 
     async def collect_host_facts(self, state: AuditorState) -> dict[str, Any]:
-        """Gather hostname/OS/software/disk/RAM/CPU; compare NetBox; refresh INVENTORY.md."""
+        """Gather hostname/OS/software/disk/RAM/CPU and refresh INVENTORY.md."""
         if state.get("error") and not (state.get("requirements") or {}):
             return {}
 
         intake = dict(state.get("intake") or {})
         has_access = bool(state.get("has_access") or intake.get("has_access"))
-        has_cmdb = bool(state.get("has_cmdb") or intake.get("has_cmdb"))
         client_name = str(
             state.get("client_name") or intake.get("client_name") or "client"
         )
@@ -1541,20 +1463,9 @@ class AuditorGraph:
                     host_id=host_id,
                     user_request=str(state.get("user_request") or ""),
                 )
-            nb_device = None
-            if has_cmdb and facts.hostname and not facts.error:
-                nb_device = await fetch_netbox_device_by_name(
-                    facts.hostname, self.settings
-                )
-            if has_cmdb:
-                drift_items = compare_to_netbox(facts, nb_device)
             facts_md = format_host_facts_markdown(
-                facts, drift_items if has_cmdb else None, language=lang.code
+                facts, None, language=lang.code
             )
-            drift_md = ""
-            if has_cmdb and drift_items:
-                # Already embedded in facts_md; keep a short flag for meta
-                drift_md = facts_md
 
             if store is not None and facts is not None:
                 if host_id:
@@ -1565,7 +1476,7 @@ class AuditorGraph:
                 )
                 (facts_base / "host_facts.md").write_text(facts_md, encoding="utf-8")
 
-            if not has_cmdb and facts is not None:
+            if facts is not None:
                 inv_path = (
                     Path(self.settings.inventory_dir)
                     / client_slug(client_name)
@@ -1583,7 +1494,7 @@ class AuditorGraph:
                 if store is not None:
                     dest = store.root / "INVENTORY.md"
                     dest.write_text(inv_path.read_text(encoding="utf-8"), encoding="utf-8")
-        elif not has_cmdb:
+        else:
             # Still materialize inventory from scope when no live access
             inv_path = (
                 Path(self.settings.inventory_dir)
@@ -1749,7 +1660,6 @@ class AuditorGraph:
         host_id = str(state.get("evidence_host_id") or "").strip()
         if store is not None and host_id:
             store.host_segment = host_id
-        has_cmdb = bool(state.get("has_cmdb") or (state.get("intake") or {}).get("has_cmdb"))
         limit = max(1, self.settings.max_parallel_assessments)
         sem = asyncio.Semaphore(limit)
         thread_hint = str(state.get("thread_id") or "")
@@ -1850,7 +1760,6 @@ class AuditorGraph:
                         framework_id=framework_id,
                         store=store,
                         report_language=report_lang,
-                        has_cmdb=has_cmdb,
                     )
                     await self._warehouse_live_upsert(
                         state,
@@ -2006,14 +1915,6 @@ class AuditorGraph:
     async def reconnect_session(self, state: AuditorState) -> dict[str, Any]:
         """Node: restore MCP sessions and bump retry counter (graph cycle)."""
         status = await reconnect_mcp_session()
-        try:
-            nb = await reconnect_netbox_session()
-            if nb and "failed" not in nb.lower():
-                status = f"{status}; {nb}"
-            elif nb and "failed" in nb.lower():
-                status = f"{status}; NetBox: {nb}"
-        except Exception as exc:  # noqa: BLE001
-            status = f"{status}; NetBox reconnect skipped: {type(exc).__name__}"
         retry_count = int(state.get("retry_count") or 0) + 1
         pending = state.get("pending_ids") or []
         return {
@@ -2193,17 +2094,15 @@ class AuditorGraph:
         state: AuditorState,
         store: EvidenceStore | None,
     ) -> Finding | None:
-        """Resolve IT-audit REQs that must not HITL-loop on missing NetBox.
+        """Resolve IT-audit REQs that should not HITL-loop.
 
-        REQ-006 without CMDB: pass/fail on ``INVENTORY.md`` (never ``error``).
+        REQ-006: pass/fail on ``INVENTORY.md`` (never ``error``).
         REQ-007: summarize intake access probe (never call placeholder SSH).
         """
         if framework_id != "it_audit":
             return None
-        intake = state.get("intake") or {}
-        has_cmdb = bool(state.get("has_cmdb") or intake.get("has_cmdb"))
 
-        if req_id == "REQ-006" and not has_cmdb:
+        if req_id == "REQ-006":
             inv_path = store.root / "INVENTORY.md" if store is not None else None
             if inv_path is not None and inv_path.is_file():
                 return Finding(
@@ -2214,11 +2113,10 @@ class AuditorGraph:
                     category=requirement.category,
                     pass_criteria=requirement.pass_criteria,
                     evidence=(
-                        "Operator reported no CMDB/NetBox. "
-                        f"INVENTORY.md is present at `{inv_path}`."
+                        f"Inventory-only assessment: INVENTORY.md is present at `{inv_path}`."
                     ),
                     remediation="",
-                    notes="Deterministic: skip NetBox when has_cmdb=false.",
+                    notes="Deterministic inventory file check.",
                 )
             return Finding(
                 requirement_id=req_id,
@@ -2228,14 +2126,14 @@ class AuditorGraph:
                 category=requirement.category,
                 pass_criteria=requirement.pass_criteria,
                 evidence=(
-                    "Operator reported no CMDB/NetBox, but INVENTORY.md is "
-                    "missing from the evidence run directory."
+                    "Inventory-only assessment: INVENTORY.md is missing from "
+                    "the evidence run directory."
                 ),
                 remediation=(
                     "Ensure intake wrote inventory/<client>/INVENTORY.md and "
                     "copied it into the artifacts run folder."
                 ),
-                notes="Deterministic: no NetBox; inventory file required.",
+                notes="Deterministic inventory file check.",
             )
 
         if req_id == "REQ-007":
@@ -2390,7 +2288,6 @@ class AuditorGraph:
         store: EvidenceStore | None = None,
         report_language: ReportLanguage | None = None,
         *,
-        has_cmdb: bool = True,
         ssh_only: bool = False,
     ) -> Finding:
         """Run evidence gathering + fill model for one requirement cell.
@@ -2405,7 +2302,6 @@ class AuditorGraph:
             framework_id: Active framework id.
             store: Optional evidence store for disk artifacts.
             report_language: Language for fill prompts.
-            has_cmdb: Whether NetBox tools are in scope.
             ssh_only: When True, bind only SSH tools (host_facts discovery).
 
         Returns:
@@ -2430,7 +2326,6 @@ class AuditorGraph:
             user_request,
             framework_id,
             store=store,
-            has_cmdb=has_cmdb,
             ssh_only=ssh_only,
         )
         evidence = truncate_text(
@@ -2474,7 +2369,6 @@ class AuditorGraph:
         framework_id: str,
         store: EvidenceStore | None = None,
         *,
-        has_cmdb: bool = True,
         ssh_only: bool = False,
     ) -> str:
         """Tool-calling loop: gather raw evidence text for one requirement.
@@ -2488,7 +2382,6 @@ class AuditorGraph:
             user_request: Original operator request.
             framework_id: Active framework id.
             store: Optional evidence store for tool call logging.
-            has_cmdb: Whether NetBox tools are bound.
             ssh_only: When True, bind only SSH tools.
 
         Returns:
@@ -2499,15 +2392,9 @@ class AuditorGraph:
             playbook_block = self.playbooks.format_prompt_block(framework_id, req_id)
         if ssh_only:
             tool_note = "Use ONLY ssh_run / ssh_read_file for this inventory check."
-        elif has_cmdb:
-            tool_note = (
-                "NetBox CMDB tools are available. "
-                "Use SSH and/or MCP tools appropriate for this framework."
-            )
         else:
             tool_note = (
-                "No CMDB — do not call NetBox tools; use inventory and "
-                "SSH/Postgres only."
+                "Use inventory plus SSH/Postgres MCP tools appropriate for this framework."
             )
         messages: list = [
             SystemMessage(
@@ -2531,7 +2418,7 @@ class AuditorGraph:
         evidence_llm = (
             self.evidence_model_ssh
             if ssh_only
-            else self._evidence_llm(has_cmdb=has_cmdb)
+            else self._evidence_llm()
         )
 
         for _ in range(max_rounds + 1):
@@ -2554,7 +2441,6 @@ class AuditorGraph:
                 framework_id=framework_id,
                 req_id=req_id,
                 store=store,
-                has_cmdb=has_cmdb,
             )
             messages.extend(tool_messages)
             for tm in tool_messages:
@@ -2569,19 +2455,17 @@ class AuditorGraph:
         framework_id: str = "",
         req_id: str = "",
         store: EvidenceStore | None = None,
-        has_cmdb: bool = True,
     ) -> list[ToolMessage]:
         """Execute parallel tool calls from the evidence model response.
 
-        Emits progress events, logs to the evidence store, blocks NetBox when
-        ``has_cmdb`` is false, and updates playbook memory on success.
+        Emits progress events, logs to the evidence store, and updates playbook
+        memory on success.
 
         Args:
             tool_calls: LangChain tool call dicts from the model.
             framework_id: Framework id for logging and memory.
             req_id: Requirement id for logging and memory.
             store: Optional evidence store.
-            has_cmdb: When ``False``, reject NetBox tool invocations.
 
         Returns:
             ``ToolMessage`` list in call order for appending to chat history.
@@ -2600,32 +2484,24 @@ class AuditorGraph:
             )
             error: str | None = None
             full_result = ""
-            if not has_cmdb and name.startswith("netbox"):
-                full_result = (
-                    "Tool error: NetBox is disabled for this run "
-                    "(operator reported no CMDB). Use inventory only."
-                )
+            tool = self.tools_by_name.get(name)
+            if tool is None:
+                full_result = f"Tool error: unknown tool '{name}'"
                 error = full_result
                 content = full_result
             else:
-                tool = self.tools_by_name.get(name)
-                if tool is None:
-                    full_result = f"Tool error: unknown tool '{name}'"
+                try:
+                    raw = await tool.ainvoke(args)
+                    full_result = str(raw)
+                    content = truncate_text(
+                        full_result,
+                        self.settings.max_tool_output_chars,
+                        "tool",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    full_result = f"Tool error: {type(exc).__name__}: {exc}"
                     error = full_result
                     content = full_result
-                else:
-                    try:
-                        raw = await tool.ainvoke(args)
-                        full_result = str(raw)
-                        content = truncate_text(
-                            full_result,
-                            self.settings.max_tool_output_chars,
-                            "tool",
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        full_result = f"Tool error: {type(exc).__name__}: {exc}"
-                        error = full_result
-                        content = full_result
             emit_tool_result(
                 name,
                 full_result,
@@ -3573,7 +3449,7 @@ class AuditorGraph:
         intake: dict[str, Any],
         store: EvidenceStore,
     ) -> list[tuple[InventorySshTarget, HostFacts]]:
-        """SSH-discover every inventory host (inventory-only when no CMDB)."""
+        """SSH-discover every inventory host for inventory-only flow."""
         slug = str(intake.get("client_slug") or client_slug(str(intake.get("client_name") or "")))
         targets = list_client_ssh_targets(self.settings.inventory_dir, slug)
         effective = effective_settings(self.settings)
@@ -4562,7 +4438,7 @@ class AuditorGraph:
     ) -> dict[str, Any]:
         """Run audit(s) for the request.
 
-        When intake is enabled, asks client/CMDB/access/audit-type first, then
+        When intake is enabled, asks client/access/audit-type first, then
         runs one or more framework graphs. Multiple frameworks run as separate
         graphs (sequential when HITL is on).
         """
