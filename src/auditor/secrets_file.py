@@ -7,10 +7,14 @@ settings into the process environment without requiring them in ``docker-compose
 Pipeline role:
     Called at startup and during multi-host discovery to bind SSH targets,
     probe CMDB/Postgres access, and supply inventory rows for follow-up runs.
+    Default :func:`bind_ssh_target` uses a run-scoped ContextVar (see
+    :mod:`auditor.runtime_target`) so concurrent audits do not clobber
+    ``os.environ``.
 
 Key entry points:
     :func:`load_connection_secrets` — global ``secrets/connection.md``.
-    :func:`load_inventory_credentials` — per-client ``INVENTORY.md``.
+    :func:`load_inventory_credentials` — per-client ``INVENTORY.md`` into env.
+    :func:`read_client_credentials` — parse client inventory without mutating env.
     :func:`list_client_ssh_targets` / :func:`bind_ssh_target` — multi-host SSH.
     :class:`InventorySshTarget` — one SSH-capable inventory row.
 """
@@ -478,48 +482,94 @@ def bind_ssh_target(
     *,
     environ: dict[str, str] | None = None,
 ) -> Iterator[None]:
-    """Temporarily apply one SSH target to the process environment.
+    """Temporarily apply one SSH target for tool calls.
 
-    Sets ``SSH_*`` variables from ``target``, clears :func:`~auditor.config.get_settings`
-    cache on enter/exit so SSH tools pick up the host, then restores prior values.
+    **Default (``environ is None``):** bind via a run-scoped
+    :class:`~auditor.runtime_target.RuntimeTarget` ContextVar so concurrent
+    audits do not clobber process ``SSH_*`` / cached settings. SSH tools and
+    :func:`~auditor.runtime_target.effective_settings` read the overlay.
+
+    **Explicit ``environ=``:** mutate that dict (tests / offline helpers) and
+    clear the settings cache — does not touch the ContextVar.
 
     Args:
         target: Inventory SSH row to bind.
-        environ: Environment dict to mutate (defaults to ``os.environ``).
+        environ: Optional env dict to mutate. Omit for ContextVar binding.
 
     Yields:
         None — use as a context manager around tool calls for that host.
     """
-    from auditor.config import get_settings
+    if environ is not None:
+        from auditor.config import get_settings
 
-    target_env = environ if environ is not None else os.environ
-    saved: dict[str, str | None] = {k: target_env.get(k) for k in _SSH_ENV_KEYS}
-    try:
-        target_env["SSH_HOST"] = target.host
-        target_env["SSH_PORT"] = target.port or "22"
-        if target.user:
-            target_env["SSH_USER"] = target.user
-        elif "SSH_USER" in target_env:
-            del target_env["SSH_USER"]
-        if target.password:
-            target_env["SSH_PASSWORD"] = target.password
-        elif "SSH_PASSWORD" in target_env:
-            del target_env["SSH_PASSWORD"]
-        if target.private_key_path:
-            target_env["SSH_PRIVATE_KEY_PATH"] = target.private_key_path
-        elif "SSH_PRIVATE_KEY_PATH" in target_env:
-            del target_env["SSH_PRIVATE_KEY_PATH"]
-        if target.strict_host_key:
-            target_env["SSH_STRICT_HOST_KEY"] = target.strict_host_key
-        get_settings.cache_clear()
+        target_env = environ
+        saved: dict[str, str | None] = {k: target_env.get(k) for k in _SSH_ENV_KEYS}
+        try:
+            target_env["SSH_HOST"] = target.host
+            target_env["SSH_PORT"] = target.port or "22"
+            if target.user:
+                target_env["SSH_USER"] = target.user
+            elif "SSH_USER" in target_env:
+                del target_env["SSH_USER"]
+            if target.password:
+                target_env["SSH_PASSWORD"] = target.password
+            elif "SSH_PASSWORD" in target_env:
+                del target_env["SSH_PASSWORD"]
+            if target.private_key_path:
+                target_env["SSH_PRIVATE_KEY_PATH"] = target.private_key_path
+            elif "SSH_PRIVATE_KEY_PATH" in target_env:
+                del target_env["SSH_PRIVATE_KEY_PATH"]
+            if target.strict_host_key:
+                target_env["SSH_STRICT_HOST_KEY"] = target.strict_host_key
+            get_settings.cache_clear()
+            yield
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    target_env.pop(key, None)
+                else:
+                    target_env[key] = value
+            get_settings.cache_clear()
+        return
+
+    from auditor.runtime_target import bind_runtime_target, runtime_target_from_ssh
+
+    with bind_runtime_target(
+        runtime_target_from_ssh(
+            host=target.host,
+            port=target.port or "22",
+            user=target.user,
+            password=target.password,
+            private_key_path=target.private_key_path,
+            strict_host_key=target.strict_host_key,
+        )
+    ):
         yield
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                target_env.pop(key, None)
-            else:
-                target_env[key] = value
-        get_settings.cache_clear()
+
+
+def read_client_credentials(
+    inventory_dir: Path | str,
+    client_slug_name: str,
+) -> dict[str, str]:
+    """Parse SSH/PG/NetBox keys from the client inventory without mutating env.
+
+    Same file order as :func:`load_inventory_credentials` (``INVENTORY.md`` then
+    ``connection.md``), but returns a new dict only — safe for concurrent runs.
+    """
+    from auditor.host_facts import resolve_client_dir
+
+    client_dir = resolve_client_dir(Path(inventory_dir), client_slug_name)
+    applied: dict[str, str] = {}
+    for name in ("INVENTORY.md", "connection.md"):
+        path = client_dir / name
+        if not path.is_file():
+            continue
+        parsed = parse_inventory_credentials(path.read_text(encoding="utf-8"))
+        for key, value in parsed.items():
+            if key not in _SECRET_ENV_KEYS:
+                continue
+            applied[key] = value
+    return applied
 
 
 def parse_inventory_credentials(text: str) -> dict[str, str]:

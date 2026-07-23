@@ -35,8 +35,9 @@ import asyncio
 import json
 import re
 import uuid
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 from langchain_core.messages import (
     AIMessage,
@@ -164,7 +165,11 @@ from auditor.secrets_file import (
     InventorySshTarget,
     bind_ssh_target,
     list_client_ssh_targets,
-    load_inventory_credentials,
+    read_client_credentials,
+)
+from auditor.runtime_target import (
+    bind_runtime_credentials,
+    effective_settings,
 )
 from auditor.state import AuditorState, Finding, render_report
 from auditor.tools.mcp_client import get_mcp_tools, reconnect_mcp_session
@@ -341,6 +346,46 @@ class AuditorGraph:
         self.fill_model = build_chat_model(self.settings)
         self.graph = self._build()
         self.intake_graph = self._build_intake()
+
+    @contextmanager
+    def _target_scope(
+        self,
+        *,
+        client_slug: str | None = None,
+        ssh_target: InventorySshTarget | None = None,
+        intake: dict[str, Any] | None = None,
+    ) -> Iterator[None]:
+        """Bind run-scoped SSH/PG credentials for the duration of a graph call.
+
+        Prefers ``client_slug``, else ``intake["client_slug"]``. Nested SSH host
+        binds override SSH fields without clearing PostgreSQL overlays.
+        """
+        slug = (client_slug or "").strip()
+        if not slug and intake:
+            slug = str(intake.get("client_slug") or "").strip()
+        with ExitStack() as stack:
+            if slug:
+                try:
+                    creds = read_client_credentials(self.settings.inventory_dir, slug)
+                except (OSError, ValueError, FileNotFoundError):
+                    creds = {}
+                if creds:
+                    stack.enter_context(bind_runtime_credentials(creds))
+            if ssh_target is not None:
+                stack.enter_context(bind_ssh_target(ssh_target))
+            yield
+
+    def _client_slug_from_values(self, values: dict[str, Any] | None) -> str | None:
+        """Extract client slug from checkpoint/intake state when present."""
+        if not values:
+            return None
+        intake = values.get("intake") if isinstance(values.get("intake"), dict) else {}
+        slug = str(
+            values.get("client_slug")
+            or (intake or {}).get("client_slug")
+            or ""
+        ).strip()
+        return slug or None
 
     async def ensure_async_checkpointer(self) -> None:
         """Upgrade to AsyncSqliteSaver (required for ``ainvoke`` durability)."""
@@ -598,14 +643,13 @@ class AuditorGraph:
                     state["evidence_run_id"] = store.run_id  # type: ignore[typeddict-item]
                     state["evidence_run_dir"] = str(store.root)  # type: ignore[typeddict-item]
 
-                applied = load_inventory_credentials(
+                applied = read_client_credentials(
                     self.settings.inventory_dir,
                     intake["client_slug"],
-                    override_existing=True,
                 )
                 intake["credentials_loaded"] = sorted(applied.keys())
-                get_settings.cache_clear()
-                self.settings = get_settings()
+                # Credentials stay run-scoped via ContextVar on invoke/resume;
+                # do not mutate process os.environ (concurrent audits).
                 break
             prompts = prompts_for_language(lang.code)
             prompts = type(prompts)(
@@ -701,7 +745,20 @@ class AuditorGraph:
                 continue
             intake["has_access"] = yn == "yes"
             if yn == "yes":
-                access = await probe_access_services(self.settings)
+                slug = str(intake.get("client_slug") or "").strip()
+                try:
+                    creds = (
+                        read_client_credentials(self.settings.inventory_dir, slug)
+                        if slug
+                        else {}
+                    )
+                except (OSError, ValueError, FileNotFoundError):
+                    creds = {}
+                if creds:
+                    with bind_runtime_credentials(creds):
+                        access = await probe_access_services(effective_settings())
+                else:
+                    access = await probe_access_services(effective_settings())
                 intake["access_probe"] = access
                 # 3b) Preaudit: discover hosts + propose frameworks (both domains).
                 store = self._store_from_state(state)
@@ -895,7 +952,7 @@ class AuditorGraph:
         user_request: str = "",
     ) -> HostFacts:
         """SSH-only tool loop + JSON fill → ``HostFacts`` (parser fallback)."""
-        ssh_host = str(self.settings.ssh_host or "")
+        ssh_host = str(effective_settings(self.settings).ssh_host or "")
         evidence_fw = "host_facts"
         evidence_req = "discover"
         if store is not None and host_id:
@@ -998,7 +1055,7 @@ class AuditorGraph:
         drift_items = []
         facts = None
 
-        if has_access and self.settings.ssh_host:
+        if has_access and effective_settings(self.settings).ssh_host:
             store = self._store_from_state(state)
             facts = await self._collect_host_facts_llm(
                 store=store,
@@ -2496,18 +2553,29 @@ class AuditorGraph:
             result = await self.graph.ainvoke(initial, config)
             return self._decorate_result(result, thread_id=tid, store=store)
 
-        if ssh_target is not None:
-            with bind_ssh_target(ssh_target):
-                self.settings = get_settings()
-                return await _invoke()
-        return await _invoke()
+        intake_for_scope = (
+            (intake_state.get("intake") if intake_state else None)
+            or intake_state
+            or {}
+        )
+        if not isinstance(intake_for_scope, dict):
+            intake_for_scope = {}
+        with self._target_scope(intake=intake_for_scope, ssh_target=ssh_target):
+            return await _invoke()
 
     async def aresume(self, thread_id: str, user_text: str) -> dict[str, Any]:
         """Resume a graph paused on intake or ``human_gate``."""
         config = {"configurable": {"thread_id": thread_id}}
         is_intake = ":intake" in thread_id or thread_id.endswith("intake")
         graph = self.intake_graph if is_intake else self.graph
-        result = await graph.ainvoke(Command(resume=user_text), config)
+        try:
+            pre = await graph.aget_state(config)
+            pre_values = pre.values or {}
+        except Exception:  # noqa: BLE001
+            pre_values = {}
+        slug = self._client_slug_from_values(pre_values)
+        with self._target_scope(client_slug=slug, intake=pre_values.get("intake") if isinstance(pre_values.get("intake"), dict) else None):
+            result = await graph.ainvoke(Command(resume=user_text), config)
         snap = await graph.aget_state(config)
         values = snap.values or {}
         run_id = values.get("evidence_run_id") or ""
@@ -2590,7 +2658,14 @@ class AuditorGraph:
                 interrupts.extend(list(getattr(task, "interrupts", None) or []))
             if interrupts:
                 return await self.aresume(thread_id, "continue")
-            result = await graph.ainvoke(None, config)
+            slug = self._client_slug_from_values(snap.values or {})
+            with self._target_scope(
+                client_slug=slug,
+                intake=(snap.values or {}).get("intake")
+                if isinstance((snap.values or {}).get("intake"), dict)
+                else None,
+            ):
+                result = await graph.ainvoke(None, config)
             values = (await graph.aget_state(config)).values or {}
             run_id2 = values.get("evidence_run_id") or rid
             if store is None and run_id2:
@@ -2675,6 +2750,13 @@ class AuditorGraph:
             framework_id=framework_id,
         )
 
+        continue_intake = meta.get("intake") if isinstance(meta.get("intake"), dict) else None
+        continue_slug = str(
+            meta.get("client_slug")
+            or ((continue_intake or {}).get("client_slug") if continue_intake else "")
+            or ""
+        ).strip() or None
+
         if not pending:
             # All REQs done — finalize via graph update + finalize node path
             await graph.aupdate_state(
@@ -2696,7 +2778,8 @@ class AuditorGraph:
                 },
                 as_node="assess_parallel",
             )
-            result = await graph.ainvoke(None, config)
+            with self._target_scope(client_slug=continue_slug, intake=continue_intake):
+                result = await graph.ainvoke(None, config)
             decorated = self._decorate_result(
                 result, thread_id=thread_id, store=store
             )
@@ -2723,7 +2806,8 @@ class AuditorGraph:
             },
             as_node="load_framework",
         )
-        result = await graph.ainvoke(None, config)
+        with self._target_scope(client_slug=continue_slug, intake=continue_intake):
+            result = await graph.ainvoke(None, config)
         decorated = self._decorate_result(result, thread_id=thread_id, store=store)
         if decorated.get("awaiting_hitl"):
             return decorated
@@ -2850,20 +2934,20 @@ class AuditorGraph:
         """SSH-discover every inventory host (inventory-only when no CMDB)."""
         slug = str(intake.get("client_slug") or client_slug(str(intake.get("client_name") or "")))
         targets = list_client_ssh_targets(self.settings.inventory_dir, slug)
-        if not targets and self.settings.ssh_host:
+        effective = effective_settings(self.settings)
+        if not targets and effective.ssh_host:
             targets = [
                 InventorySshTarget(
-                    host=self.settings.ssh_host,
-                    port=str(self.settings.ssh_port or 22),
-                    user=self.settings.ssh_user or "",
-                    password=self.settings.ssh_password or "",
-                    private_key_path=self.settings.ssh_private_key_path or "",
+                    host=effective.ssh_host,
+                    port=str(effective.ssh_port or 22),
+                    user=effective.ssh_user or "",
+                    password=effective.ssh_password or "",
+                    private_key_path=effective.ssh_private_key_path or "",
                 )
             ]
         discovered: list[tuple[InventorySshTarget, HostFacts]] = []
         for target in targets:
-            with bind_ssh_target(target):
-                self.settings = get_settings()
+            with self._target_scope(client_slug=slug, ssh_target=target, intake=intake):
                 facts = await self._collect_host_facts_llm(
                     store=store,
                     host_id=target.slug,

@@ -4,9 +4,11 @@ Used for evidence that lives on the database host rather than inside SQL
 catalogs: ``postgresql.conf``, ``pg_hba.conf``, package versions, listening
 sockets, data-directory permissions, and similar.
 
-Connection parameters come from ``Settings`` (``SSH_HOST``, ``SSH_USER``,
-key/password, etc.). Errors are returned as strings so the agent can record
-``status=error`` instead of crashing the graph.
+Connection parameters come from run-scoped
+:func:`~auditor.runtime_target.effective_settings` (ContextVar overlay from
+:func:`~auditor.secrets_file.bind_ssh_target`, then process ``Settings``).
+Errors are returned as strings so the agent can record ``status=error``
+instead of crashing the graph.
 """
 
 from __future__ import annotations
@@ -17,7 +19,8 @@ from typing import Any
 import asyncssh
 from langchain_core.tools import tool
 
-from auditor.config import Settings, get_settings
+from auditor.config import Settings
+from auditor.runtime_target import effective_settings
 
 
 def _ssh_kwargs(settings: Settings) -> dict[str, Any]:
@@ -68,13 +71,14 @@ async def _run_remote(command: str, settings: Settings | None = None) -> str:
 
     Args:
         command: Remote shell command string.
-        settings: Optional settings override; defaults to ``get_settings()``.
+        settings: Optional settings override; defaults to
+            :func:`~auditor.runtime_target.effective_settings`.
 
     Returns:
         Multi-line string with ``exit_code``, ``stdout``, and optional
         ``stderr``, or an ``SSH error: …`` line on connection failure.
     """
-    settings = settings or get_settings()
+    settings = settings or effective_settings()
     try:
         async with asyncssh.connect(**_ssh_kwargs(settings)) as conn:
             result = await conn.run(command, check=False)
@@ -104,7 +108,7 @@ async def _read_remote_file(path: str, settings: Settings | None = None) -> str:
     Returns:
         Same format as ``_run_remote`` (exit code + stdout/stderr).
     """
-    settings = settings or get_settings()
+    settings = settings or effective_settings()
     # Escape single quotes for safe inclusion in a single-quoted shell string.
     escaped = path.replace("'", "'\"'\"'")
     return await _run_remote(f"head -c 200000 -- '{escaped}'", settings=settings)

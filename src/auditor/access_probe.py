@@ -13,7 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from auditor.config import Settings, get_settings
+from auditor.config import Settings
+from auditor.runtime_target import effective_settings
 
 
 async def probe_access_services(settings: Settings | None = None) -> dict[str, Any]:
@@ -29,7 +30,8 @@ async def probe_access_services(settings: Settings | None = None) -> dict[str, A
   ``not_configured``), and a truncated ``detail`` string.
 
   Args:
-      settings: Optional settings override; defaults to :func:`get_settings`.
+      settings: Optional settings override; defaults to
+          :func:`~auditor.runtime_target.effective_settings`.
 
   Returns:
       Dict with keys:
@@ -37,7 +39,7 @@ async def probe_access_services(settings: Settings | None = None) -> dict[str, A
       * ``services``: list of per-service status dicts.
       * ``any_ok``: ``True`` if at least one service returned ``ok``.
   """
-    settings = settings or get_settings()
+    settings = settings or effective_settings()
     services: list[dict[str, Any]] = []
 
     # SSH
