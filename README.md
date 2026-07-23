@@ -145,6 +145,8 @@ Each audit creates:
 artifacts/<client_name>/
   meta.json
   report.md
+  report.docx              # Word export (summary + details)
+  report.xlsx              # Excel export (Findings + Summary sheets)
   <framework_id>/
     REQ-001/
       requirement.json
@@ -158,6 +160,7 @@ artifacts/<client_name>/
 
 After intake, the folder is named after the **client** (e.g. `TestCompany`), not a timestamp.
 Multi-framework runs (e.g. PostgreSQL + Ubuntu) share one `<run_id>` with a subfolder per framework. Configure root with `EVIDENCE_DIR` (default `artifacts`; Docker mounts `./artifacts`).
+The audit ZIP includes Markdown, Word, and Excel reports when packaging is enabled.
 
 ## CIS compliance charts (Open WebUI)
 

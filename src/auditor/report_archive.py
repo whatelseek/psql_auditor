@@ -143,7 +143,10 @@ def format_archive_chat_section(
         "",
         "## Audit archive",
         "",
-        f"📦 Report + evidence packaged as **`{zip_path.name}`** ({size_kb} KB).",
+        f"Report + evidence packaged as **`{zip_path.name}`** ({size_kb} KB).",
+        "",
+        "Includes **`report.md`**, **`report.docx`** (Word), and "
+        "**`report.xlsx`** (Excel) when export succeeded.",
         "",
         f"**[Download ZIP]({download_url})**",
         "",

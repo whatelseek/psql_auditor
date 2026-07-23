@@ -22,6 +22,8 @@ def test_create_run_archive_includes_report_and_req_files(tmp_path: Path):
     req = run / "ubuntu_cis_24_l2" / "REQ-001"
     req.mkdir(parents=True)
     (run / "report.md").write_text("# Report\n", encoding="utf-8")
+    (run / "report.docx").write_bytes(b"PK\x03\x04docx-placeholder")
+    (run / "report.xlsx").write_bytes(b"PK\x03\x04xlsx-placeholder")
     (req / "001_ssh_run.txt").write_text("exit_code=0\n", encoding="utf-8")
 
     zip_path = create_run_archive(run)
@@ -33,6 +35,8 @@ def test_create_run_archive_includes_report_and_req_files(tmp_path: Path):
     with zipfile.ZipFile(zip_path) as zf:
         names = set(zf.namelist())
     assert "report.md" in names
+    assert "report.docx" in names
+    assert "report.xlsx" in names
     assert "ubuntu_cis_24_l2/REQ-001/001_ssh_run.txt" in names
 
 

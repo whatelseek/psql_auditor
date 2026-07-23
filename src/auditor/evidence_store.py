@@ -660,6 +660,9 @@ class EvidenceStore:
     def write_root_report(self, report: str) -> Path:
         """Write the combined (or single-framework) report at the run root.
 
+        Also writes ``report.docx`` and ``report.xlsx`` beside ``report.md``
+        when export libraries are available.
+
         Args:
             report: Full Markdown report (possibly multi-framework merge).
 
@@ -668,6 +671,12 @@ class EvidenceStore:
         """
         path = self.root / "report.md"
         path.write_text(report if report.endswith("\n") else report + "\n", encoding="utf-8")
+        try:
+            from auditor.report_exports import write_report_exports
+
+            write_report_exports(self.root, report)
+        except Exception:  # noqa: BLE001
+            pass
         return path
 
     def framework_report_paths(self) -> list[Path]:

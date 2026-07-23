@@ -289,6 +289,8 @@ HITL_ENABLED=false
 artifacts/<client_name>/
   meta.json
   report.md
+  report.docx
+  report.xlsx
   <framework_id>/
     report.md
     REQ-001/
@@ -300,7 +302,7 @@ artifacts/<client_name>/
       ...
 ```
 
-Папка run = **имя клиента** (после intake). ZIP: `artifacts/<client_name>_audit.zip` + ссылка в чате (`PUBLIC_BASE_URL`).
+Папка run = **имя клиента** (после intake). ZIP: `artifacts/<client_name>_audit.zip` + ссылка в чате (`PUBLIC_BASE_URL`). В ZIP входят **Markdown**, **Word (`.docx`)** и **Excel (`.xlsx`)**.
 
 ### 8.3. Дополнительные проверки после аудита
 
