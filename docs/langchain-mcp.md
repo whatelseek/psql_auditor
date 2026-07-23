@@ -9,7 +9,7 @@ via [`langchain-mcp-adapters`](https://github.com/langchain-ai/langchain-mcp-ada
 
 MCP servers are listed in [`mcps/registry.json`](../mcps/registry.json) (see
 [`mcps/README.md`](../mcps/README.md)). The auditor loads that file, injects
-credentials from **inventory / secrets** (`envFrom: inventory:pg|mysql|oracle`),
+credentials from **inventory / secrets** (`envFrom: inventory:pg`),
 and builds `MultiServerMCPClient` stdio connection dicts.
 
 | Concern | Where it lives |
@@ -18,10 +18,10 @@ and builds `MultiServerMCPClient` stdio connection dicts.
 | Host / user / password / DB | Inventory Access table or `secrets/` |
 | Framework checklist | `agents/*.md` |
 
-Enable MySQL/Oracle templates in the registry after you install a real MCP
-package and add the matching framework Markdown. The agent can call
-`mcp_list_servers` to see readiness; it must **not** write passwords into the
-registry.
+Only the **postgres** server is registered today. To add another MCP later,
+append an entry in the registry and wire inventory credentials — see
+[`mcps/README.md`](../mcps/README.md). The agent can call `mcp_list_servers`
+to see readiness; it must **not** write passwords into the registry.
 
 Setting: `MCPS_DIR` (default `mcps`).
 

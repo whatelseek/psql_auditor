@@ -17,14 +17,13 @@ from auditor.tools.mcp_client import get_mcp_tools, postgres_mcp_connection
 def test_load_bundled_registry():
     registry = load_mcp_registry(Path("mcps"))
     assert registry.version == 1
-    assert "postgres" in registry.servers
+    assert list(registry.servers) == ["postgres"]
     pg = registry.servers["postgres"]
     assert pg.enabled
     assert pg.env_from == "inventory:pg"
     assert pg.curated_tools
     assert "postgres_cis" in pg.frameworks
-    assert registry.servers["mysql"].enabled is False
-    assert registry.servers["oracle"].enabled is False
+    assert registry.enabled_servers() == [pg]
 
 
 def test_build_postgres_connection_injects_pg_env(tmp_path: Path, monkeypatch):
