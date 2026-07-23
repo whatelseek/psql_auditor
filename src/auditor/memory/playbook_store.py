@@ -8,15 +8,19 @@ Implements LangGraph long-term memory as a **procedural playbook collection**:
 
 Pipeline role:
     Injected into evidence prompts via ``format_prompt_block`` and updated
-    after successful tool calls in ``remember_tool``. Survives restarts via
-    ``MEMORY_DIR/learned_playbooks.json``.
+    after successful tool calls in ``remember_tool``. Learned recipes persist to
+    the **results warehouse Postgres** (``playbook_memory`` table) when
+    ``RESULTS_DB_ENABLED``; otherwise to ``MEMORY_DIR/learned_playbooks.json``.
+    Hot-path reads use an in-process ``InMemoryStore`` cache.
 
 Key entry point:
-    ``PlaybookMemory`` — ``InMemoryStore`` + YAML seeds + disk overlay.
+    ``PlaybookMemory`` — YAML seeds + Postgres/JSON learned overlay + RAM cache.
 """
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import json
 import logging
 import threading
@@ -63,11 +67,22 @@ def _ns(framework_id: str) -> tuple[str, ...]:
     return ("playbooks", _memory_framework_id(framework_id))
 
 
-class PlaybookMemory:
-    """Procedural long-term memory backed by LangGraph ``InMemoryStore`` + disk.
+def _run_coro_sync(coro: Any, *, timeout: float = 30.0) -> Any:
+    """Run an async coroutine from sync code (thread + dedicated event loop)."""
 
-    Loads seed YAML from ``playbooks_dir``, overlays learned JSON from
-    ``memory_dir``, and optionally persists new recipes after successful audits.
+    def _runner() -> Any:
+        return asyncio.run(coro)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_runner).result(timeout=timeout)
+
+
+class PlaybookMemory:
+    """Procedural long-term memory backed by LangGraph ``InMemoryStore`` + Postgres.
+
+    Loads seed YAML from ``playbooks_dir``, overlays learned entries from the
+    results warehouse (or JSON fallback), and persists new recipes after
+    successful tool calls. Reads stay in RAM for speed.
     """
 
     def __init__(
@@ -76,21 +91,25 @@ class PlaybookMemory:
         playbooks_dir: Path | str,
         memory_dir: Path | str,
         learn: bool = True,
+        settings: Settings | None = None,
     ) -> None:
-        """Create memory and load seeds + learned entries from disk.
+        """Create memory and load seeds + learned entries.
 
         Args:
             playbooks_dir: Directory of ``*.yaml`` / ``*.yml`` seed playbooks.
-            memory_dir: Writable directory for ``learned_playbooks.json``.
+            memory_dir: Writable directory for JSON fallback
+                (``learned_playbooks.json`` when Postgres is off).
             learn: When ``False``, skip hot-path learning and persistence.
+            settings: Optional settings (results DB URL / flags).
         """
         self.playbooks_dir = Path(playbooks_dir)
         self.memory_dir = Path(memory_dir)
         self.learn = learn
+        self.settings = settings
         self._store = InMemoryStore()
         self._lock = threading.Lock()
         self._dirty = False
-        # Framework ids seen via seeds, learned JSON, or hot-path remember_tool.
+        # Framework ids seen via seeds, learned JSON/PG, or hot-path remember_tool.
         # Required so persist() can flush brand-new frameworks (e.g. host_facts)
         # that have no seed YAML yet.
         self._tracked_framework_ids: set[str] = set()
@@ -98,7 +117,7 @@ class PlaybookMemory:
 
     @property
     def store(self) -> InMemoryStore:
-        """Underlying LangGraph in-memory key-value store."""
+        """Underlying LangGraph in-memory key-value store (hot-path cache)."""
         return self._store
 
     def _track_framework(self, framework_id: str) -> None:
@@ -107,8 +126,16 @@ class PlaybookMemory:
         if bare and bare != "unknown":
             self._tracked_framework_ids.add(bare)
 
+    def _results_store(self):
+        """Return enabled ResultsStore when settings configure the warehouse."""
+        if self.settings is None:
+            return None
+        from auditor.results_store import get_results_store
+
+        return get_results_store(self.settings)
+
     def reload(self) -> None:
-        """Load seed YAML then overlay learned JSON from ``memory_dir``.
+        """Load seed YAML then overlay learned entries from Postgres or JSON.
 
         Replaces the in-memory store and clears the dirty flag.
         """
@@ -175,19 +202,8 @@ class PlaybookMemory:
                 },
             )
 
-    def _load_learned(self) -> None:
-        """Overlay ``memory_dir/learned_playbooks.json`` onto the store."""
-        path = self.memory_dir / "learned_playbooks.json"
-        if not path.is_file():
-            return
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("Could not load learned memory %s: %s", path, exc)
-            return
-        frameworks = payload.get("frameworks") or {}
-        if not isinstance(frameworks, dict):
-            return
+    def _apply_learned_frameworks(self, frameworks: dict[str, dict[str, Any]]) -> None:
+        """Overlay learned framework→entry maps onto the in-memory store."""
         for framework_id, entries in frameworks.items():
             if not isinstance(entries, dict):
                 continue
@@ -198,29 +214,82 @@ class PlaybookMemory:
                 value = {**value, "source": value.get("source") or "learned"}
                 self._store.put(_ns(str(framework_id)), str(key), value)
 
+    def _load_learned_from_json(self) -> dict[str, dict[str, Any]]:
+        """Read ``memory_dir/learned_playbooks.json`` if present."""
+        path = self.memory_dir / "learned_playbooks.json"
+        if not path.is_file():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load learned memory %s: %s", path, exc)
+            return {}
+        frameworks = payload.get("frameworks") or {}
+        return frameworks if isinstance(frameworks, dict) else {}
+
+    def _load_learned(self) -> None:
+        """Overlay learned recipes from Postgres (preferred) or JSON fallback."""
+        store = self._results_store()
+        frameworks: dict[str, dict[str, Any]] = {}
+        if store is not None:
+            try:
+                frameworks = _run_coro_sync(store.load_learned_playbooks()) or {}
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Postgres playbook load failed: %s", exc)
+                frameworks = {}
+        if not frameworks:
+            frameworks = self._load_learned_from_json()
+            # One-time migrate JSON → Postgres when warehouse is on and empty.
+            if frameworks and store is not None:
+                try:
+                    n = _run_coro_sync(store.save_learned_playbooks(frameworks))
+                    if n:
+                        logger.info(
+                            "Migrated %s learned playbook entries from JSON to Postgres",
+                            n,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("JSON→Postgres playbook migrate failed: %s", exc)
+        self._apply_learned_frameworks(frameworks)
+
+    def _collect_learned(self) -> dict[str, dict[str, Any]]:
+        """Snapshot learned entries currently in the RAM store."""
+        frameworks: dict[str, dict[str, Any]] = {}
+        for fw in self._known_framework_ids():
+            items = self._store.search(_ns(fw), limit=200)
+            learned: dict[str, Any] = {}
+            for item in items:
+                value = dict(item.value or {})
+                if value.get("source") != "learned":
+                    continue
+                learned[item.key] = value
+            if learned:
+                frameworks[fw] = learned
+        return frameworks
+
     def persist(self) -> Path | None:
-        """Flush learned entries to ``MEMORY_DIR/learned_playbooks.json``.
+        """Flush learned entries to Postgres (preferred) or JSON fallback.
 
         Returns:
-            Path written, or ``None`` when nothing to persist or learning off.
+            JSON path when written to disk, or ``None`` when persisted only to
+            Postgres / nothing to write / learning off.
         """
         with self._lock:
-            if not self._dirty and not self.learn:
+            if not self._dirty:
                 return None
-            frameworks: dict[str, dict[str, Any]] = {}
-            # InMemoryStore has no public list-all; scan namespaces we track
-            # (seeds, prior learned JSON, and ids recorded by remember_tool).
-            framework_ids = self._known_framework_ids()
-            for fw in framework_ids:
-                items = self._store.search(_ns(fw), limit=200)
-                learned: dict[str, Any] = {}
-                for item in items:
-                    value = dict(item.value or {})
-                    if value.get("source") != "learned":
-                        continue
-                    learned[item.key] = value
-                if learned:
-                    frameworks[fw] = learned
+            frameworks = self._collect_learned()
+            store = self._results_store()
+            wrote_pg = False
+            if store is not None:
+                try:
+                    _run_coro_sync(store.save_learned_playbooks(frameworks))
+                    wrote_pg = True
+                    self._dirty = False
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Postgres playbook persist failed: %s", exc)
+            if wrote_pg:
+                return None
+            # Fallback: JSON file (warehouse off or PG write failed).
             self.memory_dir.mkdir(parents=True, exist_ok=True)
             path = self.memory_dir / "learned_playbooks.json"
             path.write_text(
@@ -239,8 +308,8 @@ class PlaybookMemory:
         """Collect framework ids to scan on persist.
 
         Includes seed YAML stems / ``framework_id`` fields, keys already in
-        ``learned_playbooks.json``, and ids tracked via ``remember_tool`` so
-        first-time frameworks (no seed file yet) are still flushed to disk.
+        learned JSON/Postgres overlays, and ids tracked via ``remember_tool`` so
+        first-time frameworks (no seed file yet) are still flushed.
         """
         ids: set[str] = set(self._tracked_framework_ids)
         if self.playbooks_dir.is_dir():
@@ -359,7 +428,6 @@ class PlaybookMemory:
         from auditor.tools.secrets import redact_secrets
 
         args = redact_secrets(dict(arguments or {}))
-        # Avoid storing huge SQL dumps / file bodies as "memory".
         for key in list(args.keys()):
             val = args[key]
             if isinstance(val, str) and len(val) > 2000:
@@ -376,7 +444,6 @@ class PlaybookMemory:
             }
             tools = list(existing.get("tools") or [])
             recipe = {"name": tool_name, "arguments": args}
-            # Deduplicate by name+args JSON
             sig = json.dumps(recipe, sort_keys=True, ensure_ascii=False)
             tools = [
                 t
@@ -395,6 +462,8 @@ class PlaybookMemory:
             tools = tools[:MAX_LEARNED_TOOLS_PER_REQ]
             existing.update(
                 {
+                    "framework_id": _memory_framework_id(framework_id),
+                    "requirement_id": req_id,
                     "tools": tools,
                     "source": "learned",
                     "updated_at": _utc_now(),
@@ -403,7 +472,6 @@ class PlaybookMemory:
             self._store.put(_ns(framework_id), req_id, existing)
             self._dirty = True
 
-        # Persist outside the lock (persist() acquires the same lock).
         try:
             self.persist()
         except OSError as exc:

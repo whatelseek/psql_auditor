@@ -14,6 +14,10 @@ Layout (when ``RESULTS_DB_PER_CLIENT=true``)::
       framework_requirements   -- checklist snapshot for the session/framework
       requirement_results      -- filled cells (status/obs/rec)
 
+Shared warehouse DB (``RESULTS_DATABASE_URL`` database, not per-client)::
+
+    playbook_memory            -- learned procedural recipes (global)
+
 Pipeline role:
     :func:`start_session_safe` allocates session numbers at intake;
     :func:`record_requirement_result_safe` dual-writes each filled REQ during
@@ -154,6 +158,21 @@ CREATE TABLE IF NOT EXISTS requirement_results (
 
 CREATE INDEX IF NOT EXISTS requirement_results_session_idx
     ON requirement_results (session_id, req_id);
+"""
+
+# Shared warehouse DB (RESULTS_DATABASE_URL), not per-client — playbooks are global.
+_PLAYBOOK_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS playbook_memory (
+    framework_id    text NOT NULL,
+    entry_key       text NOT NULL,
+    payload         jsonb NOT NULL DEFAULT '{}'::jsonb,
+    source          text NOT NULL DEFAULT 'learned',
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (framework_id, entry_key)
+);
+
+CREATE INDEX IF NOT EXISTS playbook_memory_source_idx
+    ON playbook_memory (source, updated_at DESC);
 """
 
 
@@ -1652,6 +1671,122 @@ class ResultsStore:
                 ON host_results (session_id, host_id, framework_id)
             """
         )
+
+    async def _ensure_playbook_schema(self, conn: asyncpg.Connection) -> None:
+        """Create global ``playbook_memory`` table on the shared warehouse DB."""
+        await conn.execute(_PLAYBOOK_SCHEMA_SQL)
+
+    async def load_learned_playbooks(self) -> dict[str, dict[str, Any]]:
+        """Load learned playbook entries from the shared results Postgres.
+
+        Returns:
+            Mapping ``framework_id → { entry_key → payload dict }``.
+            Empty when disabled or on error.
+        """
+        if not self.enabled:
+            return {}
+        base = (self.settings.results_database_url or "").strip()
+        if not base:
+            return {}
+        try:
+            conn = await asyncpg.connect(base)
+            try:
+                await self._ensure_playbook_schema(conn)
+                rows = await conn.fetch(
+                    """
+                    SELECT framework_id, entry_key, payload, source, updated_at
+                    FROM playbook_memory
+                    WHERE source = 'learned'
+                    """
+                )
+            finally:
+                await conn.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not load playbook memory from Postgres: %s", exc)
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            fw = str(row["framework_id"] or "")
+            key = str(row["entry_key"] or "")
+            if not fw or not key:
+                continue
+            payload = row["payload"]
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+            if not isinstance(payload, dict):
+                continue
+            value = {
+                **payload,
+                "source": str(row["source"] or "learned"),
+            }
+            if row["updated_at"] is not None and "updated_at" not in value:
+                value["updated_at"] = row["updated_at"].isoformat()
+            out.setdefault(fw, {})[key] = value
+        return out
+
+    async def save_learned_playbooks(
+        self, frameworks: Mapping[str, Mapping[str, Any]]
+    ) -> int:
+        """Replace learned playbook rows in Postgres with ``frameworks``.
+
+        Deletes previous ``source='learned'`` rows, then upserts the provided
+        entries. Seed YAML stays on disk and is never written here.
+
+        Args:
+            frameworks: ``framework_id → { entry_key → payload }``.
+
+        Returns:
+            Number of rows upserted, or ``0`` when disabled / on failure.
+        """
+        if not self.enabled:
+            return 0
+        base = (self.settings.results_database_url or "").strip()
+        if not base:
+            return 0
+        try:
+            conn = await asyncpg.connect(base)
+            try:
+                await self._ensure_playbook_schema(conn)
+                async with conn.transaction():
+                    await conn.execute(
+                        "DELETE FROM playbook_memory WHERE source = 'learned'"
+                    )
+                    count = 0
+                    for framework_id, entries in frameworks.items():
+                        if not isinstance(entries, Mapping):
+                            continue
+                        fw = str(framework_id or "").strip()
+                        if not fw:
+                            continue
+                        for entry_key, payload in entries.items():
+                            key = str(entry_key or "").strip()
+                            if not key or not isinstance(payload, dict):
+                                continue
+                            body = {**payload, "source": "learned"}
+                            await conn.execute(
+                                """
+                                INSERT INTO playbook_memory (
+                                    framework_id, entry_key, payload, source, updated_at
+                                ) VALUES ($1, $2, $3::jsonb, 'learned', now())
+                                ON CONFLICT (framework_id, entry_key) DO UPDATE SET
+                                    payload = EXCLUDED.payload,
+                                    source = 'learned',
+                                    updated_at = now()
+                                """,
+                                fw,
+                                key,
+                                json.dumps(body, ensure_ascii=False),
+                            )
+                            count += 1
+                    return count
+            finally:
+                await conn.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not save playbook memory to Postgres: %s", exc)
+            return 0
 
 
 _STORE: ResultsStore | None = None
