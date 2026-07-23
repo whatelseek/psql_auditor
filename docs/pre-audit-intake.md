@@ -103,7 +103,7 @@ Newest pause marker in chat history wins when resolving resume.
 | Env | Default | Role |
 |-----|---------|------|
 | `INTAKE_ENABLED` | `true` | Master switch for the questionnaire |
-| `INVENTORY_DIR` | `inventory` | Working inventory when CMDB = no |
+| `INVENTORY_DIR` | `inventory` | Working inventory (hosts + credentials) |
 | SSH / PG | `secrets/connection.md` | Credentials (not Compose env for secrets) |
 
 ## Related

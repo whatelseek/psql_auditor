@@ -150,9 +150,9 @@ class Settings(BaseSettings):
     # Allow chat to run ad-hoc SSH/SQL/playbook commands without a full audit
     adhoc_commands_enabled: bool = True
     max_session_retries: int = 2
-    # Pre-audit intake questionnaire (client / CMDB / access / audit type)
+    # Pre-audit intake questionnaire (client / access / scope)
     intake_enabled: bool = True
-    # Working inventory docs (INVENTORY.md) when CMDB is absent
+    # Working inventory docs (INVENTORY.md) — host list and credentials
     inventory_dir: Path = Field(default=Path("inventory"))
     # Results warehouse (filled checklists). Separate from PG_* / DATABASE_URL
     # used to audit the target Postgres instance via MCP.
