@@ -1,19 +1,25 @@
 # Starting an audit (Open WebUI)
 
 This document describes how an operator starts a security audit with **auditor**
-through Open WebUI. Full audits begin with a **pre-audit intake** questionnaire,
-then discover each inventory host and run matching **IT** and/or **Cybersecurity**
-frameworks.
+through Open WebUI. Chat messages are first **classified by intent**; only a
+full-audit intent enters the **pre-audit intake** questionnaire, then discovery
+and assessment.
+
+- Intent routing (all chat paths): [`chat-intent.md`](chat-intent.md)
+- Intake questionnaire detail: [`pre-audit-intake.md`](pre-audit-intake.md)
 
 ## Operator flow
 
 ```text
 Open WebUI chat (model: auditor)
   │
+  ├─ 0. Intent: audit | adhoc | revise | refill | update_report | list_sessions
+  │     (only "audit" continues below — see chat-intent.md)
+  │
   ├─ 1. Message: start an audit (optional: attach target file)
   │
   ▼
-Agent — intake (chat Q&A, marker [AUDIT_INTAKE:…])
+Agent — intake (chat Q&A, marker [AUDIT_INTAKE:…])   ← pre-audit-intake.md
   ├─ Client name
   ├─ Has CMDB / NetBox?
   │     ├─ yes → probe NetBox MCP
@@ -29,10 +35,11 @@ Agent — intake (chat Q&A, marker [AUDIT_INTAKE:…])
   ▼
 Agent — assessment
   ├─ Run selected (host, framework) jobs under artifacts/<Client>/<host>/…
-  └─ Finalize → combined report.md + ZIP
+  └─ Finalize → combined report.md + ZIP (+ optional results DB session)
 ```
 
-Disable intake with `INTAKE_ENABLED=false` (Compose / `.env`).
+Disable intake with `INTAKE_ENABLED=false` (Compose / `.env`). Ad-hoc and
+follow-up intents never run intake.
 
 ### Step-by-step
 
@@ -184,7 +191,11 @@ container). Those keys must not appear in `docker-compose.yml`.
 
 ## Related
 
+- Docs index: [`README.md`](README.md)
+- Chat intent routing: [`chat-intent.md`](chat-intent.md)
+- Pre-audit intake: [`pre-audit-intake.md`](pre-audit-intake.md)
 - Framework drop-ins: [`agents/`](../agents/)
 - Import CIS Nessus `.audit`: [`cis-audit-import.md`](cis-audit-import.md) (`ubuntu_cis_24_l2`)
 - Evidence layout & ZIP delivery: [README — Evidence on disk](../README.md#evidence-on-disk)
+- Results warehouse sessions: [`results-database.md`](results-database.md)
 - Config keys: [`.env.example`](../.env.example) (`OPEN_WEBUI_*`, `PUBLIC_BASE_URL`, `SSH_*`, `PG_*`, …)

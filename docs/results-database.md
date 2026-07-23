@@ -24,7 +24,8 @@ phrases below, then **continue**.
 ## Chat phrases (Open WebUI)
 
 Intent matching is **phrase-based** (EN/RU patterns), not full free-form LLM
-routing. Prefer the examples below.
+routing. Prefer the examples below. Full routing table:
+[`chat-intent.md`](chat-intent.md) (`list_sessions` intent).
 
 Slash shortcuts (Workspace → Prompts) are installed by
 `python3 openwebui/install_owui_prompts.py` — e.g. `/list-sessions`,
@@ -197,3 +198,10 @@ re-attach to the correct session after restart.
 - Per-REQ status, observation, recommendation, notes — **all with session_number**
 
 **Not stored:** SSH/MCP tool output, passwords, private keys, raw evidence files.
+
+## Related
+
+- Intent routing (`list_sessions`): [`chat-intent.md`](chat-intent.md)
+- Pre-audit intake (session start): [`pre-audit-intake.md`](pre-audit-intake.md)
+- Starting audits: [`starting-an-audit.md`](starting-an-audit.md)
+- Docs index: [`README.md`](README.md)

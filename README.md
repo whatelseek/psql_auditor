@@ -4,14 +4,16 @@ LangGraph security auditor. **You create frameworks** by dropping Markdown files
 
 **Руководство пользователя (RU):** [`docs/user-manual-ru.md`](docs/user-manual-ru.md) — развёртывание, использование, добавление Markdown-фреймворков.
 
+**Docs index:** [`docs/README.md`](docs/README.md) — intent, intake, MCP, results warehouse, and more.
+
 ## Create a framework
 
 Add `agents/<name>.md`:
 
 ```markdown
 ---
-id: ubuntu_cis
-aliases: [ubuntu, linux, debian]
+id: ubuntu_cis_24_l2
+aliases: [ubuntu, linux, debian, ubuntu_cis]
 description: Ubuntu CIS host hardening
 ---
 # Ubuntu CIS Benchmark
@@ -30,17 +32,23 @@ Bundled examples: `postgres_cis`, `ubuntu_cis_24_l2`, `it_audit`.
 ## Graph (cyclic + HITL)
 
 ```
-START → route_framework → load_framework → assess_parallel
-                              ↑                    │
-                              │                    ├─ session errors → reconnect_session ─┐
-                              │                    │                                       │
-                              │◄───────────────────┴───────────────────────────────────────┘
-                              │                    │
-                              │                    └─ failed REQs → human_gate (interrupt)
-                              │                              │ skip / retry (chat reply)
-                              │◄──── retry ──────────────────┤
-                              │                              └─ no more failures → finalize → END
+START → route_framework → load_framework → collect_host_facts → assess_parallel
+                                                                    │
+                              ┌─────────────────────────────────────┤
+                              │                                     ├─ session errors → reconnect_session ─┐
+                              │                                     │                                       │
+                              │◄────────────────────────────────────┴───────────────────────────────────────┘
+                              │                                     │
+                              │                                     └─ failed REQs → human_gate (interrupt)
+                              │                                               │ skip / retry (chat reply)
+                              │◄──── retry ───────────────────────────────────┤
+                              │                                               └─ no more failures → finalize → END
 ```
+
+Chat **intent** selects this graph only for full audits; see
+[`docs/chat-intent.md`](docs/chat-intent.md). Pre-audit **intake** runs first when
+enabled: [`docs/pre-audit-intake.md`](docs/pre-audit-intake.md). Docs index:
+[`docs/README.md`](docs/README.md).
 
 ### Human-in-the-loop (Open WebUI)
 
@@ -70,10 +78,13 @@ Configure `PUBLIC_BASE_URL` (browser → agent) and `OPEN_WEBUI_URL` (agent → 
 
 ## Starting an audit (Open WebUI)
 
-Operators start audits in Open WebUI. The agent runs a **pre-audit intake**
-(client name → CMDB/NetBox → access probe → CIS / IT / both), then assesses.
+Operators start audits in Open WebUI. Messages are **routed by intent**
+([`docs/chat-intent.md`](docs/chat-intent.md)). A full audit then runs
+**pre-audit intake** (client → CMDB/NetBox → access → IT / Cybersecurity / both)
+([`docs/pre-audit-intake.md`](docs/pre-audit-intake.md)), then assesses.
 
 → **[`docs/starting-an-audit.md`](docs/starting-an-audit.md)**  
+→ Docs index: [`docs/README.md`](docs/README.md)  
 → NetBox MCP: [`docs/netbox-mcp.md`](docs/netbox-mcp.md)  
 → Example target file: [`docs/examples/target.example.yaml`](docs/examples/target.example.yaml)  
 → Connection secrets: [`secrets/connection.example.md`](secrets/connection.example.md)
@@ -100,8 +111,10 @@ Procedural memory remembers **how to verify** each REQ (SSH/SQL recipes) per fra
 
 - `Run a PostgreSQL CIS audit`
 - `Audit this Ubuntu host against CIS`
-- `Windows Server CIS hardening check`
+- `Conduct IT audit`
 - `Conduct PostgreSQL and Ubuntu audit` → **two separate graphs**, merged report + ZIP
+- `Run this command: \`uptime\`` → **ad-hoc** (not a full audit)
+- `Which sessions need continue?` → results warehouse list
 
 ## Stack
 
@@ -116,7 +129,8 @@ Procedural memory remembers **how to verify** each REQ (SSH/SQL recipes) per fra
 cp .env.example .env
 cp secrets/connection.example.md secrets/connection.md   # SSH/PG/MCP only here
 docker compose up --build
-# http://localhost:3000 → model auditor
+# http://localhost:3001 → model auditor  (WEBUI_HOST_PORT)
+# http://localhost:8001/healthz          (AGENT_HOST_PORT)
 ```
 
 ## Fixed report cells
