@@ -15,6 +15,7 @@ from auditor.intake import (
     format_host_access_list_markdown,
     format_proposed_jobs_markdown,
     frameworks_for_audit_type,
+    host_framework_pairs,
     intake_clarification_from_payload,
     parse_client_name,
     resolve_audit_type,
@@ -94,7 +95,8 @@ def test_resolve_scope_llm_only():
         {"action": "confirm"},
     )
     assert selected is not None
-    assert len(selected) == 1
+    assert selected.action == "confirm"
+    assert len(selected.selected_jobs) == 1
     trimmed = resolve_scope_decision(
         "drop ubuntu please",
         proposed,
@@ -105,8 +107,9 @@ def test_resolve_scope_llm_only():
         },
     )
     assert trimmed is not None
-    assert "ubuntu_cis_24_l2" not in trimmed[0]["frameworks"]
-    assert "postgres_cis" in trimmed[0]["frameworks"]
+    assert trimmed.action == "exclude"
+    assert "ubuntu_cis_24_l2" not in trimmed.selected_jobs[0]["frameworks"]
+    assert "postgres_cis" in trimmed.selected_jobs[0]["frameworks"]
     only = resolve_scope_decision(
         "only postgres",
         proposed,
@@ -117,7 +120,8 @@ def test_resolve_scope_llm_only():
         },
     )
     assert only is not None
-    assert only[0]["frameworks"] == ["postgres_cis"]
+    assert only.action == "include"
+    assert only.selected_jobs[0]["frameworks"] == ["postgres_cis"]
     only_pair = resolve_scope_decision(
         "only ubuntu on this host",
         proposed,
@@ -128,7 +132,7 @@ def test_resolve_scope_llm_only():
         },
     )
     assert only_pair is not None
-    assert only_pair[0]["frameworks"] == ["ubuntu_cis_24_l2"]
+    assert only_pair.selected_jobs[0]["frameworks"] == ["ubuntu_cis_24_l2"]
     # Empty include lists → re-prompt
     assert (
         resolve_scope_decision(
@@ -142,6 +146,18 @@ def test_resolve_scope_llm_only():
     assert resolve_scope_decision("confirm", proposed, {"action": "unknown"}) is None
     assert resolve_scope_decision("confirm", proposed, None) is None
     assert resolve_scope_decision("maybe later", proposed, None) is None
+
+
+def test_host_framework_pairs_diff():
+    original = [
+        {
+            "host_id": "h1",
+            "frameworks": ["it_audit", "postgres_cis"],
+        }
+    ]
+    selected = [{"host_id": "h1", "frameworks": ["postgres_cis"]}]
+    removed = host_framework_pairs(original) - host_framework_pairs(selected)
+    assert removed == {("h1", "it_audit")}
 
 
 def test_parse_client_and_slug():
@@ -198,8 +214,8 @@ def test_scope_exclusions_via_llm_resolve():
         "confirm", proposed, {"action": "confirm"}
     )
     assert selected is not None
-    assert len(selected) == 2
-    assert selected[0]["frameworks"] == proposed[0]["frameworks"]
+    assert len(selected.selected_jobs) == 2
+    assert selected.selected_jobs[0]["frameworks"] == proposed[0]["frameworks"]
 
     trimmed = resolve_scope_decision(
         "exclude ubuntu_cis_24_l2",
@@ -211,8 +227,10 @@ def test_scope_exclusions_via_llm_resolve():
         },
     )
     assert trimmed is not None
-    assert all("ubuntu_cis_24_l2" not in r["frameworks"] for r in trimmed)
-    assert "postgres_cis" in trimmed[0]["frameworks"]
+    assert all(
+        "ubuntu_cis_24_l2" not in r["frameworks"] for r in trimmed.selected_jobs
+    )
+    assert "postgres_cis" in trimmed.selected_jobs[0]["frameworks"]
 
     emptied = apply_scope_exclusions(
         proposed,
@@ -231,8 +249,8 @@ def test_scope_exclusions_via_llm_resolve():
         },
     )
     assert only is not None
-    assert only[0]["frameworks"] == ["it_audit", "postgres_cis"]
-    assert only[1]["frameworks"] == ["it_audit"]
+    assert only.selected_jobs[0]["frameworks"] == ["it_audit", "postgres_cis"]
+    assert only.selected_jobs[1]["frameworks"] == ["it_audit"]
 
     assert resolve_scope_decision("maybe later", proposed) is None
     assert "Proposed host" in format_proposed_jobs_markdown(proposed)

@@ -19,6 +19,7 @@ host→framework, которое оператор может урезать. Inv
     :func:`frameworks_for_audit_type` — домен → id фреймворков
     (fallback без доступа).
     :func:`summarize_access_probe` — Markdown access-пробы.
+    :class:`ScopeDecision` — результат шага confirm/exclude/include.
 """
 
 from __future__ import annotations
@@ -214,11 +215,54 @@ def resolve_audit_type(
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class ScopeDecision:
+    """Результат разбора ответа оператора на шаге scope.
+
+    Attributes:
+        action: ``confirm`` | ``exclude`` | ``include``.
+        selected_jobs: План после применения действия (может быть пустым).
+    """
+
+    action: Literal["confirm", "exclude", "include"]
+    selected_jobs: list[dict[str, Any]]
+
+
+def _parse_fw_id_list(raw: Any) -> set[str]:
+    """Нормализовать список id фреймворков из JSON LLM."""
+    return {
+        str(x).strip().lower()
+        for x in (raw or [])
+        if str(x).strip()
+    }
+
+
+def _parse_host_fw_pairs(raw: Any) -> set[tuple[str, str]]:
+    """Нормализовать пары host/framework из JSON LLM (строки или списки)."""
+    pairs: set[tuple[str, str]] = set()
+    for pair in raw or []:
+        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+            pairs.add((str(pair[0]).strip().lower(), str(pair[1]).strip().lower()))
+        elif isinstance(pair, str) and "/" in pair:
+            host, fw = pair.split("/", 1)
+            pairs.add((host.strip().lower(), fw.strip().lower()))
+    return {(h, f) for h, f in pairs if h and f}
+
+
+def host_framework_pairs(jobs: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    """Множество ``(host_id, framework)`` из списка proposed/selected jobs."""
+    return {
+        (str(row.get("host_id") or ""), str(fw))
+        for row in jobs
+        for fw in (row.get("frameworks") or [])
+    }
+
+
 def resolve_scope_decision(
     text: str,
     proposed_jobs: list[dict[str, Any]],
     llm_payload: dict[str, Any] | None = None,
-) -> list[dict[str, Any]] | None:
+) -> ScopeDecision | None:
     """Выбрать задания только из JSON LLM (шаг scope intake).
 
     Без regex-fallback. Неясный / отсутствующий payload → ``None`` (повтор вопроса).
@@ -232,60 +276,35 @@ def resolve_scope_decision(
     ждёт ``confirm`` (не стартует оценку сразу).
 
     Returns:
-        Отфильтрованный список заданий или ``None``, если ответ неясен.
-        Пустой список — всё исключено (вызывающий должен переспросить).
+        :class:`ScopeDecision` или ``None``, если ответ неясен.
+        ``selected_jobs`` может быть пустым (вызывающий должен переспросить).
     """
     del text
     if not isinstance(llm_payload, dict):
         return None
     action = str(llm_payload.get("action") or "").strip().lower()
     if action in {"confirm", "all", "run_all", "accept"}:
-        return [dict(r) for r in proposed_jobs]
+        return ScopeDecision(
+            "confirm", [dict(r) for r in proposed_jobs]
+        )
     if action in {"exclude", "trim"}:
-        excl_fw = {
-            str(x).strip()
-            for x in (llm_payload.get("exclude_frameworks") or [])
-            if str(x).strip()
-        }
-        excl_pairs: set[tuple[str, str]] = set()
-        for pair in llm_payload.get("exclude_pairs") or []:
-            if isinstance(pair, (list, tuple)) and len(pair) >= 2:
-                excl_pairs.add((str(pair[0]).lower(), str(pair[1]).lower()))
-            elif isinstance(pair, str) and "/" in pair:
-                h, f = pair.split("/", 1)
-                excl_pairs.add((h.strip().lower(), f.strip().lower()))
-        return apply_scope_exclusions(proposed_jobs, excl_fw, excl_pairs)
+        return ScopeDecision(
+            "exclude",
+            apply_scope_exclusions(
+                proposed_jobs,
+                _parse_fw_id_list(llm_payload.get("exclude_frameworks")),
+                _parse_host_fw_pairs(llm_payload.get("exclude_pairs")),
+            ),
+        )
     if action in {"include", "only", "keep"}:
-        incl_fw = {
-            str(x).strip().lower()
-            for x in (llm_payload.get("include_frameworks") or [])
-            if str(x).strip()
-        }
-        incl_pairs: set[tuple[str, str]] = set()
-        for pair in llm_payload.get("include_pairs") or []:
-            if isinstance(pair, (list, tuple)) and len(pair) >= 2:
-                incl_pairs.add((str(pair[0]).lower(), str(pair[1]).lower()))
-            elif isinstance(pair, str) and "/" in pair:
-                h, f = pair.split("/", 1)
-                incl_pairs.add((h.strip().lower(), f.strip().lower()))
+        incl_fw = _parse_fw_id_list(llm_payload.get("include_frameworks"))
+        incl_pairs = _parse_host_fw_pairs(llm_payload.get("include_pairs"))
         if not incl_fw and not incl_pairs:
             return None
-        out: list[dict[str, Any]] = []
-        for row in proposed_jobs:
-            host_id = str(row.get("host_id") or "")
-            ssh = str(row.get("ssh_host") or "")
-            host_keys = {host_id.lower(), ssh.lower()} - {""}
-            kept: list[str] = []
-            for fw in row.get("frameworks") or []:
-                fw_s = str(fw)
-                low = fw_s.lower()
-                pair_hit = any((h, low) in incl_pairs for h in host_keys)
-                fw_hit = low in incl_fw
-                if pair_hit or fw_hit:
-                    kept.append(fw_s)
-            if kept:
-                out.append({**row, "frameworks": kept})
-        return out
+        return ScopeDecision(
+            "include",
+            apply_scope_inclusions(proposed_jobs, incl_fw, incl_pairs),
+        )
     return None
 
 
@@ -668,31 +687,58 @@ def extract_management_summary(report_text: str) -> str:
     return "\n".join(clipped).strip() or text[:2000]
 
 
+def _apply_scope_filter(
+    proposed_jobs: list[dict[str, Any]],
+    frameworks: set[str],
+    pairs: set[tuple[str, str]],
+    *,
+    mode: Literal["exclude", "include"],
+) -> list[dict[str, Any]]:
+    """Отфильтровать фреймворки по режиму exclude (убрать) или include (оставить)."""
+    fw_set = {x.lower() for x in frameworks}
+    pair_set = {(h.lower(), f.lower()) for h, f in pairs}
+    out: list[dict[str, Any]] = []
+    for row in proposed_jobs:
+        host_id = str(row.get("host_id") or "")
+        ssh = str(row.get("ssh_host") or "")
+        host_keys = {host_id.lower(), ssh.lower()} - {""}
+        kept: list[str] = []
+        for fw in row.get("frameworks") or []:
+            fw_s = str(fw)
+            low = fw_s.lower()
+            pair_hit = any((h, low) in pair_set for h in host_keys)
+            fw_hit = low in fw_set
+            if mode == "exclude":
+                if fw_hit or pair_hit:
+                    continue
+                kept.append(fw_s)
+            elif fw_hit or pair_hit:
+                kept.append(fw_s)
+        if kept:
+            out.append({**row, "frameworks": kept})
+    return out
+
+
 def apply_scope_exclusions(
     proposed_jobs: list[dict[str, Any]],
     excluded_frameworks: set[str],
     excluded_pairs: set[tuple[str, str]],
 ) -> list[dict[str, Any]]:
     """Вернуть proposed jobs без исключённых фреймворков / пар."""
-    excl_fw = {x.lower() for x in excluded_frameworks}
-    excl_pairs = {(h.lower(), f.lower()) for h, f in excluded_pairs}
-    out: list[dict[str, Any]] = []
-    for row in proposed_jobs:
-        host_id = str(row.get("host_id") or "")
-        ssh = str(row.get("ssh_host") or "")
-        kept: list[str] = []
-        for fw in row.get("frameworks") or []:
-            fw_s = str(fw)
-            low = fw_s.lower()
-            if low in excl_fw:
-                continue
-            if (host_id.lower(), low) in excl_pairs or (ssh.lower(), low) in excl_pairs:
-                continue
-            kept.append(fw_s)
-        if not kept:
-            continue
-        out.append({**row, "frameworks": kept})
-    return out
+    return _apply_scope_filter(
+        proposed_jobs, excluded_frameworks, excluded_pairs, mode="exclude"
+    )
+
+
+def apply_scope_inclusions(
+    proposed_jobs: list[dict[str, Any]],
+    included_frameworks: set[str],
+    included_pairs: set[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    """Вернуть proposed jobs, оставив только указанные фреймворки / пары."""
+    return _apply_scope_filter(
+        proposed_jobs, included_frameworks, included_pairs, mode="include"
+    )
 
 
 def format_intake_assistant_message(prompt: str, thread_id: str) -> str:

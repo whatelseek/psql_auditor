@@ -125,6 +125,7 @@ from auditor.intake import (
     format_intake_assistant_message,
     format_proposed_jobs_markdown,
     frameworks_for_audit_type,
+    host_framework_pairs,
     intake_clarification_from_payload,
     intake_interrupt_payload,
     parse_client_name,
@@ -1040,7 +1041,13 @@ class AuditorGraph:
             working_jobs = [dict(r) for r in proposed_jobs]
             original_jobs = [dict(r) for r in proposed_jobs]
             plan_md = format_proposed_jobs_markdown(working_jobs)
-            scope_prompt = f"{prompts.scope}\n\n{host_access_md}\n\n{plan_md}"
+
+            def _scope_prompt(extra: str = "") -> str:
+                return (
+                    f"{prompts.scope}{extra}\n\n{host_access_md}\n\n{plan_md}"
+                )
+
+            scope_prompt = _scope_prompt()
             while "selected_jobs" not in intake:
                 raw = interrupt(
                     intake_interrupt_payload(step="scope", prompt=scope_prompt)
@@ -1052,11 +1059,10 @@ class AuditorGraph:
                         plan=plan_md,
                     ),
                 )
-                action = str((payload or {}).get("action") or "").strip().lower()
-                selected = resolve_scope_decision(
+                decision = resolve_scope_decision(
                     str(raw or ""), working_jobs, payload
                 )
-                if selected is None:
+                if decision is None:
                     hint = (
                         "\n\n_Could not parse that. Reply **confirm**, or describe "
                         "what to **exclude** / keep **only**._"
@@ -1064,10 +1070,9 @@ class AuditorGraph:
                         else "\n\n_Не удалось разобрать ответ. Напишите "
                         "**подтвердить**, или что **исключить** / оставить **только**._"
                     )
-                    scope_prompt = (
-                        f"{prompts.scope}{hint}\n\n{host_access_md}\n\n{plan_md}"
-                    )
+                    scope_prompt = _scope_prompt(hint)
                     continue
+                selected = decision.selected_jobs
                 if not selected:
                     hint = (
                         "\n\n_Nothing left to run after that change. "
@@ -1076,29 +1081,18 @@ class AuditorGraph:
                         else "\n\n_После изменения нечего запускать. "
                         "Подтвердите предыдущий план или измените меньше._"
                     )
-                    scope_prompt = (
-                        f"{prompts.scope}{hint}\n\n{host_access_md}\n\n{plan_md}"
-                    )
+                    scope_prompt = _scope_prompt(hint)
                     continue
 
-                if action in {"confirm", "all", "run_all", "accept"}:
+                if decision.action == "confirm":
                     intake["selected_jobs"] = selected
-                    proposed_pairs = {
-                        (str(r.get("host_id") or ""), str(fw))
-                        for r in original_jobs
-                        for fw in (r.get("frameworks") or [])
-                    }
-                    selected_pairs = {
-                        (str(r.get("host_id") or ""), str(fw))
-                        for r in selected
-                        for fw in (r.get("frameworks") or [])
-                    }
+                    removed = host_framework_pairs(original_jobs) - host_framework_pairs(
+                        selected
+                    )
                     intake["excluded_pairs"] = sorted(
-                        f"{h}/{fw}" for h, fw in (proposed_pairs - selected_pairs)
+                        f"{h}/{fw}" for h, fw in removed
                     )
-                    intake["excluded_frameworks"] = sorted(
-                        {fw for _h, fw in (proposed_pairs - selected_pairs)}
-                    )
+                    intake["excluded_frameworks"] = sorted({fw for _h, fw in removed})
                     intake["proposed_jobs"] = original_jobs
                     intake["audit_types"] = "both"
                     break
@@ -1119,9 +1113,7 @@ class AuditorGraph:
                         "Plan updated. Reply **confirm** to run **this** plan, "
                         "or describe more exclusions/inclusions.\n"
                     )
-                scope_prompt = (
-                    f"{prompts.scope}{confirm_block}\n{host_access_md}\n\n{plan_md}"
-                )
+                scope_prompt = _scope_prompt(confirm_block)
                 self._persist_intake_progress(
                     state, intake, thread_id=thread_hint
                 )
