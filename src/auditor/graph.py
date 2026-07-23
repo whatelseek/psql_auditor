@@ -404,6 +404,18 @@ class AuditorGraph:
 
     async def ensure_async_checkpointer(self) -> None:
         """Upgrade to AsyncSqliteSaver (required for ``ainvoke`` durability)."""
+        if self._async_cp_ready and self._checkpoint_conn is not None:
+            # Detect a closed aiosqlite connection (common after redeploy / WAL churn).
+            try:
+                conn = self._checkpoint_conn
+                closed = bool(getattr(conn, "_connection", None) is None) or bool(
+                    getattr(conn, "_closed", False)
+                )
+                if not closed:
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            self._async_cp_ready = False
         if self._async_cp_ready:
             return
         try:
@@ -412,6 +424,12 @@ class AuditorGraph:
             path = Path(self.settings.checkpoint_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             # Keep the async context manager open for the process lifetime.
+            if getattr(self, "_sqlite_cm", None) is not None:
+                try:
+                    await self._sqlite_cm.__aexit__(None, None, None)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._sqlite_cm = None
             self._sqlite_cm = AsyncSqliteSaver.from_conn_string(str(path))
             self._checkpointer = await self._sqlite_cm.__aenter__()
             self._checkpoint_conn = getattr(self._checkpointer, "conn", None)
@@ -420,7 +438,11 @@ class AuditorGraph:
             self._async_cp_ready = True
         except Exception:  # noqa: BLE001
             # Keep MemorySaver — process-local resume only.
+            self._checkpointer = MemorySaver()
+            self.graph = self._build()
+            self.intake_graph = self._build_intake()
             self._async_cp_ready = True
+            self._checkpoint_conn = None
 
     def _remember_multi_session(self, thread_id: str, session: dict[str, Any]) -> None:
         """Store multi-framework orchestration state in memory and on disk.
@@ -4373,5 +4395,14 @@ def get_auditor_graph() -> AuditorGraph:
 async def get_auditor_graph_ready() -> AuditorGraph:
     """Return the singleton after durable Sqlite checkpointer setup."""
     graph = get_auditor_graph()
+    await graph.ensure_async_checkpointer()
+    return graph
+
+
+async def reset_auditor_checkpointer() -> AuditorGraph:
+    """Force-reopen the Sqlite checkpointer after a closed-connection failure."""
+    graph = get_auditor_graph()
+    graph._async_cp_ready = False
+    graph._checkpoint_conn = None
     await graph.ensure_async_checkpointer()
     return graph

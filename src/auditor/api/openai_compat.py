@@ -631,8 +631,9 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
     """Start audit, follow-up, ad-hoc command run, or resume intake/HITL/continue.
 
     Classifies the latest user message via ``classify_intent`` and dispatches
-    to the appropriate ``AuditorGraph`` method. Pause/resume markers in the
-    message history take precedence over intent routing.
+    to the appropriate ``AuditorGraph`` method. Explicit continue and
+    operator intents (list/follow-up/ad-hoc) win over stale intake/HITL
+    markers still present in Open WebUI chat history.
 
     Args:
         auditor: Ready ``AuditorGraph`` instance.
@@ -641,6 +642,20 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
     Returns:
         Graph result dict with ``report``, ``messages``, and optional pause flags.
     """
+    try:
+        return await _run_or_resume_once(auditor, body)
+    except (ValueError, Exception) as exc:  # noqa: BLE001
+        msg = f"{type(exc).__name__}: {exc}".lower()
+        if "connection closed" not in msg and "closed database" not in msg:
+            raise
+        from auditor.graph import reset_auditor_checkpointer
+
+        auditor = await reset_auditor_checkpointer()
+        return await _run_or_resume_once(auditor, body)
+
+
+async def _run_or_resume_once(auditor, body: ChatCompletionRequest) -> dict[str, Any]:
+    """Single attempt of :func:`_run_or_resume` (no checkpointer retry)."""
     user_text = _latest_user_text(body.messages)
     settings = get_settings()
 
@@ -667,17 +682,12 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
                 "messages": [],
             }
 
-    paused = resolve_pause_resume(body.messages)
-    if paused:
-        kind, thread_id = paused
-        if kind == "continue":
-            return await auditor.acontinue(thread_id)
-        return await auditor.aresume(thread_id, user_text)
-
     thread_id = None
     if body.user:
         thread_id = f"user-{body.user}"
 
+    # OWUI slash commands / warehouse / follow-up intents must win over stale
+    # intake/HITL markers still sitting in chat history.
     intent = classify_intent(user_text, agents_dir=settings.agents_dir)
     if intent == "list_results":
         return await auditor.alist_results(user_text)
@@ -701,6 +711,13 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
         )
     if settings.adhoc_commands_enabled and intent == "adhoc":
         return await auditor.arun_adhoc(user_text, thread_id=thread_id)
+
+    paused = resolve_pause_resume(body.messages)
+    if paused:
+        kind, thread_id_pause = paused
+        if kind == "continue":
+            return await auditor.acontinue(thread_id_pause)
+        return await auditor.aresume(thread_id_pause, user_text)
 
     return await auditor.arun(user_text, thread_id=thread_id)
 
@@ -849,9 +866,9 @@ async def _stream_audit(
     paused = resolve_pause_resume(body.messages)
     session_num, client_hint = parse_continue_session_request(user_text)
     explicit_continue = session_num is not None and bool(client_hint)
+    intent = classify_intent(user_text, agents_dir=settings.agents_dir)
 
     yield _sse_chunk(None, model, completion_id)
-    intent = classify_intent(user_text, agents_dir=settings.agents_dir)
     if is_continue_reply(user_text) or explicit_continue:
         label = (
             f"session #{session_num} for {client_hint}"
@@ -860,24 +877,6 @@ async def _stream_audit(
         )
         yield _sse_chunk(
             f"Continuing {label} from checkpoint…\n\n",
-            model,
-            completion_id,
-        )
-    elif paused and paused[0] == "intake":
-        yield _sse_chunk(
-            f"Continuing pre-audit intake (`{paused[1]}`)…\n\n",
-            model,
-            completion_id,
-        )
-    elif paused and paused[0] == "hitl":
-        yield _sse_chunk(
-            f"Resuming paused audit (`{paused[1]}`)…\n\n",
-            model,
-            completion_id,
-        )
-    elif paused and paused[0] == "continue":
-        yield _sse_chunk(
-            f"Continuing interrupted audit (`{paused[1]}`)…\n\n",
             model,
             completion_id,
         )
@@ -926,6 +925,24 @@ async def _stream_audit(
     elif settings.adhoc_commands_enabled and intent == "adhoc":
         yield _sse_chunk(
             "Running ad-hoc audit command(s)…\n\n",
+            model,
+            completion_id,
+        )
+    elif paused and paused[0] == "intake":
+        yield _sse_chunk(
+            f"Continuing pre-audit intake (`{paused[1]}`)…\n\n",
+            model,
+            completion_id,
+        )
+    elif paused and paused[0] == "hitl":
+        yield _sse_chunk(
+            f"Resuming paused audit (`{paused[1]}`)…\n\n",
+            model,
+            completion_id,
+        )
+    elif paused and paused[0] == "continue":
+        yield _sse_chunk(
+            f"Continuing interrupted audit (`{paused[1]}`)…\n\n",
             model,
             completion_id,
         )
