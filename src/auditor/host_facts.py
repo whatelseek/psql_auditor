@@ -1,10 +1,10 @@
 """Host inventory facts: LLM gather, deterministic parsers, CMDB drift, inventory I/O.
 
 Collects and normalizes target-host metadata during pre-audit intake and host-
-facts nodes. Tool stdout (SSH probes) and LLM JSON fills are parsed into
-:class:`HostFacts`, optionally compared against NetBox CMDB records, written to
-disk as JSON, and rendered into Markdown for graph state
-(``host_facts_md``, ``cmdb_drift_md``).
+facts nodes. Intake discovery assesses ``agents/host_facts.md`` (then fills
+JSON); parsers merge tool stdout into :class:`HostFacts`. Optional NetBox CMDB
+compare, disk JSON, and Markdown for graph state (``host_facts_md``,
+``cmdb_drift_md``).
 
 Also maintains per-client ``INVENTORY.md`` files when no CMDB is available.
 Framework auto-selection (:mod:`auditor.frameworks`) consumes ``os_id``,

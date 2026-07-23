@@ -68,6 +68,10 @@ class Settings(BaseSettings):
         results_database_url: Admin DSN for the warehouse (not the audit target).
         results_db_per_client: Create ``results_<client_slug>`` databases.
         results_db_name_prefix: Prefix for per-client warehouse database names.
+        mlflow_enabled: Optional MLflow tracking side channel (droppable).
+        mlflow_tracking_uri: MLflow tracking server URL (default host gateway).
+        mlflow_experiment_name: Experiment name for audit runs.
+        mlflow_autolog: Enable LangChain autolog when MLflow is available.
         max_session_retries: Max cyclic MCP/session reconnect attempts.
         ssh_host: Target host for SSH tools; ``None`` disables SSH until set.
         ssh_port: SSH port (default 22).
@@ -156,6 +160,13 @@ class Settings(BaseSettings):
     results_database_url: str = ""
     results_db_per_client: bool = True
     results_db_name_prefix: str = "results_"
+
+    # --- Optional MLflow tracking (droppable; never required for audits) ---
+    mlflow_enabled: bool = False
+    mlflow_tracking_uri: str = "http://host.docker.internal:5000"
+    mlflow_experiment_name: str = "psql-auditor"
+    # Auto-trace LangChain/LangGraph LLM + tool calls when mlflow is installed
+    mlflow_autolog: bool = True
 
     # --- SSH target (PostgreSQL host) ---
     ssh_host: str | None = None

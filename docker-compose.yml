@@ -69,6 +69,13 @@ services:
       RESULTS_DATABASE_URL: ${RESULTS_DATABASE_URL:-postgresql://results_admin:results_lab_secret@results-db:5432/postgres}
       RESULTS_DB_PER_CLIENT: ${RESULTS_DB_PER_CLIENT:-true}
       RESULTS_DB_NAME_PREFIX: ${RESULTS_DB_NAME_PREFIX:-results_}
+      # Optional MLflow (standalone under mlflow/; drop with MLFLOW_ENABLED=false)
+      MLFLOW_ENABLED: ${MLFLOW_ENABLED:-false}
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://host.docker.internal:5000}
+      MLFLOW_EXPERIMENT_NAME: ${MLFLOW_EXPERIMENT_NAME:-psql-auditor}
+      MLFLOW_AUTOLOG: ${MLFLOW_AUTOLOG:-true}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./agents:/app/agents:ro
       - ./memory:/app/memory

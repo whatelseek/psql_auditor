@@ -122,15 +122,17 @@ from auditor.session_store import (
 from auditor.intake import (
     client_slug,
     domains_for_audit_type,
+    enrich_facts_from_access_rows,
     extract_management_summary,
     format_host_access_list_markdown,
     format_intake_assistant_message,
     format_proposed_jobs_markdown,
     frameworks_for_audit_type,
+    intake_clarification_from_payload,
     intake_interrupt_payload,
+    parse_client_name,
     prompts_for_language,
     resolve_audit_type,
-    resolve_client_name,
     resolve_scope_decision,
     resolve_yes_no,
     summarize_cmdb_capabilities,
@@ -143,6 +145,11 @@ from auditor.language import (
 )
 from auditor.memory.playbook_store import PlaybookMemory
 from auditor.report_archive import package_and_publish_archive
+from auditor.mlflow_store import (
+    end_mlflow_run_safe,
+    ensure_mlflow_run_safe,
+    log_mlflow_finalize_safe,
+)
 from auditor.results_store import (
     record_requirement_result_safe,
     record_results_safe,
@@ -167,8 +174,6 @@ from auditor.prompts import (
     SOFTWARE_FRAMEWORK_ROUTE_SYSTEM,
     INTAKE_INTERPRET_AUDIT_TYPE_PROMPT,
     INTAKE_INTERPRET_AUDIT_TYPE_SYSTEM,
-    INTAKE_INTERPRET_CLIENT_PROMPT,
-    INTAKE_INTERPRET_CLIENT_SYSTEM,
     INTAKE_INTERPRET_SCOPE_PROMPT,
     INTAKE_INTERPRET_SCOPE_SYSTEM,
     INTAKE_INTERPRET_YES_NO_PROMPT,
@@ -578,15 +583,16 @@ class AuditorGraph:
 
     async def _intake_resolve_yes_no(
         self, raw: str, *, question_hint: str
-    ) -> str:
-        """Interpret a yes/no intake answer via LLM with rule fallback.
+    ) -> tuple[str, str]:
+        """Interpret intake yes/no via LLM first; return answer + clarification.
 
         Args:
             raw: Operator reply text.
             question_hint: Context for the classifier prompt.
 
         Returns:
-            ``yes``, ``no``, or ``unknown``.
+            ``(yes|no|unknown, clarification)``. Clarification is set when the
+            operator asked what the step means (e.g. «что это?»).
         """
         payload = await self._intake_llm_json(
             INTAKE_INTERPRET_YES_NO_SYSTEM,
@@ -595,10 +601,14 @@ class AuditorGraph:
                 reply=str(raw or "").strip() or "(empty)",
             ),
         )
-        return resolve_yes_no(str(raw or ""), payload)
+        answer = resolve_yes_no(str(raw or ""), payload)
+        clarification = ""
+        if answer == "unknown":
+            clarification = intake_clarification_from_payload(payload)
+        return answer, clarification
 
-    async def _intake_resolve_client_name(self, raw: str) -> str:
-        """Extract a normalized client name from free-text intake reply.
+    def _intake_resolve_client_name(self, raw: str) -> str:
+        """Extract client name deterministically (intake step 1 — no LLM).
 
         Args:
             raw: Operator reply naming the audit client.
@@ -606,16 +616,10 @@ class AuditorGraph:
         Returns:
             Resolved client display name, or empty when unparseable.
         """
-        payload = await self._intake_llm_json(
-            INTAKE_INTERPRET_CLIENT_SYSTEM,
-            INTAKE_INTERPRET_CLIENT_PROMPT.format(
-                reply=str(raw or "").strip() or "(empty)",
-            ),
-        )
-        return resolve_client_name(str(raw or ""), payload)
+        return parse_client_name(str(raw or ""))
 
     async def _intake_resolve_audit_type(self, raw: str) -> str | None:
-        """Map intake reply to audit type (``it``, ``security``, ``both``, etc.).
+        """Map intake reply to audit type via LLM JSON only (step 4).
 
         Args:
             raw: Operator reply describing desired audit scope.
@@ -642,14 +646,19 @@ class AuditorGraph:
 
         LangGraph re-runs the whole ``intake_gate`` node on each interrupt
         resume; without disk persistence, access=yes would rediscover hosts.
+        Merges into any existing ``intake`` dict so a later partial write cannot
+        wipe earlier keys (e.g. ``has_cmdb``).
         """
         store = self._store_from_state(state)
         if store is None:
             return
         tid = thread_id or str(state.get("thread_id") or "")
         try:
+            existing = store.read_run_meta().get("intake")
+            merged = dict(existing) if isinstance(existing, dict) else {}
+            merged.update(intake)
             store.write_run_meta(
-                intake=intake,
+                intake=merged,
                 intake_checkpoint_thread=tid,
                 intake_complete=False,
             )
@@ -713,12 +722,12 @@ class AuditorGraph:
             state, thread_id=thread_hint
         )
 
-        # 1) Client name
+        # 1) Client name (deterministic — no LLM)
         while not intake.get("client_name"):
             raw = interrupt(
                 intake_interrupt_payload(step="client_name", prompt=prompts.client)
             )
-            name = await self._intake_resolve_client_name(str(raw or ""))
+            name = self._intake_resolve_client_name(str(raw or ""))
             if name:
                 intake["client_name"] = name
                 intake["client_slug"] = client_slug(name)
@@ -777,15 +786,34 @@ class AuditorGraph:
                 audit_type=prompts.audit_type,
             )
 
-        # 2) CMDB / NetBox
+        # 2) CMDB / NetBox (LLM-first free-form yes/no)
+        cmdb_prompt = prompts.cmdb
         while "has_cmdb" not in intake:
             raw = interrupt(
-                intake_interrupt_payload(step="cmdb", prompt=prompts.cmdb)
+                intake_interrupt_payload(step="cmdb", prompt=cmdb_prompt)
             )
-            yn = await self._intake_resolve_yes_no(
+            yn, clarification = await self._intake_resolve_yes_no(
                 str(raw or ""), question_hint="Does the client have CMDB/NetBox?"
             )
             if yn == "unknown":
+                if clarification:
+                    clarify_block = f"\n\n### Пояснение\n\n{clarification}\n" if lang.code.startswith("ru") else f"\n\n### Clarification\n\n{clarification}\n"
+                    hint = (
+                        "\n\n_После пояснения опишите ситуацию своими словами._"
+                        if lang.code.startswith("ru")
+                        else "\n\n_After this clarification, describe the situation "
+                        "in your own words._"
+                    )
+                    cmdb_prompt = f"{prompts.cmdb}{clarify_block}{hint}"
+                else:
+                    hint = (
+                        "\n\n_Could not interpret that. Please describe whether "
+                        "CMDB/NetBox is available, in your own words._"
+                        if lang.code == "en"
+                        else "\n\n_Не понял ответ. Опишите своими словами, "
+                        "есть ли у клиента CMDB/NetBox._"
+                    )
+                    cmdb_prompt = f"{prompts.cmdb}{hint}"
                 continue
             intake["has_cmdb"] = yn == "yes"
             if yn == "yes":
@@ -850,11 +878,41 @@ class AuditorGraph:
             raw = interrupt(
                 intake_interrupt_payload(step="access", prompt=access_prompt)
             )
-            yn = await self._intake_resolve_yes_no(
+            yn, clarification = await self._intake_resolve_yes_no(
                 str(raw or ""),
-                question_hint="Do I have access to servers/services to probe?",
+                question_hint=(
+                    "Can the AUDIT AGENT reach servers/services to probe "
+                    "(SSH/DB)? Not whether the human operator personally can."
+                ),
             )
             if yn == "unknown":
+                if clarification:
+                    clarify_block = (
+                        f"\n\n### Пояснение\n\n{clarification}\n"
+                        if lang.code.startswith("ru")
+                        else f"\n\n### Clarification\n\n{clarification}\n"
+                    )
+                    hint = (
+                        "\n\n_После пояснения опишите доступ своими словами._"
+                        if lang.code.startswith("ru")
+                        else "\n\n_After this clarification, describe access in "
+                        "your own words._"
+                    )
+                    access_prompt = (
+                        f"{prompts.access}\n\n{cmdb_summary}{scope_block}"
+                        f"{clarify_block}{hint}"
+                    )
+                else:
+                    hint = (
+                        "\n\n_Could not interpret that. Please describe whether "
+                        "live SSH/DB access is available, in your own words._"
+                        if lang.code == "en"
+                        else "\n\n_Не понял ответ. Опишите своими словами, "
+                        "есть ли доступ по SSH/БД._"
+                    )
+                    access_prompt = (
+                        f"{prompts.access}\n\n{cmdb_summary}{scope_block}{hint}"
+                    )
                 continue
             intake["access_raw"] = str(raw or "").strip()
             intake["has_access"] = yn == "yes"
@@ -922,6 +980,11 @@ class AuditorGraph:
                     notes = str(
                         (facts.raw or {}).get("_llm_software_notes") or ""
                     ).strip()
+                    # Inventory access probe is authoritative for open ports
+                    # (e.g. PG :5432) when checklist-filled facts missed them.
+                    enrich_facts_from_access_rows(
+                        facts, target.host, host_access_rows
+                    )
                     if facts.error:
                         matched_ids: list[str] = []
                         it_fw = get_framework(
@@ -934,6 +997,14 @@ class AuditorGraph:
                                 fid, self.settings.agents_dir
                             ):
                                 matched_ids.append(fid)
+                        # Still match detect rules from enriched ports/binaries.
+                        for fw in select_frameworks_for_host(
+                            facts,
+                            domains=["it", "cybersecurity"],
+                            agents_dir=self.settings.agents_dir,
+                        ):
+                            if fw.id not in matched_ids:
+                                matched_ids.append(fw.id)
                         proposed.append(
                             {
                                 "host_id": target.slug,
@@ -1173,7 +1244,7 @@ class AuditorGraph:
         user_request: str = "",
         extra_binaries: list[str] | None = None,
     ) -> HostFacts:
-        """LLM SSH tool loop + JSON fill → ``HostFacts`` (parser fallback)."""
+        """Run ``agents/host_facts.md`` (fallback: compact SSH discovery)."""
         del extra_binaries  # routing hints stay in framework detect / LLM tools
         return await self._collect_host_facts_llm(
             store=store,
@@ -1181,14 +1252,49 @@ class AuditorGraph:
             user_request=user_request,
         )
 
-    async def _collect_host_facts_llm(
+    async def _facts_from_host_facts_evidence(
+        self,
+        *,
+        evidence: str,
+        raw: dict[str, str],
+        ssh_host: str,
+        source: str,
+    ) -> HostFacts:
+        """JSON-fill ``HostFacts`` from checklist / tool evidence."""
+        fill_messages = [
+            SystemMessage(content=HOST_FACTS_FILL_SYSTEM_PROMPT),
+            HumanMessage(
+                content=HOST_FACTS_FILL_PROMPT.format(
+                    ssh_host=ssh_host or "(unknown)",
+                    evidence=evidence or "(no evidence collected)",
+                )
+            ),
+        ]
+        try:
+            fill_response = await self.fill_model.ainvoke(fill_messages)
+            payload = _extract_json(str(fill_response.content or ""))
+        except Exception as exc:  # noqa: BLE001
+            payload = {"error": f"{type(exc).__name__}: {exc}"}
+
+        facts = parse_host_facts_json(payload, ssh_host=ssh_host, raw=raw)
+        facts = merge_facts_from_raw(facts, raw)
+        if not facts.ssh_host:
+            facts.ssh_host = ssh_host
+        if not facts.collected_at:
+            from datetime import datetime, timezone
+
+            facts.collected_at = datetime.now(timezone.utc).isoformat()
+        facts.raw["host_facts_source"] = source
+        return facts
+
+    async def _collect_host_facts_compact(
         self,
         *,
         store: EvidenceStore | None = None,
         host_id: str = "",
         user_request: str = "",
     ) -> HostFacts:
-        """SSH-only tool loop + JSON fill → ``HostFacts`` (parser fallback)."""
+        """SSH-only tool loop + JSON fill (used when host_facts.md is missing)."""
         ssh_host = str(effective_settings(self.settings).ssh_host or "")
         evidence_fw = "host_facts"
         evidence_req = "discover"
@@ -1248,31 +1354,142 @@ class AuditorGraph:
             self.settings.max_tool_output_chars * 2,
             "host_facts_evidence",
         )
+        return await self._facts_from_host_facts_evidence(
+            evidence=evidence,
+            raw=raw,
+            ssh_host=ssh_host,
+            source="llm",
+        )
 
-        fill_messages = [
-            SystemMessage(content=HOST_FACTS_FILL_SYSTEM_PROMPT),
-            HumanMessage(
-                content=HOST_FACTS_FILL_PROMPT.format(
-                    ssh_host=ssh_host or "(unknown)",
-                    evidence=evidence or "(no evidence collected)",
+    async def _collect_host_facts_llm(
+        self,
+        *,
+        store: EvidenceStore | None = None,
+        host_id: str = "",
+        user_request: str = "",
+    ) -> HostFacts:
+        """Assess ``agents/host_facts.md`` then fill ``HostFacts`` for routing.
+
+        Intake step 3 (access=yes) uses this path so discovery follows the same
+        checklist REQs as a normal host_facts audit. Falls back to compact SSH
+        discovery when the framework file is missing.
+        """
+        ssh_host = str(effective_settings(self.settings).ssh_host or "")
+        if store is not None and host_id:
+            store.host_segment = host_id
+
+        fw = get_framework("host_facts", self.settings.agents_dir)
+        if fw is None:
+            return await self._collect_host_facts_compact(
+                store=store,
+                host_id=host_id,
+                user_request=user_request,
+            )
+
+        checklist = load_framework_checklist(fw)
+        req_map = checklist.by_id()
+        pending = list(checklist.ids())
+        if not pending:
+            return await self._collect_host_facts_compact(
+                store=store,
+                host_id=host_id,
+                user_request=user_request,
+            )
+
+        user_req = truncate_text(
+            user_request or "Discover host inventory for audit routing.",
+            self.settings.max_user_request_chars,
+            "user_request",
+        )
+        limit = max(1, self.settings.max_parallel_assessments)
+        sem = asyncio.Semaphore(limit)
+        emit_phase(
+            f"Discovery: assessing {len(pending)} `host_facts` requirement(s) "
+            f"(concurrency={limit})…",
+            framework_id="host_facts",
+        )
+
+        async def _worker(req_id: str) -> Finding:
+            async with sem:
+                emit_req_status(
+                    req_id,
+                    "started",
+                    framework_id="host_facts",
+                    text=f"Discovery `{req_id}`…",
                 )
-            ),
-        ]
-        try:
-            fill_response = await self.fill_model.ainvoke(fill_messages)
-            payload = _extract_json(str(fill_response.content or ""))
-        except Exception as exc:  # noqa: BLE001
-            payload = {"error": f"{type(exc).__name__}: {exc}"}
+                try:
+                    finding = await self._fill_requirement_cells(
+                        req_id=req_id,
+                        requirement=req_map[req_id],
+                        user_request=user_req,
+                        framework_id="host_facts",
+                        store=store,
+                        has_cmdb=False,
+                        ssh_only=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    finding = Finding(
+                        requirement_id=req_id,
+                        title=req_map[req_id].title,
+                        status="error",
+                        severity=req_map[req_id].severity,
+                        category=req_map[req_id].category,
+                        evidence=f"{type(exc).__name__}: {exc}",
+                        remediation="",
+                        pass_criteria=req_map[req_id].pass_criteria,
+                    )
+                    if store is not None:
+                        store.write_finding(
+                            "host_facts", req_id, finding.model_dump()
+                        )
+                emit_req_status(
+                    req_id,
+                    finding.status,
+                    framework_id="host_facts",
+                )
+                return finding
 
-        facts = parse_host_facts_json(payload, ssh_host=ssh_host, raw=raw)
-        facts = merge_facts_from_raw(facts, raw)
-        if not facts.ssh_host:
-            facts.ssh_host = ssh_host
-        if not facts.collected_at:
-            from datetime import datetime, timezone
+        findings = await asyncio.gather(*(_worker(rid) for rid in pending))
+        chunks: list[str] = []
+        raw: dict[str, str] = {}
+        for finding in findings:
+            rid = finding.requirement_id
+            if store is not None:
+                tool_text = store.load_evidence_text(
+                    "host_facts",
+                    rid,
+                    max_chars=self.settings.max_tool_output_chars,
+                )
+                if tool_text:
+                    raw[f"req_{rid}"] = tool_text
+                    chunks.append(f"[{rid} tools]\n{tool_text}")
+            obs = str(finding.evidence or "").strip()
+            if obs:
+                chunks.append(
+                    f"[{rid} {finding.status}] {finding.title}: {obs}"
+                )
 
-            facts.collected_at = datetime.now(timezone.utc).isoformat()
-        facts.raw["host_facts_source"] = "llm"
+        evidence = "\n---\n".join(c.strip() for c in chunks if c and c.strip())
+        evidence = truncate_text(
+            evidence,
+            self.settings.max_tool_output_chars * 2,
+            "host_facts_evidence",
+        )
+        facts = await self._facts_from_host_facts_evidence(
+            evidence=evidence,
+            raw=raw,
+            ssh_host=ssh_host,
+            source="checklist",
+        )
+        if not facts.error and any(f.status == "error" for f in findings):
+            # Surface SSH/tool failures for routing when fill did not set error.
+            err_bits = [
+                f"{f.requirement_id}: {f.evidence}"
+                for f in findings
+                if f.status == "error" and f.evidence
+            ]
+            if err_bits and "ssh error" in " ".join(err_bits).lower():
+                facts.error = err_bits[0][:500]
         return facts
 
     async def collect_host_facts(self, state: AuditorState) -> dict[str, Any]:
@@ -1295,11 +1512,36 @@ class AuditorGraph:
 
         if has_access and effective_settings(self.settings).ssh_host:
             store = self._store_from_state(state)
-            facts = await self._collect_host_facts(
-                store=store,
-                host_id=host_id,
-                user_request=str(state.get("user_request") or ""),
-            )
+            # Reuse intake discovery artifacts (avoid re-running host_facts.md).
+            if store is not None:
+                if host_id:
+                    store.host_segment = host_id
+                facts_path = store.host_root(host_id or None) / "host_facts.json"
+                if facts_path.is_file():
+                    try:
+                        payload = json.loads(facts_path.read_text(encoding="utf-8"))
+                        facts = parse_host_facts_json(
+                            payload.get("facts") or payload,
+                            ssh_host=str(
+                                effective_settings(self.settings).ssh_host or ""
+                            ),
+                        )
+                        # Retry only when prior discovery failed with no identity.
+                        if facts.error and not (facts.hostname or facts.os_id):
+                            facts = None
+                        elif facts is not None:
+                            facts.raw["host_facts_source"] = str(
+                                (facts.raw or {}).get("host_facts_source")
+                                or "reuse"
+                            )
+                    except Exception:  # noqa: BLE001
+                        facts = None
+            if facts is None:
+                facts = await self._collect_host_facts(
+                    store=store,
+                    host_id=host_id,
+                    user_request=str(state.get("user_request") or ""),
+                )
             nb_device = None
             if has_cmdb and facts.hostname and not facts.error:
                 nb_device = await fetch_netbox_device_by_name(
@@ -1450,20 +1692,40 @@ class AuditorGraph:
             )
         checklist = load_framework_checklist(selected)
         req_map = checklist.by_id()
+        store = self._store_from_state(state)
+        host_id = str(state.get("evidence_host_id") or "").strip()
+        if store is not None and host_id:
+            store.host_segment = host_id
+
+        # Reuse findings already written (e.g. host_facts.md during intake discovery).
+        existing: dict[str, Finding] = {}
+        pending: list[str] = []
+        for rid in checklist.ids():
+            raw = store.load_finding(selected.id, rid) if store is not None else None
+            if raw:
+                try:
+                    existing[rid] = _as_finding(raw)
+                    continue
+                except Exception:  # noqa: BLE001
+                    pass
+            pending.append(rid)
+
+        reused = len(existing)
+        msg = (
+            f"Loaded {len(req_map)} requirements from {selected.path}"
+            + (f" ({reused} already assessed)." if reused else ".")
+        )
         return {
             "framework_id": selected.id,
             "framework_title": selected.title,
             "checklist_title": checklist.title,
             "requirements": req_map,
-            "pending_ids": checklist.ids(),
-            "findings": {},
+            "pending_ids": pending,
+            "findings": existing,
             "report": "",
             "messages": [
                 AIMessage(
-                    content=(
-                        f"Loaded {len(req_map)} requirements from "
-                        f"{selected.path}"
-                    ),
+                    content=msg,
                     name="auditor",
                 )
             ],
@@ -2130,6 +2392,7 @@ class AuditorGraph:
         report_language: ReportLanguage | None = None,
         *,
         has_cmdb: bool = True,
+        ssh_only: bool = False,
     ) -> Finding:
         """Run evidence gathering + fill model for one requirement cell.
 
@@ -2144,6 +2407,7 @@ class AuditorGraph:
             store: Optional evidence store for disk artifacts.
             report_language: Language for fill prompts.
             has_cmdb: Whether NetBox tools are in scope.
+            ssh_only: When True, bind only SSH tools (host_facts discovery).
 
         Returns:
             Completed ``Finding`` for the requirement.
@@ -2168,6 +2432,7 @@ class AuditorGraph:
             framework_id,
             store=store,
             has_cmdb=has_cmdb,
+            ssh_only=ssh_only,
         )
         evidence = truncate_text(
             evidence,
@@ -2211,6 +2476,7 @@ class AuditorGraph:
         store: EvidenceStore | None = None,
         *,
         has_cmdb: bool = True,
+        ssh_only: bool = False,
     ) -> str:
         """Tool-calling loop: gather raw evidence text for one requirement.
 
@@ -2224,6 +2490,7 @@ class AuditorGraph:
             framework_id: Active framework id.
             store: Optional evidence store for tool call logging.
             has_cmdb: Whether NetBox tools are bound.
+            ssh_only: When True, bind only SSH tools.
 
         Returns:
             Combined evidence string for the fill model.
@@ -2231,18 +2498,24 @@ class AuditorGraph:
         playbook_block = ""
         if self.playbooks is not None and self.settings.memory_enabled:
             playbook_block = self.playbooks.format_prompt_block(framework_id, req_id)
-        cmdb_note = (
-            "NetBox CMDB tools are available."
-            if has_cmdb
-            else "No CMDB — do not call NetBox tools; use inventory and SSH/Postgres only."
-        )
+        if ssh_only:
+            tool_note = "Use ONLY ssh_run / ssh_read_file for this inventory check."
+        elif has_cmdb:
+            tool_note = (
+                "NetBox CMDB tools are available. "
+                "Use SSH and/or MCP tools appropriate for this framework."
+            )
+        else:
+            tool_note = (
+                "No CMDB — do not call NetBox tools; use inventory and "
+                "SSH/Postgres only."
+            )
         messages: list = [
             SystemMessage(
                 content=(
                     f"{EVIDENCE_SYSTEM_PROMPT}\n\n"
                     f"Active framework: `{framework_id}`. "
-                    f"{cmdb_note} "
-                    "Use SSH and/or MCP tools appropriate for this framework."
+                    f"{tool_note}"
                 )
             ),
             HumanMessage(
@@ -2256,7 +2529,11 @@ class AuditorGraph:
         ]
         chunks: list[str] = []
         max_rounds = self.settings.max_tool_rounds_per_item
-        evidence_llm = self._evidence_llm(has_cmdb=has_cmdb)
+        evidence_llm = (
+            self.evidence_model_ssh
+            if ssh_only
+            else self._evidence_llm(has_cmdb=has_cmdb)
+        )
 
         for _ in range(max_rounds + 1):
             rounds = count_tool_rounds(messages)
@@ -2533,11 +2810,14 @@ class AuditorGraph:
         retries = int(state.get("retry_count") or 0)
         store = self._store_from_state(state)
         evidence_note = ""
+        report_for_mlflow: Path | None = None
         if store is not None:
             host_id = str(state.get("evidence_host_id") or "").strip()
             if host_id:
                 store.host_segment = host_id
-            store.write_report(fw or "framework", f"{summary}\n\n---\n\n{full_report}")
+            report_for_mlflow = store.write_report(
+                fw or "framework", f"{summary}\n\n---\n\n{full_report}"
+            )
             evidence_note = f" | evidence: `{store.root}`"
 
         if findings or requirements:
@@ -2580,6 +2860,24 @@ class AuditorGraph:
                 report_language=report_lang.code if report_lang else None,
                 session_number=session_number,
             )
+        else:
+            session_number = None
+
+        # Optional MLflow side channel (no-op when MLFLOW_ENABLED=false).
+        mlflow_run_id = str(
+            state.get("evidence_run_id") or (store.run_id if store else "") or ""
+        )
+        log_mlflow_finalize_safe(
+            self.settings,
+            run_id=mlflow_run_id,
+            framework_id=fw or "framework",
+            findings=findings or None,
+            client_name=str(state.get("client_name") or ""),
+            evidence_host_id=str(state.get("evidence_host_id") or ""),
+            retry_count=retries,
+            session_number=session_number,
+            report_path=report_for_mlflow,
+        )
 
         header = (
             f"Framework: `{fw}` | session reconnects: {retries}{evidence_note}\n\n"
@@ -2632,6 +2930,14 @@ class AuditorGraph:
                 )
         elif store is not None and not in_multi:
             store.write_root_report(disk_report)
+
+        if not in_multi and mlflow_run_id:
+            end_mlflow_run_safe(
+                self.settings,
+                run_id=mlflow_run_id,
+                client_name=str(state.get("client_name") or ""),
+                archive_path=archive_path or None,
+            )
 
         chat_text = f"{chat_text.rstrip()}{followup_footer()}"
 
@@ -2757,6 +3063,21 @@ class AuditorGraph:
                     "results_session_number"
                 ]
         store.write_run_meta(**meta)
+        ensure_mlflow_run_safe(
+            self.settings,
+            run_id=store.run_id,
+            client_name=str((intake_state or {}).get("client_name") or ""),
+            params={
+                "model": self.settings.litellm_model,
+                "framework_id": framework_id or "",
+                "client_name": str((intake_state or {}).get("client_name") or ""),
+                "hitl_enabled": self.settings.hitl_enabled,
+            },
+            tags={
+                "auditor.thread_id": tid,
+                "auditor.framework_id": framework_id or "",
+            },
+        )
         initial: AuditorState = {
             "messages": [HumanMessage(content=user_text)],
             "user_request": truncate_text(
@@ -4159,6 +4480,15 @@ class AuditorGraph:
                         f"(Archive packaging failed: {type(exc).__name__}: {exc})\n"
                     )
         chat_text = f"{chat_text.rstrip()}{followup_footer()}"
+        client_name = ""
+        if store is not None:
+            client_name = str(store.read_run_meta().get("client_name") or "")
+        end_mlflow_run_safe(
+            self.settings,
+            run_id=run_id,
+            client_name=client_name,
+            archive_path=archive_path or None,
+        )
         return {
             "report": chat_text,
             "messages": [AIMessage(content=chat_text)],
@@ -4248,6 +4578,16 @@ class AuditorGraph:
                 "user_request",
             ),
             thread_id=base_thread,
+        )
+        ensure_mlflow_run_safe(
+            self.settings,
+            run_id=run_id,
+            params={
+                "model": self.settings.litellm_model,
+                "hitl_enabled": self.settings.hitl_enabled,
+                "thread_id": base_thread,
+            },
+            tags={"auditor.thread_id": base_thread},
         )
 
         if self.settings.intake_enabled:

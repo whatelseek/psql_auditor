@@ -90,12 +90,22 @@ class PlaybookMemory:
         self._store = InMemoryStore()
         self._lock = threading.Lock()
         self._dirty = False
+        # Framework ids seen via seeds, learned JSON, or hot-path remember_tool.
+        # Required so persist() can flush brand-new frameworks (e.g. host_facts)
+        # that have no seed YAML yet.
+        self._tracked_framework_ids: set[str] = set()
         self.reload()
 
     @property
     def store(self) -> InMemoryStore:
         """Underlying LangGraph in-memory key-value store."""
         return self._store
+
+    def _track_framework(self, framework_id: str) -> None:
+        """Record a sanitized framework id for later persist scans."""
+        bare = _memory_framework_id(framework_id)
+        if bare and bare != "unknown":
+            self._tracked_framework_ids.add(bare)
 
     def reload(self) -> None:
         """Load seed YAML then overlay learned JSON from ``memory_dir``.
@@ -104,6 +114,7 @@ class PlaybookMemory:
         """
         with self._lock:
             self._store = InMemoryStore()
+            self._tracked_framework_ids = set()
             self._load_seeds()
             self._load_learned()
             self._dirty = False
@@ -132,6 +143,7 @@ class PlaybookMemory:
         if not isinstance(data, dict):
             return
         framework_id = str(data.get("framework_id") or path.stem)
+        self._track_framework(framework_id)
         tips = data.get("framework_tips") or data.get("tips") or []
         if tips:
             self._store.put(
@@ -179,6 +191,7 @@ class PlaybookMemory:
         for framework_id, entries in frameworks.items():
             if not isinstance(entries, dict):
                 continue
+            self._track_framework(str(framework_id))
             for key, value in entries.items():
                 if not isinstance(value, dict):
                     continue
@@ -195,8 +208,8 @@ class PlaybookMemory:
             if not self._dirty and not self.learn:
                 return None
             frameworks: dict[str, dict[str, Any]] = {}
-            # InMemoryStore has no public list-all; track via search per known ns
-            # by reading seed file stems + any keys already in learned file.
+            # InMemoryStore has no public list-all; scan namespaces we track
+            # (seeds, prior learned JSON, and ids recorded by remember_tool).
             framework_ids = self._known_framework_ids()
             for fw in framework_ids:
                 items = self._store.search(_ns(fw), limit=200)
@@ -223,16 +236,22 @@ class PlaybookMemory:
             return path
 
     def _known_framework_ids(self) -> set[str]:
-        """Collect framework ids from seed filenames and learned JSON keys."""
-        ids: set[str] = set()
+        """Collect framework ids to scan on persist.
+
+        Includes seed YAML stems / ``framework_id`` fields, keys already in
+        ``learned_playbooks.json``, and ids tracked via ``remember_tool`` so
+        first-time frameworks (no seed file yet) are still flushed to disk.
+        """
+        ids: set[str] = set(self._tracked_framework_ids)
         if self.playbooks_dir.is_dir():
             for path in self.playbooks_dir.glob("*.y*ml"):
-                ids.add(path.stem)
+                ids.add(_memory_framework_id(path.stem))
         learned = self.memory_dir / "learned_playbooks.json"
         if learned.is_file():
             try:
                 payload = json.loads(learned.read_text(encoding="utf-8"))
-                ids.update((payload.get("frameworks") or {}).keys())
+                for fw in (payload.get("frameworks") or {}).keys():
+                    ids.add(_memory_framework_id(str(fw)))
             except (OSError, json.JSONDecodeError):
                 pass
         return ids
@@ -347,9 +366,10 @@ class PlaybookMemory:
                 args[key] = val[:2000] + "…"
 
         with self._lock:
+            self._track_framework(framework_id)
             item = self._store.get(_ns(framework_id), req_id)
             existing = dict(item.value or {}) if item else {
-                "framework_id": framework_id,
+                "framework_id": _memory_framework_id(framework_id),
                 "requirement_id": req_id,
                 "tools": [],
                 "notes": "",

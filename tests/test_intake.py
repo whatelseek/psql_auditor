@@ -3,21 +3,20 @@
 from pathlib import Path
 
 from auditor.host_facts import HostFacts, parse_host_facts_json
+from auditor.frameworks import select_frameworks_for_host
 from auditor.intake import (
     apply_scope_exclusions,
     client_slug,
     domains_for_audit_type,
+    enrich_facts_from_access_rows,
     extract_intake_thread_id,
     extract_management_summary,
     format_discovered_software_markdown,
     format_host_access_list_markdown,
     format_proposed_jobs_markdown,
     frameworks_for_audit_type,
-    is_scope_confirm,
-    parse_audit_type,
+    intake_clarification_from_payload,
     parse_client_name,
-    parse_scope_exclusions,
-    parse_yes_no,
     resolve_audit_type,
     resolve_client_name,
     resolve_scope_decision,
@@ -25,54 +24,98 @@ from auditor.intake import (
 )
 
 
-def test_parse_yes_no():
-    assert parse_yes_no("yes") == "yes"
-    assert parse_yes_no("Да") == "yes"
-    assert parse_yes_no("no") == "no"
-    assert parse_yes_no("нет") == "no"
-    assert parse_yes_no("maybe") == "unknown"
-    assert parse_yes_no("nayn") == "unknown"
-
-
 def test_resolve_yes_no_llm_payload():
-    # Clear regex wins even if LLM disagrees (prevents yes→no misfires).
-    assert resolve_yes_no("yes", {"answer": "no"}) == "yes"
-    assert resolve_yes_no("no", {"answer": "yes"}) == "no"
-    # Typo that regex rejects — LLM JSON wins
+    # Steps 2–3: intake interpret model decides; we only normalize its answer.
+    assert resolve_yes_no("yes", {"answer": "no"}) == "no"
+    assert resolve_yes_no("no", {"answer": "yes"}) == "yes"
+    assert resolve_yes_no("We use NetBox in prod", {"answer": "yes"}) == "yes"
     assert resolve_yes_no("nayn", {"answer": "no"}) == "no"
     assert resolve_yes_no("yep!", {"answer": "yes"}) == "yes"
+    assert resolve_yes_no("Follow white rabbit", {"answer": "unknown"}) == "unknown"
     assert resolve_yes_no("maybe", {"answer": "unknown"}) == "unknown"
-    # Regex fallback when no / bad payload
-    assert resolve_yes_no("no", None) == "no"
-    assert resolve_yes_no("yes", {}) == "yes"
-    # LLM unknown but regex clear
-    assert resolve_yes_no("no", {"answer": "unknown"}) == "no"
+    assert resolve_yes_no("no", None) == "unknown"
+    assert resolve_yes_no("yes", {}) == "unknown"
+    assert resolve_yes_no("ага", {"answer": "unknown"}) == "unknown"
+    # Model echoed slang into answer — normalize label only
+    assert resolve_yes_no("ага", {"answer": "ага"}) == "yes"
+    assert resolve_yes_no("угу", {"answer": "yes"}) == "yes"
+    assert resolve_yes_no("неа", {"answer": "no"}) == "no"
+    assert (
+        resolve_yes_no("ну ты можешь попасть, я нет", {"answer": "yes"}) == "yes"
+    )
+    assert resolve_yes_no("ну ты можешь попасть, я нет", None) == "unknown"
+
+
+def test_intake_clarification_from_payload():
+    assert intake_clarification_from_payload(None) == ""
+    assert intake_clarification_from_payload({"answer": "unknown"}) == ""
+    assert (
+        intake_clarification_from_payload(
+            {
+                "answer": "unknown",
+                "clarification": "Это вопрос про доступ по SSH.",
+            }
+        )
+        == "Это вопрос про доступ по SSH."
+    )
+    assert (
+        intake_clarification_from_payload({"help": "CMDB means NetBox inventory."})
+        == "CMDB means NetBox inventory."
+    )
 
 
 def test_resolve_client_and_audit_type_llm():
-    assert resolve_client_name("whatever", {"client_name": "Acme Corp"}) == "Acme Corp"
+    # Step 1 is deterministic — LLM payload ignored
+    assert resolve_client_name("whatever", {"client_name": "Acme Corp"}) == "whatever"
     assert resolve_client_name("Client: Acme", None) == "Acme"
     assert (
         resolve_audit_type("please do cyber stuff", {"audit_type": "cybersecurity"})
         == "cybersecurity"
     )
-    assert resolve_audit_type("both", {"audit_type": None}) == "both"
+    # Step 4: no regex fallback when LLM omits / nulls audit_type
+    assert resolve_audit_type("both", {"audit_type": None}) is None
+    assert resolve_audit_type("both", None) is None
     assert resolve_audit_type("garbage", {"audit_type": None}) is None
+    assert resolve_audit_type("both", {"audit_type": "both"}) == "both"
+
+
+def test_resolve_scope_llm_only():
+    proposed = [
+        {
+            "host_id": "10_0_0_1",
+            "hostname": "pg-db",
+            "ssh_host": "10.0.0.1",
+            "frameworks": ["it_audit", "postgres_cis", "ubuntu_cis_24_l2"],
+        }
+    ]
+    selected = resolve_scope_decision(
+        "looks good, ship it",
+        proposed,
+        {"action": "confirm"},
+    )
+    assert selected is not None
+    assert len(selected) == 1
+    trimmed = resolve_scope_decision(
+        "drop ubuntu please",
+        proposed,
+        {
+            "action": "exclude",
+            "exclude_frameworks": ["ubuntu_cis_24_l2"],
+            "exclude_pairs": [],
+        },
+    )
+    assert trimmed is not None
+    assert "ubuntu_cis_24_l2" not in trimmed[0]["frameworks"]
+    assert "postgres_cis" in trimmed[0]["frameworks"]
+    # No regex fallback — bare confirm / missing payload → re-prompt
+    assert resolve_scope_decision("confirm", proposed, {"action": "unknown"}) is None
+    assert resolve_scope_decision("confirm", proposed, None) is None
+    assert resolve_scope_decision("maybe later", proposed, None) is None
 
 
 def test_parse_client_and_slug():
     assert parse_client_name("Client: Acme Corp") == "Acme Corp"
     assert client_slug("Acme Corp!") == "acme_corp"
-
-
-def test_parse_audit_type():
-    assert parse_audit_type("Cybersecurity") == "cybersecurity"
-    assert parse_audit_type("CIS") == "cybersecurity"
-    assert parse_audit_type("IT audit") == "it"
-    assert parse_audit_type("both") == "both"
-    assert parse_audit_type("CIS + IT") == "both"
-    assert parse_audit_type("IT + Cybersecurity") == "both"
-    assert parse_audit_type("") is None
 
 
 def test_domains_for_audit_type():
@@ -105,7 +148,7 @@ def test_frameworks_for_audit_type_it(tmp_path: Path):
     assert "it_audit" not in both[1:]
 
 
-def test_scope_confirm_and_exclusions():
+def test_scope_exclusions_via_llm_resolve():
     proposed = [
         {
             "host_id": "10_0_0_1",
@@ -120,30 +163,21 @@ def test_scope_confirm_and_exclusions():
             "frameworks": ["it_audit", "ubuntu_cis_24_l2"],
         },
     ]
-    assert is_scope_confirm("confirm")
-    assert is_scope_confirm("все")
-    assert is_scope_confirm("run all")
-
-    assert parse_scope_exclusions("confirm", proposed) == (set(), set())
-    excl_fw, excl_pairs = parse_scope_exclusions(
-        "exclude ubuntu_cis_24_l2, postgres_cis", proposed
+    selected = resolve_scope_decision(
+        "confirm", proposed, {"action": "confirm"}
     )
-    assert excl_fw == {"ubuntu_cis_24_l2", "postgres_cis"}
-    assert not excl_pairs
-
-    excl_fw, excl_pairs = parse_scope_exclusions(
-        "exclude 10.0.0.1/ubuntu_cis_24_l2", proposed
-    )
-    assert not excl_fw
-    assert ("10.0.0.1", "ubuntu_cis_24_l2") in excl_pairs
-
-    selected = resolve_scope_decision("confirm", proposed)
     assert selected is not None
     assert len(selected) == 2
     assert selected[0]["frameworks"] == proposed[0]["frameworks"]
 
     trimmed = resolve_scope_decision(
-        "exclude ubuntu_cis_24_l2", proposed
+        "exclude ubuntu_cis_24_l2",
+        proposed,
+        {
+            "action": "exclude",
+            "exclude_frameworks": ["ubuntu_cis_24_l2"],
+            "exclude_pairs": [],
+        },
     )
     assert trimmed is not None
     assert all("ubuntu_cis_24_l2" not in r["frameworks"] for r in trimmed)
@@ -213,6 +247,38 @@ def test_format_discovered_software_markdown():
     assert "postgresql-16" in md
     assert "/etc/postgresql" in md
     assert "psql" in md
+
+
+def test_enrich_facts_from_access_rows_adds_postgres():
+    # Checklist fill missed postgres; inventory PG endpoint is up.
+    facts = HostFacts(
+        hostname="pg-server",
+        os_id="ubuntu",
+        binaries=["hostnamectl", "cat"],
+        listening_ports=[22],
+    )
+    enrich_facts_from_access_rows(
+        facts,
+        "10.200.29.79",
+        [
+            {
+                "service": "PostgreSQL",
+                "host": "10.200.29.79",
+                "port": "5432",
+                "kind": "pg",
+                "status": "accessible",
+            }
+        ],
+    )
+    assert 5432 in facts.listening_ports
+    assert "psql" in facts.binaries
+    ids = [
+        fw.id
+        for fw in select_frameworks_for_host(
+            facts, domains=["it", "cybersecurity"], agents_dir="agents"
+        )
+    ]
+    assert "postgres_cis" in ids
 
 
 def test_format_host_access_list_markdown():

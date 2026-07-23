@@ -18,7 +18,8 @@ Key template groups:
     ``EVIDENCE_*`` — per-requirement tool-calling during checklist audit.
     ``FILL_*`` / ``FINALIZE_PROMPT`` — cell fill and executive summary.
     ``ADHOC_*`` — operator-requested commands (:mod:`auditor.adhoc`).
-    ``HOST_FACTS_*`` — SSH inventory discovery for framework selection.
+    ``HOST_FACTS_*`` — fill HostFacts JSON after checklist discovery (and
+    compact SSH fallback when ``agents/host_facts.md`` is missing).
     ``INTAKE_INTERPRET_*`` — structured parsing of intake questionnaire replies.
 """
 
@@ -304,17 +305,47 @@ Return JSON only as specified in the system prompt.
 
 # --- Intake answer interpretation (no tools; free-text → structured) ---
 
-INTAKE_INTERPRET_YES_NO_SYSTEM = """You interpret an operator's yes/no reply for a pre-audit questionnaire.
+INTAKE_INTERPRET_YES_NO_SYSTEM = """You assess the operator's INTENT for a pre-audit availability question.
 
-Output ONLY JSON:
-{{"answer":"yes"}} or {{"answer":"no"}} or {{"answer":"unknown"}}
+Judge meaning only. The operator answers in free form; do not expect any
+particular vocabulary from them.
 
-Rules:
-- Map clear affirmatives (yes, y, да, есть, sure, ok, affirmative, …) → yes
-- Map clear negatives (no, n, nay, nope, нет, нету, negative, …) including typos
-  like "nayn" → no
-- If the reply is empty or genuinely ambiguous → unknown
+Output ONLY JSON in one of these shapes:
+{{"answer":"yes"}}
+{{"answer":"no"}}
+{{"answer":"unknown"}}
+{{"answer":"unknown","clarification":"short explanation of the question for the operator"}}
+
+Internal labels (for JSON only — never tell the operator to say these words):
+- yes = positive/available for the question
+- no = negative/unavailable
+- unknown = cannot tell from the reply
+
+Critical — who the question is about:
+- Access question asks whether the AUDIT AGENT / bot can reach servers
+  (SSH, DB, APIs) — NOT whether the human operator personally has access.
+- "ну ты можешь попасть, я нет" / "you can get in, I can't" → yes
+  (agent may connect; operator cannot / will not).
+- "SSH на .79" / "ты можешь туда попасть" / "go ahead and connect" → yes
+- "пока только документы, без SSH" / "агенту доступа нет" → no
+
+CMDB examples:
+- "We use NetBox in prod" / "NetBox есть" → yes
+- "ведём учёт в Excel" / "CMDB нет" → no
+
+Other rules:
+- Answering a yes/no availability question with a colloquial affirmative
+  ("ага", "угу", "да", "ок", "ok", "yeah", "yep", "sure", "конечно", "есть")
+  → yes
+- Colloquial negative ("неа", "не", "nope", "no", "нет") → no
+- Bare meta-ack with no grant/deny ("понял", "ясно", "понятно") → unknown
+- Clarifying questions ("что это?", "what is this?", "поясни") → unknown AND
+  ``clarification`` in the SAME LANGUAGE as the operator (1–3 short sentences).
+  Explain what you are asking (agent access vs human). Do NOT invent facts.
+- Off-topic / nonsense ("Follow white rabbit") → unknown
 - Do not invent facts beyond the reply.
+- Always set ``answer`` to exactly ``yes``, ``no``, or ``unknown`` (English
+  labels only) — never echo the operator's slang into ``answer``.
 """
 
 INTAKE_INTERPRET_YES_NO_PROMPT = """Question context: {question_hint}
@@ -322,7 +353,9 @@ INTAKE_INTERPRET_YES_NO_PROMPT = """Question context: {question_hint}
 Operator reply:
 {reply}
 
-Return JSON with key answer = yes|no|unknown.
+Assess intent from meaning. For access questions, decide whether the audit
+agent can reach servers — not whether the human operator can.
+Return JSON with answer = yes|no|unknown (optional clarification).
 """
 
 INTAKE_INTERPRET_CLIENT_SYSTEM = """You extract the client / organization name from an operator reply.
@@ -349,11 +382,12 @@ Output ONLY JSON:
 or {{"audit_type":null}}
 
 Rules:
+- Free-form is OK (e.g. "just the IT checklist", "CIS and Ubuntu").
 - IT / inventory / ит → it
-- CIS / cyber / cybersecurity / кибер → cybersecurity
-- both / оба / cis+it → both
+- CIS / cyber / cybersecurity / кибер / security / hardening → cybersecurity
+- both / оба / cis+it / everything → both
 - Numbers: 1 or cyber → cybersecurity; 2 or it → it; 3 → both
-- null if unclear
+- null if unclear or off-topic
 """
 
 INTAKE_INTERPRET_AUDIT_TYPE_PROMPT = """Operator reply:
@@ -370,10 +404,12 @@ Output ONLY JSON in one of these shapes:
 {{"action":"unknown"}}
 
 Rules:
-- confirm / all / run all / ok / да / все / подтвердить → confirm
-- exclude / skip / remove / исключи / убери → exclude with ids from the plan
+- Free-form is OK. Infer confirm vs exclude from meaning, not only keywords.
+- confirm / all / run all / ok / да / все / подтвердить / "looks good run it" → confirm
+- exclude / skip / remove / исключи / убери / "skip ubuntu on .78" → exclude with ids from the plan
 - host/framework pairs go in exclude_pairs; bare framework ids in exclude_frameworks
-- unknown if unclear
+- Only use framework ids / hosts that appear in the proposed plan
+- unknown if off-topic or unclear
 """
 
 INTAKE_INTERPRET_SCOPE_PROMPT = """Proposed plan:

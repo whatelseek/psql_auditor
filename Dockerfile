@@ -20,7 +20,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY agents ./agents
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir ".[mlflow]"
 
 # Pre-warm Postgres MCP (npm) and NetBox MCP (git clone + uv; not on PyPI yet).
 RUN npx -y mcp-postgres-server --help >/dev/null 2>&1 || true

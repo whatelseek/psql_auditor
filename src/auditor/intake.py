@@ -6,14 +6,15 @@ server access, then a host→framework proposal the operator can trim.
 
 Pipeline role:
     The graph interrupts with ``[AUDIT_INTAKE:<thread>]`` markers between
-    steps. Parsing helpers support both regex (fast path) and LLM JSON
-    interpretation for ambiguous replies.
+    steps. Step 1 is deterministic; steps 2–4 resolve from LLM JSON only
+    (no regex fallback on the intake path).
 
 Key entry points:
     :func:`prompts_for_language` — localized step prompts (EN/RU).
     :func:`format_intake_assistant_message` — embed intake marker in chat.
-    :func:`resolve_client_name` / :func:`resolve_yes_no` / :func:`resolve_audit_type`
-    / :func:`resolve_scope_decision` — structured answers.
+    :func:`resolve_client_name` — deterministic step 1 (no LLM).
+    :func:`resolve_yes_no` / :func:`resolve_audit_type`
+    / :func:`resolve_scope_decision` — LLM JSON only for steps 2–4.
     :func:`frameworks_for_audit_type` — map domain choice to framework ids
     (no-access fallback).
     :func:`summarize_cmdb_capabilities` / :func:`summarize_access_probe` — probe Markdown.
@@ -28,25 +29,6 @@ from typing import Any, Literal
 # ``cis`` retained as alias of ``cybersecurity`` for backward compatibility.
 AuditType = Literal["cis", "cybersecurity", "it", "both"]
 YesNo = Literal["yes", "no", "unknown"]
-
-INTAKE_MARKER_RE = re.compile(
-    r"\[AUDIT_INTAKE:(?P<thread>[A-Za-z0-9._:-]+)\]",
-    re.IGNORECASE,
-)
-
-_YES = re.compile(
-    r"^\s*(y|yes|да|есть|имеется|true|1)\b",
-    re.I,
-)
-_NO = re.compile(
-    r"^\s*(n|no|нет|нету|false|0)\b",
-    re.I,
-)
-
-_SCOPE_CONFIRM = re.compile(
-    r"^\s*(confirm|confirmed|ok|okay|all|run\s+all|yes|да|ок|все|подтверд\w*)\s*[.!]?\s*$",
-    re.I,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,101 +66,187 @@ def client_slug(name: str) -> str:
     return (slug[:64] or "client").lower()
 
 
-def parse_yes_no(text: str) -> YesNo:
-    """Parse yes/no intent from operator text using regex heuristics.
+_YES_ANSWERS = frozenset(
+    {
+        "yes",
+        "y",
+        "true",
+        "1",
+        "да",
+        "ага",
+        "угу",
+        "ок",
+        "ok",
+        "okay",
+        "yeah",
+        "yep",
+        "sure",
+        "конечно",
+        "есть",
+        "имеется",
+        "доступен",
+        "доступно",
+    }
+)
+_NO_ANSWERS = frozenset(
+    {
+        "no",
+        "n",
+        "false",
+        "0",
+        "нет",
+        "неа",
+        "не",
+        "nay",
+        "nope",
+        "нету",
+        "нет доступа",
+    }
+)
 
-    Supports English and Russian affirmatives/negatives at line start and
-    as embedded words when the reply is short.
 
-    Args:
-        text: Operator reply to a yes/no intake question.
-
-    Returns:
-        ``"yes"``, ``"no"``, or ``"unknown"`` when ambiguous or empty.
-    """
-    raw = (text or "").strip()
-    if not raw:
+def _normalize_yes_no_token(value: str) -> YesNo:
+    """Map a short label/token to yes/no/unknown (no free-form regex)."""
+    token = str(value or "").strip().lower().strip(".,!;:")
+    if not token:
         return "unknown"
-    if _YES.search(raw):
+    if token in _YES_ANSWERS:
         return "yes"
-    if _NO.search(raw):
-        return "no"
-    # Soft: contains yes/no words
-    lower = raw.lower()
-    if re.search(r"\b(yes|да|есть)\b", lower):
-        return "yes"
-    if re.search(r"\b(no|нет)\b", lower):
+    if token in _NO_ANSWERS:
         return "no"
     return "unknown"
 
 
 def resolve_yes_no(text: str, llm_payload: dict[str, Any] | None = None) -> YesNo:
-    """Resolve yes/no — clear regex wins over LLM (avoids yes→no misfires).
+    """Resolve availability intent from the intake LLM JSON only (steps 2–3).
+
+    The interpret model decides yes/no/unknown. This helper only normalizes the
+    model's ``answer`` label (including when it echoes slang like ``ага``).
+    Raw operator text is not pattern-matched.
 
     Args:
-        text: Raw operator reply.
-        llm_payload: Optional dict from intake interpret model with ``answer`` key.
+        text: Raw operator reply (unused; kept for call-site compatibility).
+        llm_payload: Dict from intake interpret model with ``answer`` key.
 
     Returns:
         ``"yes"``, ``"no"``, or ``"unknown"``.
     """
-    regex = parse_yes_no(text)
-    if regex in {"yes", "no"}:
-        return regex
-    if isinstance(llm_payload, dict):
-        ans = str(llm_payload.get("answer") or "").strip().lower()
-        if ans in {"yes", "y", "true", "1", "да"}:
-            return "yes"
-        if ans in {"no", "n", "false", "0", "нет", "nay", "nope"}:
-            return "no"
-    return "unknown"
+    del text
+    if not isinstance(llm_payload, dict):
+        return "unknown"
+    return _normalize_yes_no_token(str(llm_payload.get("answer") or ""))
+
+
+def intake_clarification_from_payload(
+    llm_payload: dict[str, Any] | None,
+) -> str:
+    """Extract optional clarification text when the operator asked a question.
+
+    The yes/no interpreter may return ``clarification`` (or ``help``) explaining
+    the current intake step so the re-prompt is useful (e.g. reply «что это?»).
+
+    Args:
+        llm_payload: JSON from the intake interpret model.
+
+    Returns:
+        Trimmed clarification Markdown, or empty string.
+    """
+    if not isinstance(llm_payload, dict):
+        return ""
+    for key in ("clarification", "help", "explanation", "message"):
+        text = str(llm_payload.get(key) or "").strip()
+        if text:
+            return text[:2000]
+    return ""
 
 
 def resolve_client_name(
     text: str, llm_payload: dict[str, Any] | None = None
 ) -> str:
-    """Resolve client name from LLM JSON or regex parser.
+    """Resolve client name deterministically (intake step 1 — no LLM).
+
+    ``llm_payload`` is ignored; kept for call-site compatibility.
 
     Args:
         text: Raw operator reply.
-        llm_payload: Optional dict with ``client_name`` key.
+        llm_payload: Unused (step 1 is regex/parser only).
 
     Returns:
         Trimmed client name (max 120 chars), or empty string.
     """
-    if isinstance(llm_payload, dict):
-        name = str(llm_payload.get("client_name") or "").strip()
-        if name:
-            return name[:120]
+    del llm_payload
     return parse_client_name(text)
 
 
 def resolve_audit_type(
     text: str, llm_payload: dict[str, Any] | None = None
 ) -> AuditType | None:
-    """Resolve audit domain from LLM JSON or regex parser.
+    """Resolve audit domain from LLM JSON only (intake step 4).
 
-    Normalizes ``cis`` / ``cyber`` aliases to ``cybersecurity``.
+    No regex fallback. Normalizes ``cis`` / ``cyber`` aliases to ``cybersecurity``.
 
     Args:
-        text: Raw operator reply.
-        llm_payload: Optional dict with ``audit_type`` key.
+        text: Raw operator reply (unused; kept for call-site compatibility).
+        llm_payload: Dict with ``audit_type`` key from the intake interpret model.
 
     Returns:
         ``"it"``, ``"cybersecurity"``, ``"both"``, or ``None`` when unclear.
     """
-    if isinstance(llm_payload, dict) and "audit_type" in llm_payload:
-        raw = llm_payload.get("audit_type")
-        if raw is None or str(raw).strip().lower() in {"", "null", "none", "unknown"}:
-            return parse_audit_type(text)
-        at = str(raw).strip().lower()
-        if at in {"cis", "cyber", "cybersecurity"}:
-            return "cybersecurity"
-        if at in {"it"}:
-            return "it"
-        if at in {"both"}:
-            return "both"
-    return parse_audit_type(text)
+    del text
+    if not isinstance(llm_payload, dict) or "audit_type" not in llm_payload:
+        return None
+    raw = llm_payload.get("audit_type")
+    if raw is None or str(raw).strip().lower() in {
+        "",
+        "null",
+        "none",
+        "unknown",
+    }:
+        return None
+    at = str(raw).strip().lower()
+    if at in {"cis", "cyber", "cybersecurity"}:
+        return "cybersecurity"
+    if at in {"it"}:
+        return "it"
+    if at in {"both"}:
+        return "both"
+    return None
+
+
+def resolve_scope_decision(
+    text: str,
+    proposed_jobs: list[dict[str, Any]],
+    llm_payload: dict[str, Any] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Resolve selected jobs from LLM JSON only (intake step 4).
+
+    No regex fallback. Unclear / missing payload → ``None`` (re-prompt).
+
+    Returns:
+        Filtered job list, or ``None`` when the reply is unclear (re-prompt).
+        Empty list means everything was excluded (caller should re-prompt).
+    """
+    del text
+    if not isinstance(llm_payload, dict):
+        return None
+    action = str(llm_payload.get("action") or "").strip().lower()
+    if action in {"confirm", "all", "run_all", "accept"}:
+        return [dict(r) for r in proposed_jobs]
+    if action in {"exclude", "trim"}:
+        excl_fw = {
+            str(x).strip()
+            for x in (llm_payload.get("exclude_frameworks") or [])
+            if str(x).strip()
+        }
+        excl_pairs: set[tuple[str, str]] = set()
+        for pair in llm_payload.get("exclude_pairs") or []:
+            if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                excl_pairs.add((str(pair[0]).lower(), str(pair[1]).lower()))
+            elif isinstance(pair, str) and "/" in pair:
+                h, f = pair.split("/", 1)
+                excl_pairs.add((h.strip().lower(), f.strip().lower()))
+        return apply_scope_exclusions(proposed_jobs, excl_fw, excl_pairs)
+    return None
 
 
 def parse_client_name(text: str) -> str:
@@ -201,53 +269,6 @@ def parse_client_name(text: str) -> str:
         flags=re.I,
     ).strip()
     return raw[:120] if raw else ""
-
-
-def parse_audit_type(text: str) -> AuditType | None:
-    """Parse domain scope: IT / Cybersecurity / both (``cis`` → cybersecurity).
-
-    Recognizes combined phrases (``both``, ``IT + CIS``), numbered menu replies,
-    and Russian keywords.
-
-    Args:
-        text: Operator reply to the audit type intake step.
-
-    Returns:
-        ``"it"``, ``"cybersecurity"``, ``"both"``, or ``None`` when unclear.
-    """
-    lower = (text or "").strip().lower()
-    if not lower:
-        return None
-    if re.search(
-        r"\bboth\b|оба|"
-        r"cis\s*\+\s*it|it\s*\+\s*cis|"
-        r"cyber\s*\+\s*it|it\s*\+\s*cyber|"
-        r"cybersecurity\s*\+\s*it|it\s*\+\s*cybersecurity",
-        lower,
-    ):
-        return "both"
-    cyber = bool(
-        re.search(r"\bcis\b|cyber\s*security|cybersecurity|кибер", lower)
-    )
-    it_only = bool(
-        re.search(r"\bit[\s_-]?audit\b|ит[\s_-]?аудит|inventory", lower)
-        or re.search(r"\bit\b|ит", lower)
-    )
-    if cyber and it_only:
-        return "both"
-    if re.search(r"\bit[\s_-]?audit\b|ит[\s_-]?аудит|inventory", lower) and not cyber:
-        return "it"
-    if cyber:
-        return "cybersecurity"
-    if re.search(r"\bit\b|inventory|ит", lower):
-        return "it"
-    if lower in {"1", "cis", "cyber", "cybersecurity"}:
-        return "cybersecurity"
-    if lower in {"2", "it"}:
-        return "it"
-    if lower in {"3", "both"}:
-        return "both"
-    return None
 
 
 def domains_for_audit_type(audit_type: AuditType | str) -> list[str]:
@@ -285,23 +306,27 @@ def prompts_for_language(code: str) -> IntakePrompts:
             cmdb=(
                 "## Предварительный опрос (2/4)\n\n"
                 "Есть ли у клиента **CMDB / NetBox**?\n\n"
-                "Ответьте **да** или **нет**."
+                "Опишите ситуацию своими словами "
+                "(например: «NetBox есть в проде», «ведём учёт в Excel»)."
             ),
             access=(
                 "## Предварительный опрос (3/4)\n\n"
                 "Есть ли у меня **доступ к серверам и сервисам** для проверки?\n\n"
-                "Ответьте **да** или **нет**.\n\n"
-                "При ответе **да** будет показана таблица досягаемости "
+                "Опишите ситуацию своими словами "
+                "(например: «SSH на .79», «ты можешь туда попасть», "
+                "«пока только документы»).\n\n"
+                "Если доступ есть, будет показана таблица досягаемости "
                 "(сервис / IP / порт / статус / применимые фреймворки)."
             ),
             scope=(
                 "## Предварительный опрос (4/4)\n\n"
                 "Ниже — предложенный план **хост → фреймворки**.\n\n"
                 "Ответьте **подтвердить** / **все**, чтобы запустить весь план, "
-                "или перечислите, что **исключить** из области, например:\n"
+                "или опишите, что **исключить** (свободный текст ок), например:\n"
                 "- `exclude ubuntu_cis_24_l2, postgres_cis`\n"
                 "- `exclude it_audit`\n"
                 "- `exclude 10.0.0.1/ubuntu_cis_24_l2`\n"
+                "- «убери ubuntu на .78»\n"
             ),
             audit_type=(
                 "## Предварительный опрос (4/4)\n\n"
@@ -310,7 +335,7 @@ def prompts_for_language(code: str) -> IntakePrompts:
                 "1. **IT** — инвентаризация и базовые IT-контроли\n"
                 "2. **Cybersecurity** — CIS / hardening (Postgres / Ubuntu / Windows)\n"
                 "3. **both** — сначала IT, затем Cybersecurity\n\n"
-                "Ответьте: `IT`, `Cybersecurity`, или `both`."
+                "Можно ответить `IT`, `Cybersecurity`, `both` или своими словами."
             ),
         )
     return IntakePrompts(
@@ -321,23 +346,26 @@ def prompts_for_language(code: str) -> IntakePrompts:
         cmdb=(
             "## Pre-audit intake (2/4)\n\n"
             "Does the client have a **CMDB / NetBox**?\n\n"
-            "Reply **yes** or **no**."
+            "Describe the situation in your own words "
+            "(e.g. \"We use NetBox in prod\", \"We track assets in Excel only\")."
         ),
         access=(
             "## Pre-audit intake (3/4)\n\n"
             "Do I have **access to servers and services** to probe?\n\n"
-            "Reply **yes** or **no**.\n\n"
-            "If **yes**, I will list host/service reachability "
+            "Describe the situation in your own words "
+            "(e.g. \"SSH on .79\", \"you can get in\", \"docs only for now\").\n\n"
+            "If access is available, I will list host/service reachability "
             "(service / IP / port / status / applicable frameworks)."
         ),
         scope=(
             "## Pre-audit intake (4/4)\n\n"
             "Below is the proposed **host → frameworks** plan.\n\n"
             "Reply **confirm** / **all** / **run all** to accept the full plan, "
-            "or list what to **exclude** from scope, e.g.:\n"
+            "or say what to **exclude** (free-form OK), e.g.:\n"
             "- `exclude ubuntu_cis_24_l2, postgres_cis`\n"
             "- `exclude it_audit`\n"
             "- `exclude 10.0.0.1/ubuntu_cis_24_l2`\n"
+            "- \"skip ubuntu on .78\"\n"
         ),
         audit_type=(
             "## Pre-audit intake (4/4)\n\n"
@@ -346,7 +374,7 @@ def prompts_for_language(code: str) -> IntakePrompts:
             "1. **IT** — inventory + baseline IT controls\n"
             "2. **Cybersecurity** — CIS / hardening (Postgres / Ubuntu / Windows)\n"
             "3. **both** — IT first, then Cybersecurity\n\n"
-            "Reply: `IT`, `Cybersecurity`, or `both`."
+            "Reply `IT`, `Cybersecurity`, `both`, or in your own words."
         ),
     )
 
@@ -425,6 +453,66 @@ def format_discovered_software_markdown(
             lines.append(f"- **Probe error:** {err[:160]}")
         lines.append("")
     return "\n".join(lines)
+
+
+def enrich_facts_from_access_rows(
+    facts: Any,
+    host: str,
+    access_rows: list[dict[str, Any]] | None,
+) -> Any:
+    """Merge reachable inventory endpoints into host facts for framework detect.
+
+    Access probe already knows ``kind=pg`` / port ``5432`` is up even when
+    checklist-filled ``listening_ports`` / binaries missed PostgreSQL.
+
+    Args:
+        facts: :class:`~auditor.host_facts.HostFacts`-like object (mutated).
+        host: SSH / inventory IP for this host.
+        access_rows: Rows from :func:`~auditor.access_probe.probe_access_endpoints`.
+
+    Returns:
+        The same ``facts`` object after enrichment.
+    """
+    if facts is None or not host:
+        return facts
+    ports: set[int] = set()
+    for p in getattr(facts, "listening_ports", None) or []:
+        try:
+            ports.add(int(p))
+        except (TypeError, ValueError):
+            continue
+    binaries = [
+        str(b).strip()
+        for b in (getattr(facts, "binaries", None) or [])
+        if str(b).strip()
+    ]
+    bins_l = {b.lower() for b in binaries}
+    want = str(host).strip()
+    for row in access_rows or []:
+        if str(row.get("host") or "").strip() != want:
+            continue
+        status = str(row.get("status") or "").strip().lower()
+        if status not in {"accessible", "ok", "up", "open", "reachable"}:
+            continue
+        try:
+            port = int(str(row.get("port") or "").strip())
+        except (TypeError, ValueError):
+            port = 0
+        if 1 <= port <= 65535:
+            ports.add(port)
+        kind = str(row.get("kind") or "").strip().lower()
+        if kind == "pg" or port == 5432:
+            ports.add(5432)
+            for name in ("postgres", "psql"):
+                if name not in bins_l:
+                    binaries.append(name)
+                    bins_l.add(name)
+    try:
+        facts.listening_ports = sorted(ports)
+        facts.binaries = binaries
+    except AttributeError:
+        pass
+    return facts
 
 
 def format_host_access_list_markdown(
@@ -556,100 +644,6 @@ def extract_management_summary(report_text: str) -> str:
     return "\n".join(clipped).strip() or text[:2000]
 
 
-def is_scope_confirm(text: str) -> bool:
-    """Return True when the operator accepts the full proposed plan."""
-    return bool(_SCOPE_CONFIRM.match((text or "").strip()))
-
-
-def parse_scope_exclusions(
-    text: str,
-    proposed_jobs: list[dict[str, Any]],
-) -> tuple[set[str], set[tuple[str, str]]] | None:
-    """Parse framework / host-framework exclusions from free text.
-
-    Recognizes ``exclude …``, bare framework ids present in the proposal,
-    and ``host/framework`` pairs.
-
-    Args:
-        text: Operator reply.
-        proposed_jobs: Rows from stage-3 preaudit.
-
-    Returns:
-        ``(excluded_framework_ids, excluded_host_fw_pairs)``, or ``None``
-        when the reply is empty / not a confirm and not parseable.
-        Confirm synonyms return empty sets.
-    """
-    raw = (text or "").strip()
-    if not raw:
-        return None
-    if is_scope_confirm(raw):
-        return set(), set()
-
-    known_fws: set[str] = set()
-    known_hosts: set[str] = set()
-    for row in proposed_jobs:
-        known_hosts.add(str(row.get("host_id") or "").lower())
-        known_hosts.add(str(row.get("ssh_host") or "").lower())
-        for fw in row.get("frameworks") or []:
-            known_fws.add(str(fw).lower())
-
-    body = re.sub(
-        r"^\s*(exclude|исключ\w*|убери|skip|remove)\s*[:\-]?\s*",
-        "",
-        raw,
-        flags=re.I,
-    ).strip()
-    if not body:
-        return None
-
-    excluded_fws: set[str] = set()
-    excluded_pairs: set[tuple[str, str]] = set()
-    tokens = re.split(r"[,;\n]+|\s+and\s+|\s+и\s+", body, flags=re.I)
-    found_any = False
-    for tok in tokens:
-        piece = tok.strip().strip("`").strip()
-        if not piece:
-            continue
-        # host/framework or host:framework
-        m = re.match(
-            r"^([A-Za-z0-9._:-]+)\s*[/:]\s*([A-Za-z0-9._-]+)$",
-            piece,
-        )
-        if m:
-            host_key = m.group(1).lower()
-            fw_id = m.group(2).lower()
-            if fw_id in known_fws or any(
-                fw_id == str(x).lower()
-                for row in proposed_jobs
-                for x in (row.get("frameworks") or [])
-            ):
-                excluded_pairs.add((host_key, fw_id))
-                found_any = True
-            continue
-        low = piece.lower()
-        if low in known_fws:
-            # Preserve canonical casing from proposal
-            for row in proposed_jobs:
-                for fw in row.get("frameworks") or []:
-                    if str(fw).lower() == low:
-                        excluded_fws.add(str(fw))
-                        found_any = True
-            continue
-        # Host-only exclude: drop all frameworks on that host
-        if low in known_hosts:
-            for row in proposed_jobs:
-                hid = str(row.get("host_id") or "").lower()
-                ssh = str(row.get("ssh_host") or "").lower()
-                if low in {hid, ssh}:
-                    for fw in row.get("frameworks") or []:
-                        excluded_pairs.add((hid or ssh, str(fw).lower()))
-                    found_any = True
-
-    if not found_any:
-        return None
-    return excluded_fws, excluded_pairs
-
-
 def apply_scope_exclusions(
     proposed_jobs: list[dict[str, Any]],
     excluded_frameworks: set[str],
@@ -675,43 +669,6 @@ def apply_scope_exclusions(
             continue
         out.append({**row, "frameworks": kept})
     return out
-
-
-def resolve_scope_decision(
-    text: str,
-    proposed_jobs: list[dict[str, Any]],
-    llm_payload: dict[str, Any] | None = None,
-) -> list[dict[str, Any]] | None:
-    """Resolve selected jobs from confirm / exclude reply (+ optional LLM).
-
-    Returns:
-        Filtered job list, or ``None`` when the reply is unclear (re-prompt).
-        Empty list means everything was excluded (caller should re-prompt).
-    """
-    parsed = parse_scope_exclusions(text, proposed_jobs)
-    if parsed is not None:
-        excl_fw, excl_pairs = parsed
-        return apply_scope_exclusions(proposed_jobs, excl_fw, excl_pairs)
-
-    if isinstance(llm_payload, dict):
-        action = str(llm_payload.get("action") or "").strip().lower()
-        if action in {"confirm", "all", "run_all", "accept"}:
-            return [dict(r) for r in proposed_jobs]
-        if action in {"exclude", "trim"}:
-            excl_fw = {
-                str(x).strip()
-                for x in (llm_payload.get("exclude_frameworks") or [])
-                if str(x).strip()
-            }
-            excl_pairs: set[tuple[str, str]] = set()
-            for pair in llm_payload.get("exclude_pairs") or []:
-                if isinstance(pair, (list, tuple)) and len(pair) >= 2:
-                    excl_pairs.add((str(pair[0]).lower(), str(pair[1]).lower()))
-                elif isinstance(pair, str) and "/" in pair:
-                    h, f = pair.split("/", 1)
-                    excl_pairs.add((h.strip().lower(), f.strip().lower()))
-            return apply_scope_exclusions(proposed_jobs, excl_fw, excl_pairs)
-    return None
 
 
 def format_intake_assistant_message(prompt: str, thread_id: str) -> str:

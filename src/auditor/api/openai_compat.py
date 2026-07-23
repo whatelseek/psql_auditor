@@ -646,7 +646,11 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
         return await _run_or_resume_once(auditor, body)
     except (ValueError, Exception) as exc:  # noqa: BLE001
         msg = f"{type(exc).__name__}: {exc}".lower()
-        if "connection closed" not in msg and "closed database" not in msg:
+        if (
+            "connection closed" not in msg
+            and "closed database" not in msg
+            and "threads can only be started once" not in msg
+        ):
             raise
         from auditor.graph import reset_auditor_checkpointer
 

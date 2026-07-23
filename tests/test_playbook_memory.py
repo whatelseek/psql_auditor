@@ -100,3 +100,37 @@ def test_remember_skips_failures(tmp_path: Path):
         success=False,
     )
     assert mem.get_entry("ubuntu_cis_24_l2", "REQ-001") is None
+
+
+def test_remember_persists_framework_without_seed_yaml(tmp_path: Path):
+    """First-time frameworks (e.g. host_facts) must still land on disk."""
+    playbooks = tmp_path / "empty_playbooks"
+    playbooks.mkdir()
+    memory_dir = tmp_path / "memory"
+    mem = PlaybookMemory(
+        playbooks_dir=playbooks,
+        memory_dir=memory_dir,
+        learn=True,
+    )
+    mem.remember_tool(
+        "host_facts",
+        "REQ-001",
+        "ssh_run",
+        {"command": "hostname -f"},
+        success=True,
+    )
+    learned_path = memory_dir / "learned_playbooks.json"
+    assert learned_path.is_file()
+    payload = learned_path.read_text(encoding="utf-8")
+    assert '"host_facts"' in payload
+    assert "hostname -f" in payload
+
+    mem2 = PlaybookMemory(
+        playbooks_dir=playbooks,
+        memory_dir=memory_dir,
+        learn=True,
+    )
+    entry = mem2.get_entry("host_facts", "REQ-001")
+    assert entry is not None
+    assert entry["source"] == "learned"
+    assert entry["tools"][0]["arguments"]["command"] == "hostname -f"

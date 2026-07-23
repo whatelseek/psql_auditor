@@ -22,12 +22,23 @@ or the console script ``auditor`` which calls ``main()``.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
 import uvicorn
 from fastapi import FastAPI
 
 from auditor import __version__
 from auditor.api.openai_compat import router as openai_router
 from auditor.config import get_settings
+from auditor.mlflow_store import configure_mlflow_safe
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Configure optional MLflow tracking once at process start."""
+    configure_mlflow_safe(get_settings())
+    yield
 
 
 def create_app() -> FastAPI:
@@ -47,6 +58,7 @@ def create_app() -> FastAPI:
             "OpenAI-compatible API for a LangGraph IT infrastructure security auditor. "
             "Point Open WebUI at /v1."
         ),
+        lifespan=_lifespan,
     )
     app.include_router(openai_router)
 
@@ -81,7 +93,3 @@ def main() -> None:
         port=settings.port,
         reload=False,
     )
-
-
-if __name__ == "__main__":
-    main()
