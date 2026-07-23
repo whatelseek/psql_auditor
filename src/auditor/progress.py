@@ -167,24 +167,6 @@ def emit_phase(text: str, *, framework_id: str = "") -> None:
     )
 
 
-def emit_reasoning(text: str, *, framework_id: str = "", requirement_id: str = "") -> None:
-    """Emit a reasoning or status snippet from the LLM assess loop.
-
-    Args:
-        text: Short reasoning excerpt for the operator.
-        framework_id: Optional framework slug.
-        requirement_id: Optional ``REQ-NNN`` being assessed.
-    """
-    emit_progress(
-        ProgressEvent(
-            kind="reasoning",
-            text=text,
-            framework_id=framework_id,
-            requirement_id=requirement_id,
-        )
-    )
-
-
 def emit_req_status(
     req_id: str,
     status: str,

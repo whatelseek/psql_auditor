@@ -36,21 +36,21 @@ def test_intent_req_playbook_is_adhoc():
 
 def test_seed_counters_append_not_overwrite(tmp_path: Path):
     store = EvidenceStore(tmp_path, run_id="20260101T000000Z_deadbeef")
-    store.write_tool_result("ubuntu_cis", "REQ-002", "ssh_run", {"command": "a"}, "one")
-    store.write_tool_result("ubuntu_cis", "REQ-002", "ssh_run", {"command": "b"}, "two")
+    store.write_tool_result("ubuntu_cis_24_l2", "REQ-002", "ssh_run", {"command": "a"}, "one")
+    store.write_tool_result("ubuntu_cis_24_l2", "REQ-002", "ssh_run", {"command": "b"}, "two")
     # Re-open as a new store instance (simulates follow-up process)
     reopened = EvidenceStore.open_existing(tmp_path, "20260101T000000Z_deadbeef")
     path = reopened.write_tool_result(
-        "ubuntu_cis", "REQ-002", "ssh_run", {"command": "c"}, "three"
+        "ubuntu_cis_24_l2", "REQ-002", "ssh_run", {"command": "c"}, "three"
     )
     assert path.name.startswith("003_")
-    assert (store.root / "ubuntu_cis" / "REQ-002" / "001_ssh_run.txt").is_file()
-    assert (store.root / "ubuntu_cis" / "REQ-002" / "003_ssh_run.txt").is_file()
+    assert (store.root / "ubuntu_cis_24_l2" / "REQ-002" / "001_ssh_run.txt").is_file()
+    assert (store.root / "ubuntu_cis_24_l2" / "REQ-002" / "003_ssh_run.txt").is_file()
 
 
 def test_extract_and_latest_run_id(tmp_path: Path):
     rid = "20260720T120000Z_abcdef12"
-    EvidenceStore(tmp_path, run_id=rid).write_run_meta(frameworks=["ubuntu_cis"])
+    EvidenceStore(tmp_path, run_id=rid).write_run_meta(frameworks=["ubuntu_cis_24_l2"])
     assert extract_run_id(f"evidence: `{tmp_path / rid}`") == rid
     assert latest_run_id(tmp_path) == rid
 
@@ -75,10 +75,10 @@ async def test_revise_req_writes_into_existing_folder(tmp_path: Path):
 
     rid = "20260720T130000Z_feedbeef"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis"])
-    (store.root / "ubuntu_cis" / "REQ-002").mkdir(parents=True)
+    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"])
+    (store.root / "ubuntu_cis_24_l2" / "REQ-002").mkdir(parents=True)
     store.write_tool_result(
-        "ubuntu_cis", "REQ-002", "ssh_run", {"command": "old"}, "PermitRootLogin yes"
+        "ubuntu_cis_24_l2", "REQ-002", "ssh_run", {"command": "old"}, "PermitRootLogin yes"
     )
 
     settings = Settings(
@@ -126,8 +126,8 @@ async def test_revise_req_writes_into_existing_folder(tmp_path: Path):
     )
     assert result["mode"] == "revise_full"
     assert result["evidence_run_id"] == rid
-    assert (store.root / "ubuntu_cis" / "REQ-002" / "002_ssh_run.txt").is_file()
-    assert (store.root / "ubuntu_cis" / "REQ-002" / "finding.json").is_file()
+    assert (store.root / "ubuntu_cis_24_l2" / "REQ-002" / "002_ssh_run.txt").is_file()
+    assert (store.root / "ubuntu_cis_24_l2" / "REQ-002" / "finding.json").is_file()
 
 
 @pytest.mark.asyncio
@@ -137,8 +137,8 @@ async def test_evaluate_req_gathers_evidence_only(tmp_path: Path):
 
     rid = "20260720T131500Z_feedbeef"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis"])
-    (store.root / "ubuntu_cis" / "REQ-001").mkdir(parents=True)
+    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"])
+    (store.root / "ubuntu_cis_24_l2" / "REQ-001").mkdir(parents=True)
 
     settings = Settings(
         agents_dir=Path("agents"),
@@ -170,8 +170,8 @@ async def test_evaluate_req_gathers_evidence_only(tmp_path: Path):
         messages=[AIMessage(content=f"evidence: `{store.root}`")],
     )
     assert result["mode"] == "gather_evidence"
-    assert (store.root / "ubuntu_cis" / "REQ-001" / "001_ssh_run.txt").is_file()
-    assert not (store.root / "ubuntu_cis" / "REQ-001" / "finding.json").is_file()
+    assert (store.root / "ubuntu_cis_24_l2" / "REQ-001" / "001_ssh_run.txt").is_file()
+    assert not (store.root / "ubuntu_cis_24_l2" / "REQ-001" / "finding.json").is_file()
 
 
 @pytest.mark.asyncio
@@ -182,9 +182,9 @@ async def test_refill_without_req_requires_revised_or_named(tmp_path: Path):
 
     rid = "20260720T131800Z_feedbeef"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis"])
-    (store.root / "ubuntu_cis" / "REQ-001").mkdir(parents=True)
-    (store.root / "ubuntu_cis" / "REQ-002").mkdir(parents=True)
+    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"])
+    (store.root / "ubuntu_cis_24_l2" / "REQ-001").mkdir(parents=True)
+    (store.root / "ubuntu_cis_24_l2" / "REQ-002").mkdir(parents=True)
 
     settings = Settings(
         agents_dir=Path("agents"),
@@ -213,9 +213,9 @@ async def test_refill_finding_from_stored_evidence(tmp_path: Path):
 
     rid = "20260720T132000Z_feedbeef"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis"], report_language="en")
+    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"], report_language="en")
     store.write_tool_result(
-        "ubuntu_cis",
+        "ubuntu_cis_24_l2",
         "REQ-001",
         "ssh_run",
         {"command": "ps"},
@@ -248,7 +248,7 @@ async def test_refill_finding_from_stored_evidence(tmp_path: Path):
         messages=[AIM(content=f"evidence: `{store.root}`")],
     )
     assert result["mode"] == "refill_finding"
-    finding = store.load_finding("ubuntu_cis", "REQ-001")
+    finding = store.load_finding("ubuntu_cis_24_l2", "REQ-001")
     assert finding is not None
     assert finding["status"] == "fail"
     assert "pid 1" in finding["evidence"]
@@ -261,7 +261,7 @@ async def test_update_report_from_disk_findings(tmp_path: Path):
 
     rid = "20260720T140000Z_cafebabe"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis"])
+    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"])
     finding = {
         "requirement_id": "REQ-002",
         "title": "SSH root login disabled",
@@ -273,7 +273,7 @@ async def test_update_report_from_disk_findings(tmp_path: Path):
         "notes": "",
         "pass_criteria": "PermitRootLogin no",
     }
-    store.write_finding("ubuntu_cis", "REQ-002", finding)
+    store.write_finding("ubuntu_cis_24_l2", "REQ-002", finding)
 
     settings = Settings(
         agents_dir=Path("agents"),
@@ -297,7 +297,7 @@ async def test_update_report_from_disk_findings(tmp_path: Path):
         messages=[AIMessage(content=f"Evidence directory: `{store.root}`")],
     )
     assert result["mode"] == "update_report"
-    assert (store.root / "ubuntu_cis" / "report.md").is_file()
+    assert (store.root / "ubuntu_cis_24_l2" / "report.md").is_file()
     report = (store.root / "report.md").read_text(encoding="utf-8")
     assert "REQ-002" in report
     assert "pass" in report
@@ -308,9 +308,9 @@ def test_resolve_multi_host_req_with_host_hint(tmp_path: Path):
 
     rid = "TestCompany"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis"])
+    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"])
     for host in ("10.200.29.78", "10.200.29.79"):
-        key = f"{host}/ubuntu_cis"
+        key = f"{host}/ubuntu_cis_24_l2"
         (store.root / key / "REQ-010").mkdir(parents=True)
         store.write_finding(
             key,
@@ -326,25 +326,25 @@ def test_resolve_multi_host_req_with_host_hint(tmp_path: Path):
         )
 
     chosen = resolve_framework_for_req(
-        user_text="Evaluate REQ-010 on ubuntu_cis for host 10.200.29.78",
+        user_text="Evaluate REQ-010 on ubuntu_cis_24_l2 for host 10.200.29.78",
         store=store,
         req_id="REQ-010",
         agents_dir=Path("agents"),
     )
-    assert chosen == "10.200.29.78/ubuntu_cis"
+    assert chosen == "10.200.29.78/ubuntu_cis_24_l2"
 
     target = resolve_target(
-        user_text="Evaluate REQ-010 on ubuntu_cis for host 10.200.29.78",
+        user_text="Evaluate REQ-010 on ubuntu_cis_24_l2 for host 10.200.29.78",
         evidence_dir=tmp_path,
         agents_dir=Path("agents"),
         require_req=True,
     )
-    assert target.framework_id == "10.200.29.78/ubuntu_cis"
+    assert target.framework_id == "10.200.29.78/ubuntu_cis_24_l2"
     assert target.host_id == "10.200.29.78"
 
     with pytest.raises(ValueError, match="multiple frameworks/hosts"):
         resolve_framework_for_req(
-            user_text="Evaluate REQ-010 on ubuntu_cis",
+            user_text="Evaluate REQ-010 on ubuntu_cis_24_l2",
             store=store,
             req_id="REQ-010",
             agents_dir=Path("agents"),
@@ -358,8 +358,8 @@ async def test_revise_req_multi_host_path(tmp_path: Path):
 
     rid = "TestCompany"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis"])
-    fw_key = "10.200.29.78/ubuntu_cis"
+    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"])
+    fw_key = "10.200.29.78/ubuntu_cis_24_l2"
     (store.root / fw_key / "REQ-010").mkdir(parents=True)
 
     settings = Settings(
@@ -390,7 +390,7 @@ async def test_revise_req_multi_host_path(tmp_path: Path):
 
     result = await run_revise_req(
         graph,
-        "Evaluate REQ-010 on ubuntu_cis for host 10.200.29.78. Check PermitRootLogin",
+        "Evaluate REQ-010 on ubuntu_cis_24_l2 for host 10.200.29.78. Check PermitRootLogin",
         messages=[AIMessage(content=f"evidence: `{store.root}`")],
     )
     assert result["mode"] == "gather_evidence"

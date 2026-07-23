@@ -109,7 +109,6 @@ class AuditorState(TypedDict, total=False):
     findings: Annotated[dict[str, Finding], merge_findings]
     report: str
     error: str | None
-    target_hints: dict[str, Any]
     # Cyclic reconnect loop: how many session restores have been attempted.
     retry_count: int
     # Disk artifacts: <evidence_dir>/<client_name>/<framework>/REQ-NNN/

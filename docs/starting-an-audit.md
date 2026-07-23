@@ -101,7 +101,10 @@ frameworks:
   - it_audit
 ```
 
-A copy of this template lives at [`examples/target.example.yaml`](examples/target.example.yaml).
+A copy of this template can live in chat or inventory docs. Runtime credentials
+for Docker are loaded from [`secrets/connection.md`](../secrets/connection.example.md)
+and per-client [`inventory/`](../inventory/INVENTORY.example.md) — the agent does
+**not** parse a separate uploaded target file schema beyond chat/inventory text.
 
 ### JSON equivalent
 

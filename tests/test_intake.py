@@ -4,12 +4,12 @@ from pathlib import Path
 
 from auditor.host_facts import HostFacts, parse_host_facts_json
 from auditor.frameworks import select_frameworks_for_host
+from auditor.hitl import resolve_pause_resume
 from auditor.intake import (
     apply_scope_exclusions,
     client_slug,
     domains_for_audit_type,
     enrich_facts_from_access_rows,
-    extract_intake_thread_id,
     extract_management_summary,
     format_discovered_software_markdown,
     format_host_access_list_markdown,
@@ -130,7 +130,7 @@ def test_extract_intake_marker():
         {"role": "assistant", "content": "Ask\n[AUDIT_INTAKE:audit-abc:intake]\n"},
         {"role": "user", "content": "Acme"},
     ]
-    assert extract_intake_thread_id(msgs) == "audit-abc:intake"
+    assert resolve_pause_resume(msgs) == ("intake", "audit-abc:intake")
 
 
 def test_frameworks_for_audit_type_it(tmp_path: Path):

@@ -689,24 +689,7 @@ def format_intake_assistant_message(prompt: str, thread_id: str) -> str:
     )
 
 
-def extract_intake_thread_id(messages: list[Any]) -> str | None:
-    """Найти поток intake только если это самый новый маркер паузы.
 
-    Делегирует :func:`~auditor.hitl.resolve_pause_resume` и возвращает
-    thread id только когда активная пауза — ``intake``.
-
-    Args:
-        messages: История сообщений чата.
-
-    Returns:
-        Id потока intake или ``None``, если intake не на паузе.
-    """
-    from auditor.hitl import resolve_pause_resume
-
-    resolved = resolve_pause_resume(messages)
-    if resolved and resolved[0] == "intake":
-        return resolved[1]
-    return None
 
 
 def intake_interrupt_payload(*, step: str, prompt: str, **extra: Any) -> dict[str, Any]:

@@ -86,7 +86,6 @@ Operators start audits in Open WebUI. Messages are **routed by intent**
 → **[`docs/starting-an-audit.md`](docs/starting-an-audit.md)**  
 → Docs index: [`docs/README.md`](docs/README.md)  
 → NetBox MCP: [`docs/netbox-mcp.md`](docs/netbox-mcp.md)  
-→ Example target file: [`docs/examples/target.example.yaml`](docs/examples/target.example.yaml)  
 → Connection secrets: [`secrets/connection.example.md`](secrets/connection.example.md)
 
 Short version:

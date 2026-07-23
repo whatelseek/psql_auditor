@@ -210,42 +210,14 @@ ad-hoc команда, доработка REQ, список сессий и т.�
 4. При HITL ответьте `skip` / `retry` (или `пропустить` / `повторить`).
 5. Скачайте ZIP по ссылке в конце ответа (`host_facts.md` / `INVENTORY.md` при необходимости).
 
-### 6.2. Файл цели (рекомендуется)
+### 6.2. Креденшелы и инвентарь
 
-Прикрепите YAML/JSON с описанием хоста (шаблон: [`examples/target.example.yaml`](examples/target.example.yaml)):
+Храните SSH / Postgres / NetBox в [`secrets/connection.md`](../secrets/connection.example.md).
+Без CMDB используйте [`inventory/INVENTORY.md`](../inventory/INVENTORY.example.md).
+В чате можно описать хост текстом; отдельный парсер «target-файла» не используется —
+источник истины: secrets + inventory.
 
-```yaml
-host:
-  hostname: db-01.example.com
-  description: "Prod Postgres 16 on Ubuntu 22.04"
-  os: ubuntu
-
-ssh:
-  user: auditor
-  port: 22
-  password: "changeme"
-
-postgres:
-  host: db-01.example.com
-  port: 5432
-  user: postgres
-  password: "changeme"
-  database: postgres
-
-frameworks:
-  - postgres_cis
-  - ubuntu_cis_24_l2
-```
-
-Сообщение в чате:
-
-```text
-Запусти аудит PostgreSQL и Ubuntu CIS по приложенному target
-```
-
-Подробности полей: [starting-an-audit.md](starting-an-audit.md).
-
-> **Важно:** креденшелы SSH / Postgres / NetBox хранятся в `secrets/connection.md` (не в `docker-compose.yml`). При отсутствии CMDB используйте `inventory/INVENTORY.md`.
+Подробности: [starting-an-audit.md](starting-an-audit.md).
 
 ### 6.3. Несколько фреймворков
 

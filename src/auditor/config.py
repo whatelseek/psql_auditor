@@ -273,24 +273,6 @@ class Settings(BaseSettings):
             env["PG_DATABASE"] = str(fields["database"])
         return env
 
-    def resolve_database_url(self) -> str | None:
-        """Build a PostgreSQL DSN from settings (diagnostics / fallbacks).
-
-        Returns:
-            A ``postgresql://…`` connection string, or ``None`` if incomplete.
-        """
-        if self.database_url:
-            return self.database_url
-        fields = self.resolve_pg_fields()
-        if not fields["host"]:
-            return None
-        password = str(fields["password"] or "")
-        user = str(fields["user"])
-        auth = f"{user}:{password}@" if password else f"{user}@"
-        return (
-            f"postgresql://{auth}{fields['host']}:{fields['port']}/{fields['database']}"
-        )
-
 @lru_cache
 def get_settings() -> Settings:
     """Return a process-wide cached ``Settings`` instance.

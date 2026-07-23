@@ -69,24 +69,6 @@ class HitlDecision:
     source: Literal["regex", "llm", "explicit"] = "regex"
 
 
-def extract_hitl_thread_id(messages: list[Any]) -> str | None:
-    """Find ``[AUDIT_HITL:<thread>]`` only when it is the newest pause marker.
-
-    Delegates to :func:`resolve_pause_resume` and returns the thread id only
-    when the active pause kind is ``hitl`` (not intake or continue).
-
-    Args:
-        messages: Chat message list (dicts or LangChain message objects).
-
-    Returns:
-        Thread id string, or ``None`` when no HITL pause is active.
-    """
-    resolved = resolve_pause_resume(messages)
-    if resolved and resolved[0] == "hitl":
-        return resolved[1]
-    return None
-
-
 def resolve_pause_resume(messages: list[Any]) -> tuple[PauseKind, str] | None:
     """Return ``(kind, thread_id)`` from the newest assistant pause marker.
 
@@ -316,7 +298,7 @@ def build_hitl_prompt(
     contextual remediation tips, and explicit skip/retry instructions.
 
     Args:
-        framework_id: Active framework id (e.g. ``ubuntu_cis``).
+        framework_id: Active framework id (e.g. ``ubuntu_cis_24_l2``).
         requirement: Checklist requirement that could not be assessed.
         finding: Partial finding with error evidence or notes.
         evidence_dir: Optional path to evidence folder for operator reference.

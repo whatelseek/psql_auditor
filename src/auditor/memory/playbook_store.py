@@ -115,11 +115,6 @@ class PlaybookMemory:
         self._tracked_framework_ids: set[str] = set()
         self.reload()
 
-    @property
-    def store(self) -> InMemoryStore:
-        """Underlying LangGraph in-memory key-value store (hot-path cache)."""
-        return self._store
-
     def _track_framework(self, framework_id: str) -> None:
         """Record a sanitized framework id for later persist scans."""
         bare = _memory_framework_id(framework_id)
