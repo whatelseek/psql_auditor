@@ -303,7 +303,7 @@ OS: {os_line}
 Return JSON only as specified in the system prompt.
 """
 
-# --- Intake answer interpretation (no tools; free-text → structured) ---
+# --- Интерпретация ответов intake (без tools; свободный текст → структура) ---
 
 INTAKE_INTERPRET_YES_NO_SYSTEM = """You assess the operator's INTENT for a pre-audit availability question.
 

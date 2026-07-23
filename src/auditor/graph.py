@@ -722,7 +722,7 @@ class AuditorGraph:
             state, thread_id=thread_hint
         )
 
-        # 1) Client name (deterministic — no LLM)
+        # 1) Название клиента (детерминированно — без LLM)
         while not intake.get("client_name"):
             raw = interrupt(
                 intake_interrupt_payload(step="client_name", prompt=prompts.client)
@@ -751,13 +751,13 @@ class AuditorGraph:
                     store.rebind_run_id(artifacts_id)
                     self._evidence_by_run.pop(old_id, None)
                     self._evidence_by_run[store.run_id] = store
-                    # Keep temp id as alias until intake state is rewritten.
+                    # Временный id как алиас, пока state intake не переписан.
                     self._evidence_by_run[old_id] = store
                     for sess in self._multi_sessions.values():
                         if sess.get("run_id") == old_id:
                             sess["run_id"] = store.run_id
                     intake["artifacts_run_id"] = store.run_id
-                    # Patch live state keys for the rest of this node.
+                    # Обновить live-ключи state на оставшуюся часть узла.
                     state["evidence_run_id"] = store.run_id  # type: ignore[typeddict-item]
                     state["evidence_run_dir"] = str(store.root)  # type: ignore[typeddict-item]
 
@@ -766,8 +766,8 @@ class AuditorGraph:
                     intake["client_slug"],
                 )
                 intake["credentials_loaded"] = sorted(applied.keys())
-                # Credentials stay run-scoped via ContextVar on invoke/resume;
-                # do not mutate process os.environ (concurrent audits).
+                # Учётные данные — run-scoped через ContextVar на invoke/resume;
+                # не мутировать process os.environ (параллельные аудиты).
                 self._persist_intake_progress(
                     state, intake, thread_id=thread_hint
                 )
@@ -786,7 +786,7 @@ class AuditorGraph:
                 audit_type=prompts.audit_type,
             )
 
-        # 2) CMDB / NetBox (LLM-first free-form yes/no)
+        # 2) CMDB / NetBox (сначала LLM, свободная форма да/нет)
         cmdb_prompt = prompts.cmdb
         while "has_cmdb" not in intake:
             raw = interrupt(
@@ -837,7 +837,7 @@ class AuditorGraph:
                 intake["inventory_path"] = str(inv_path) if inv_path else ""
             self._persist_intake_progress(state, intake, thread_id=thread_hint)
 
-        # 3) Access — ask yes/no, then list host/service reachability (once).
+        # 3) Доступ — спросить да/нет, затем список достижимости хостов/сервисов (один раз).
         cmdb_summary = summarize_cmdb_capabilities(
             intake.get("cmdb_probe") or {}, language=lang.code
         )
@@ -1111,7 +1111,7 @@ class AuditorGraph:
                     state, intake, thread_id=thread_hint
                 )
 
-        # 4) Scope: confirm / exclude proposed frameworks (or domain fallback).
+        # 4) Scope: подтвердить / исключить предложенные фреймворки (или fallback по домену).
         if has_plan:
             plan_md = format_proposed_jobs_markdown(proposed_jobs)
             scope_prompt = f"{prompts.scope}\n\n{host_access_md}\n\n{plan_md}"
