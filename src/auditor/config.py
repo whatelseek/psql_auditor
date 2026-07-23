@@ -75,6 +75,8 @@ class Settings(BaseSettings):
         ssh_private_key_path: Path to a private key file inside the container/host.
         ssh_password: Password auth fallback when no key path is set.
         ssh_connect_timeout: Seconds to wait for the SSH TCP/handshake.
+        ssh_command_timeout: Seconds to wait for a remote command to finish
+            (prevents hangs on stale NFS ``df``, etc.).
         database_url: Optional PostgreSQL DSN; parsed into PG_* for the MCP
             subprocess when discrete fields are incomplete.
         pg_host / pg_port / pg_user / pg_password / pg_database: Credentials
@@ -93,6 +95,8 @@ class Settings(BaseSettings):
         max_finalize_evidence_chars: Evidence snippet size in the finalize digest.
         max_parallel_assessments: Max concurrent requirement workers (LLM/tool
             fan-out). Postgres MCP concurrency is capped by pool size.
+        max_parallel_host_jobs: Max concurrent host/framework audit graphs in
+            one session (different hosts only; same host stays sequential).
     """
 
     model_config = SettingsConfigDict(
@@ -160,6 +164,7 @@ class Settings(BaseSettings):
     ssh_private_key_path: str | None = None
     ssh_password: str | None = None
     ssh_connect_timeout: int = 15
+    ssh_command_timeout: int = 30
     # When false, skip host-key verification (lab only). Default verifies known_hosts.
     ssh_strict_host_key: bool = True
 
@@ -193,6 +198,8 @@ class Settings(BaseSettings):
     max_finalize_evidence_chars: int = 240
     # Concurrent REQ-* workers (LLM overlap). Postgres MCP uses a session pool.
     max_parallel_assessments: int = 5
+    # Concurrent host/framework graphs (different hosts; same-host exclusive).
+    max_parallel_host_jobs: int = Field(default=2, ge=1, le=4)
 
     def resolve_pg_fields(self) -> dict[str, str | int]:
         """Resolve discrete PG connection fields, parsing ``database_url`` if needed.

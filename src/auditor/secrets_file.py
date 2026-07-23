@@ -466,6 +466,57 @@ def list_client_ssh_targets(
     return targets
 
 
+def list_client_access_endpoints(
+    inventory_dir: Path | str,
+    client_slug_name: str,
+) -> list[dict[str, str]]:
+    """List inventory Access rows (SSH / PostgreSQL / …) for reachability tables.
+
+    Args:
+        inventory_dir: Root inventory directory.
+        client_slug_name: Client folder slug.
+
+    Returns:
+        Rows with ``service``, ``host``, ``port``, ``kind`` (``ssh`` / ``pg`` / …).
+        Deduplicated by ``kind|host|port``.
+    """
+    from auditor.host_facts import resolve_client_dir
+
+    client_dir = resolve_client_dir(Path(inventory_dir), client_slug_name)
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for name in ("INVENTORY.md", "connection.md"):
+        path = client_dir / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for row in _iter_credential_rows(text):
+            kind = (row.get("kind") or "").strip()
+            host = (row.get("host") or "").strip()
+            if kind not in {"ssh", "pg"} or not host:
+                continue
+            port = (row.get("port") or "").strip()
+            if not port:
+                port = "5432" if kind == "pg" else "22"
+            key = f"{kind}|{host.lower()}|{port}"
+            if key in seen:
+                continue
+            seen.add(key)
+            service = (row.get("access") or kind).strip() or kind
+            out.append(
+                {
+                    "service": service,
+                    "host": host,
+                    "port": port,
+                    "kind": kind,
+                }
+            )
+    return out
+
+
 _SSH_ENV_KEYS = (
     "SSH_HOST",
     "SSH_PORT",

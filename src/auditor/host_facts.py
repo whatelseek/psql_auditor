@@ -39,6 +39,8 @@ class HostFacts:
       os_version_id: OS version id when available.
       os_pretty_name: Human-readable OS name.
       binaries: Command names found on PATH (lowercase).
+      packages: Installed package names relevant to framework selection.
+      key_files: Existing paths that signal OS/DB/app stacks.
       listening_ports: TCP ports in LISTEN state.
       raw: Map of semantic tool keys → raw stdout blobs.
       collected_at: ISO-8601 UTC timestamp when facts were assembled.
@@ -55,11 +57,325 @@ class HostFacts:
     os_version_id: str = ""
     os_pretty_name: str = ""
     binaries: list[str] = field(default_factory=list)
+    packages: list[str] = field(default_factory=list)
+    key_files: list[str] = field(default_factory=list)
     listening_ports: list[int] = field(default_factory=list)
     raw: dict[str, str] = field(default_factory=dict)
     collected_at: str = ""
     error: str = ""
     ssh_host: str = ""
+
+
+# Audit-routing probes (prerun): binaries / packages / paths that drive framework choice.
+_DEFAULT_PROBE_BINARIES = (
+    "postgres",
+    "psql",
+    "pg_isready",
+    "docker",
+    "podman",
+    "nginx",
+    "apache2",
+    "httpd",
+    "sshd",
+    "auditd",
+    "apparmor_status",
+    "aa-status",
+    "systemctl",
+    "dpkg",
+    "rpm",
+)
+_DEFAULT_PROBE_FILES = (
+    "/etc/os-release",
+    "/etc/debian_version",
+    "/etc/redhat-release",
+    "/etc/postgresql",
+    "/var/lib/postgresql",
+    "/etc/ssh/sshd_config",
+    "/etc/docker/daemon.json",
+    "/etc/nginx/nginx.conf",
+    "/etc/apache2/apache2.conf",
+    "/etc/httpd/conf/httpd.conf",
+    "/etc/audit/auditd.conf",
+    "/etc/apparmor.d",
+)
+
+
+def host_facts_probe_script(
+    *,
+    extra_binaries: list[str] | tuple[str, ...] | None = None,
+) -> str:
+    """One-shot bash probe for hostname/OS/CPU/RAM/disk/ports/binaries.
+
+    Uses local-only ``df -hl`` (avoids NFS hangs from bare ``df -h``).
+    Output lines: ``HOST:``, ``IP:``, ``CPU:``, ``RAM:``, ``DISK:``, ``PORT:``,
+    ``BIN:``, ``FILE:``, ``OSID:``, ``OSVER:``, ``OSPRETTY:``.
+    """
+    bins = sorted(
+        {
+            *(b.lower() for b in _DEFAULT_PROBE_BINARIES),
+            *(str(b).strip().lower() for b in (extra_binaries or []) if str(b).strip()),
+        }
+    )
+    bin_list = " ".join(bins)
+    files = " ".join(_DEFAULT_PROBE_FILES)
+    return f"""#!/bin/bash
+set +e
+hn=$(hostname -f 2>/dev/null || hostname 2>/dev/null)
+[ -n "$hn" ] && echo "HOST:$hn"
+if [ -f /etc/os-release ]; then
+  . /etc/os-release 2>/dev/null || true
+  [ -n "${{ID:-}}" ] && echo "OSID:$ID"
+  [ -n "${{VERSION_ID:-}}" ] && echo "OSVER:$VERSION_ID"
+  [ -n "${{PRETTY_NAME:-}}" ] && echo "OSPRETTY:$PRETTY_NAME"
+fi
+# IPv4 (skip loopback)
+ip -4 -o addr show 2>/dev/null | awk '$4 !~ /^127\\./ {{ gsub(/\\/.*/, "", $4); print "IP:" $4 }}'
+# CPU / RAM compact
+cpus=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "")
+model=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ *//')
+[ -n "$cpus$model" ] && echo "CPU:${{cpus:+$cpus cores}} ${{model}}"
+ram=$(free -h 2>/dev/null | awk '/^Mem:/ {{print $2}}')
+[ -n "$ram" ] && echo "RAM:$ram"
+# Local filesystems only — bare df -h can hang on stale NFS/CIFS mounts.
+disk=$(df -hl -x tmpfs -x devtmpfs -x squashfs 2>/dev/null | awk 'NR==1 || /^\\/dev/ {{print}}' | head -n 12)
+[ -n "$disk" ] && while IFS= read -r line; do echo "DISK:$line"; done <<< "$disk"
+# Listening TCP ports
+ss -lntH 2>/dev/null | awk '{{print $4}}' | sed -E 's/.*:([0-9]+)$/\\1/' | sort -n | uniq | while read -r p; do
+  [ -n "$p" ] && echo "PORT:$p"
+done
+bins="{bin_list}"
+for b in $bins; do
+  if command -v "$b" >/dev/null 2>&1; then
+    echo "BIN:$b"
+  fi
+done
+for f in {files}; do
+  if [ -e "$f" ]; then
+    echo "FILE:$f"
+  fi
+done
+"""
+
+
+def parse_host_facts_probe(stdout: str, *, ssh_host: str = "") -> HostFacts:
+    """Parse :func:`host_facts_probe_script` labeled stdout into :class:`HostFacts`."""
+    hostname = ""
+    ips: list[str] = []
+    disk_lines: list[str] = []
+    ram = ""
+    cpu = ""
+    os_id = ""
+    os_ver = ""
+    os_pretty = ""
+    binaries: list[str] = []
+    key_files: list[str] = []
+    ports: list[int] = []
+    error = ""
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line or line.lower().startswith("exit_code"):
+            continue
+        if line.lower().startswith("ssh error"):
+            error = line
+            continue
+        if line.startswith("HOST:"):
+            hostname = line[5:].strip() or hostname
+        elif line.startswith("IP:"):
+            ip = line[3:].strip()
+            if ip and ip not in ips:
+                ips.append(ip)
+        elif line.startswith("CPU:"):
+            cpu = line[4:].strip() or cpu
+        elif line.startswith("RAM:"):
+            ram = line[4:].strip() or ram
+        elif line.startswith("DISK:"):
+            d = line[5:].strip()
+            if d:
+                disk_lines.append(d)
+        elif line.startswith("PORT:"):
+            try:
+                port = int(line[5:].strip())
+            except ValueError:
+                continue
+            if 1 <= port <= 65535 and port not in ports:
+                ports.append(port)
+        elif line.startswith("BIN:"):
+            b = line[4:].strip().lower()
+            if b and b not in binaries:
+                binaries.append(b)
+        elif line.startswith("FILE:"):
+            f = line[5:].strip()
+            if f and f not in key_files:
+                key_files.append(f)
+        elif line.startswith("OSID:"):
+            os_id = line[5:].strip().lower() or os_id
+        elif line.startswith("OSVER:"):
+            os_ver = line[6:].strip() or os_ver
+        elif line.startswith("OSPRETTY:"):
+            os_pretty = line[9:].strip() or os_pretty
+    return HostFacts(
+        hostname=hostname,
+        ips=ips,
+        disk="\n".join(disk_lines).strip(),
+        ram=ram,
+        cpu=cpu.strip(),
+        os_id=os_id,
+        os_version_id=os_ver,
+        os_pretty_name=os_pretty,
+        binaries=binaries,
+        key_files=key_files,
+        listening_ports=ports,
+        raw={"host_facts_probe": stdout or ""},
+        collected_at=datetime.now(timezone.utc).isoformat(),
+        error=error,
+        ssh_host=ssh_host,
+    )
+
+
+def audit_software_probe_script(
+    *,
+    extra_binaries: list[str] | tuple[str, ...] | None = None,
+    extra_files: list[str] | tuple[str, ...] | None = None,
+) -> str:
+    """Shell script that lists binaries, **all** installed packages, and files.
+
+    Output lines: ``BIN:name``, ``PKG:name``, ``FILE:path``, ``OSID:id``.
+    Package list is unfiltered so an LLM can match newly added frameworks
+    (e.g. MySQL) without hard-coding package name patterns.
+
+    Args:
+        extra_binaries: Extra command names from framework ``detect.binaries``.
+        extra_files: Extra paths to test (optional).
+
+    Returns:
+        Bash script suitable for ``ssh_run``.
+    """
+    bins = sorted(
+        {
+            *(b.lower() for b in _DEFAULT_PROBE_BINARIES),
+            *(str(b).strip().lower() for b in (extra_binaries or []) if str(b).strip()),
+        }
+    )
+    bin_list = " ".join(bins)
+    files = " ".join(
+        sorted(
+            {
+                *_DEFAULT_PROBE_FILES,
+                *(str(f).strip() for f in (extra_files or []) if str(f).strip()),
+            }
+        )
+    )
+    return f"""#!/bin/bash
+set +e
+bins="{bin_list}"
+for b in $bins; do
+  if command -v "$b" >/dev/null 2>&1; then
+    echo "BIN:$b"
+  fi
+done
+# Full package inventory (LLM + future frameworks consume this).
+if command -v dpkg-query >/dev/null 2>&1; then
+  dpkg-query -W -f='${{Package}}\\n' 2>/dev/null | sort -u | while read -r p; do
+    [ -n "$p" ] && echo "PKG:$p"
+  done
+elif command -v rpm >/dev/null 2>&1; then
+  rpm -qa --qf '%{{NAME}}\\n' 2>/dev/null | sort -u | while read -r p; do
+    [ -n "$p" ] && echo "PKG:$p"
+  done
+fi
+for f in {files}; do
+  if [ -e "$f" ]; then
+    echo "FILE:$f"
+  fi
+done
+if [ -f /etc/os-release ]; then
+  . /etc/os-release 2>/dev/null || true
+  [ -n "${{ID:-}}" ] && echo "OSID:$ID"
+  [ -n "${{VERSION_ID:-}}" ] && echo "OSVER:$VERSION_ID"
+  [ -n "${{PRETTY_NAME:-}}" ] && echo "OSPRETTY:$PRETTY_NAME"
+fi
+"""
+
+
+def parse_audit_software_probe(stdout: str) -> dict[str, list[str] | str]:
+    """Parse :func:`audit_software_probe_script` stdout into structured lists.
+
+    Args:
+        stdout: Raw ``ssh_run`` output (may include ``exit_code=`` lines).
+
+    Returns:
+        Dict with ``binaries``, ``packages``, ``key_files`` lists and optional
+        ``os_id`` / ``os_version_id`` / ``os_pretty_name`` strings.
+    """
+    binaries: list[str] = []
+    packages: list[str] = []
+    key_files: list[str] = []
+    os_id = ""
+    os_ver = ""
+    os_pretty = ""
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line or line.lower().startswith("exit_code") or line.lower().startswith(
+            "ssh error"
+        ):
+            continue
+        if line.startswith("BIN:"):
+            name = line[4:].strip().lower()
+            if name and name not in binaries:
+                binaries.append(name)
+        elif line.startswith("PKG:"):
+            name = line[4:].strip()
+            if name and name not in packages:
+                packages.append(name)
+        elif line.startswith("FILE:"):
+            path = line[5:].strip()
+            if path and path not in key_files:
+                key_files.append(path)
+        elif line.startswith("OSID:"):
+            os_id = line[5:].strip().lower() or os_id
+        elif line.startswith("OSVER:"):
+            os_ver = line[6:].strip() or os_ver
+        elif line.startswith("OSPRETTY:"):
+            os_pretty = line[9:].strip() or os_pretty
+    return {
+        "binaries": binaries,
+        "packages": packages,
+        "key_files": key_files,
+        "os_id": os_id,
+        "os_version_id": os_ver,
+        "os_pretty_name": os_pretty,
+    }
+
+
+def merge_software_probe_into_facts(
+    facts: HostFacts,
+    probe: dict[str, list[str] | str] | None,
+) -> HostFacts:
+    """Merge deterministic software-probe results into ``facts`` (in place)."""
+    if not probe:
+        return facts
+    bins = [str(b).lower() for b in (probe.get("binaries") or []) if str(b).strip()]
+    pkgs = [str(p) for p in (probe.get("packages") or []) if str(p).strip()]
+    files = [str(f) for f in (probe.get("key_files") or []) if str(f).strip()]
+    for b in bins:
+        if b not in facts.binaries:
+            facts.binaries.append(b)
+    for p in pkgs:
+        if p not in facts.packages:
+            facts.packages.append(p)
+    for f in files:
+        if f not in facts.key_files:
+            facts.key_files.append(f)
+    os_id = str(probe.get("os_id") or "").strip().lower()
+    if os_id and not facts.os_id:
+        facts.os_id = os_id
+    os_ver = str(probe.get("os_version_id") or "").strip()
+    if os_ver and not facts.os_version_id:
+        facts.os_version_id = os_ver
+    os_pretty = str(probe.get("os_pretty_name") or "").strip()
+    if os_pretty and not facts.os_pretty_name:
+        facts.os_pretty_name = os_pretty
+    return facts
 
 
 @dataclass
@@ -257,6 +573,26 @@ def parse_host_facts_json(
     else:
         binaries = [str(b).strip().lower() for b in binaries_raw if str(b).strip()]
 
+    packages_raw = data.get("packages") or []
+    if isinstance(packages_raw, str):
+        packages = [
+            p.strip()
+            for p in re.split(r"[\s,;]+", packages_raw)
+            if p.strip()
+        ]
+    else:
+        packages = [str(p).strip() for p in packages_raw if str(p).strip()]
+
+    files_raw = data.get("key_files") or data.get("files") or []
+    if isinstance(files_raw, str):
+        key_files = [
+            p.strip()
+            for p in re.split(r"[\s,;]+", files_raw)
+            if p.strip()
+        ]
+    else:
+        key_files = [str(p).strip() for p in files_raw if str(p).strip()]
+
     ports: list[int] = []
     ports_raw = data.get("listening_ports") or []
     if isinstance(ports_raw, (str, int)):
@@ -280,6 +616,8 @@ def parse_host_facts_json(
         os_version_id=str(data.get("os_version_id") or "").strip(),
         os_pretty_name=str(data.get("os_pretty_name") or "").strip(),
         binaries=binaries,
+        packages=packages,
+        key_files=key_files,
         listening_ports=ports,
         raw=dict(raw or {}),
         collected_at=datetime.now(timezone.utc).isoformat(),
@@ -543,6 +881,8 @@ def format_host_facts_markdown(
             + (f" ({facts.os_version_id})" if facts.os_version_id else ""),
             f"- **IPs:** {', '.join(facts.ips) if facts.ips else '—'}",
             f"- **Binaries:** {', '.join(facts.binaries) if facts.binaries else '—'}",
+            f"- **Packages:** {', '.join(facts.packages) if facts.packages else '—'}",
+            f"- **Key files:** {', '.join(facts.key_files) if facts.key_files else '—'}",
             f"- **Listening ports:** "
             + (
                 ", ".join(str(p) for p in facts.listening_ports)

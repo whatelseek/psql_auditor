@@ -155,11 +155,13 @@ Do not call more tools. Reply in Markdown.
 HOST_FACTS_SYSTEM_PROMPT = """You gather live host inventory facts via SSH for framework selection.
 
 Rules:
-- Use ONLY ssh_run / ssh_read_file (Linux/Ubuntu; on Windows prefer powershell/pwsh).
-- Collect: hostname, OS identity (/etc/os-release or Windows equivalent), IPs,
-  CPU, RAM, disk summary, binaries relevant to audits (postgres, psql, docker,
-  nginx, apache2, httpd, …), and listening TCP ports.
-- Prefer 3–6 focused tool calls. Avoid huge dumps.
+- Use ONLY ssh_run / ssh_read_file (Linux; on Windows use PowerShell via ssh_run).
+- Collect: hostname, OS identity, IPs, CPU, RAM, disk summary, listening TCP ports,
+  and a short set of audit-relevant binaries (postgres, mysql, docker, nginx, …).
+- Prefer 1–3 focused tool calls. Do NOT dump the entire package database here —
+  a dedicated software-inventory step collects the full list.
+- Disk: use `df -hl -x tmpfs -x devtmpfs | head -n 15` (local only). NEVER bare
+  `df -h` — it can hang for minutes on stale NFS/CIFS mounts.
 - Do not invent values. If SSH fails, include "SSH error" in the summary.
 - When done, reply with compact plain-text evidence (key=value or short bullets).
   Do NOT choose frameworks and do NOT write recommendations.
@@ -190,6 +192,8 @@ Output ONLY a JSON object with these keys — nothing else:
   "os_version_id": "",
   "os_pretty_name": "",
   "binaries": [],
+  "packages": [],
+  "key_files": [],
   "listening_ports": [],
   "cpu": "",
   "ram": "",
@@ -199,8 +203,9 @@ Output ONLY a JSON object with these keys — nothing else:
 
 Rules:
 - Do not invent facts not present in evidence.
-- os_id must be lowercase (e.g. ubuntu, debian, windows, rhel).
-- binaries: short names present on PATH (postgres, psql, docker, …), not full paths.
+- os_id must be lowercase (e.g. ubuntu, debian, windows, rhel, alpine).
+- binaries: short names present on PATH, not full paths.
+- packages: installed package/product names when present in evidence.
 - listening_ports: integers only.
 - If SSH/evidence failed, put the failure in "error" and leave other fields empty/default.
 """
@@ -213,6 +218,88 @@ SSH target: {ssh_host}
 {evidence}
 
 Return JSON only with the HostFacts keys listed in the system prompt.
+"""
+
+# --- Prerun: LLM collects FULL package inventory (deb / rpm / Windows / …) ---
+
+SOFTWARE_INVENTORY_SYSTEM_PROMPT = """You collect the COMPLETE installed-software inventory on the SSH target.
+
+Rules:
+- Use ONLY ssh_run / ssh_read_file. On Windows hosts use PowerShell via ssh_run.
+- Detect the OS/package ecosystem yourself and use the right listing command:
+  - Debian/Ubuntu: `dpkg-query -W -f='${{Package}}\\n'` (or `apt-cache` / `apt list --installed`)
+  - RHEL/CentOS/Fedora/SUSE: `rpm -qa --qf '%{{NAME}}\\n'` (or `dnf`/`zypper` list)
+  - Alpine: `apk info`
+  - Arch: `pacman -Q`
+  - Windows: `Get-Package` and/or Uninstall registry keys / `winget list`
+- Goal: every installed package/product name, one per line.
+- Also collect cheap signals when useful: OS id, a few BIN: names on PATH,
+  and FILE: paths that prove stacks (e.g. /etc/postgresql, Program Files paths).
+- Final assistant reply MUST be machine lines (no markdown tables):
+  PKG:name
+  BIN:name
+  FILE:path
+  OSID:id
+  OSVER:version
+  OSPRETTY:pretty name
+- Do not invent packages. If a command fails, try an alternate for that OS family.
+- Do NOT choose audit frameworks.
+"""
+
+SOFTWARE_INVENTORY_PROMPT = """Collect the full installed package/product inventory on this host.
+
+SSH target hint: {ssh_host}
+Extra binaries worth checking on PATH (from current agents/ detect rules): {extra_binaries}
+
+Use the correct package manager for this OS (deb, rpm, apk, pacman, or Windows).
+When done, reply with PKG:/BIN:/FILE:/OS* lines only.
+"""
+
+SOFTWARE_INVENTORY_FORCE_PROMPT = """Tool budget exhausted. From evidence already gathered,
+emit PKG:/BIN:/FILE:/OS* lines only. Do not call more tools. Do not invent names.
+"""
+
+# --- Prerun: LLM maps full installed software → frameworks in agents/ ---
+
+SOFTWARE_FRAMEWORK_ROUTE_SYSTEM = """You select audit frameworks from a FULL installed-software inventory.
+
+You receive:
+1) Complete package/product list (and binaries/files/OS) collected by an LLM tool pass
+   that already chose the right package manager (deb / rpm / Windows / …)
+2) Detect rules for every framework currently in agents/
+
+Task: decide which frameworks apply to THIS host based on installed software
+and OS — including stacks that are only visible as packages (e.g. mysql-server)
+even when a short binary PATH check might miss them.
+
+Output ONLY JSON:
+{{
+  "framework_ids": ["it_audit", "ubuntu_cis_24_l2"],
+  "highlight_packages": ["postgresql-16", "openssh-server"],
+  "highlight_binaries": ["psql", "sshd"],
+  "notes": "short reason"
+}}
+
+Rules:
+- framework_ids MUST be a subset of the provided framework ids (never invent ids).
+- Include it_audit when it is in the catalog and domain allows (always-true detect).
+- Prefer precision: do not select a DB framework unless packages/binaries/ports
+  clearly indicate that database.
+- highlight_* lists are the packages/binaries that justified the selection
+  (for the operator UI). Keep each list ≤ 40 items.
+- Do not invent packages not present in the inventory.
+"""
+
+SOFTWARE_FRAMEWORK_ROUTE_PROMPT = """Host: {ssh_host}
+OS: {os_line}
+
+### Framework detect catalog
+{framework_catalog}
+
+### Installed software inventory (from host; may be truncated)
+{software_inventory}
+
+Return JSON only as specified in the system prompt.
 """
 
 # --- Intake answer interpretation (no tools; free-text → structured) ---

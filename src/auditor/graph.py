@@ -51,7 +51,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command, interrupt
 
-from auditor.access_probe import probe_access_services
+from auditor.access_probe import (
+    probe_access_endpoints,
+    probe_access_services,
+)
 from auditor.adhoc import run_adhoc_commands
 from auditor.checklist import Requirement
 from auditor.compliance import format_compliance_markdown
@@ -67,10 +70,17 @@ from auditor.followup import (
     run_revise_req,
     run_update_report,
 )
-from auditor.evidence_store import EvidenceStore, client_artifacts_id, new_run_id
+from auditor.evidence_store import (
+    EvidenceStore,
+    bind_host_segment,
+    client_artifacts_id,
+    new_run_id,
+)
 from auditor.frameworks import (
     frameworks_catalog_text,
+    frameworks_detect_catalog_text,
     get_framework,
+    list_frameworks,
     load_framework_checklist,
     route_framework,
     route_frameworks,
@@ -78,14 +88,20 @@ from auditor.frameworks import (
 )
 from auditor.host_facts import (
     HostFacts,
+    audit_software_probe_script,
     compare_to_netbox,
     format_host_facts_markdown,
+    host_facts_probe_script,
     merge_facts_from_raw,
+    merge_software_probe_into_facts,
+    parse_audit_software_probe,
     parse_host_facts_json,
+    parse_host_facts_probe,
     resolve_client_inventory,
     upsert_inventory_md,
     write_host_facts_json,
 )
+from auditor.tools.ssh import ssh_run
 from auditor.hitl import (
     HitlDecision,
     build_hitl_prompt,
@@ -112,6 +128,8 @@ from auditor.session_store import (
 from auditor.intake import (
     client_slug,
     domains_for_audit_type,
+    extract_management_summary,
+    format_host_access_list_markdown,
     format_intake_assistant_message,
     format_proposed_jobs_markdown,
     frameworks_for_audit_type,
@@ -121,7 +139,6 @@ from auditor.intake import (
     resolve_client_name,
     resolve_scope_decision,
     resolve_yes_no,
-    summarize_access_probe,
     summarize_cmdb_capabilities,
 )
 from auditor.language import (
@@ -147,11 +164,8 @@ from auditor.prompts import (
     FILL_CELL_PROMPT,
     FILL_SYSTEM_PROMPT,
     FINALIZE_PROMPT,
-    HOST_FACTS_FILL_PROMPT,
-    HOST_FACTS_FILL_SYSTEM_PROMPT,
-    HOST_FACTS_FORCE_PROMPT,
-    HOST_FACTS_PROMPT,
-    HOST_FACTS_SYSTEM_PROMPT,
+    SOFTWARE_FRAMEWORK_ROUTE_PROMPT,
+    SOFTWARE_FRAMEWORK_ROUTE_SYSTEM,
     INTAKE_INTERPRET_AUDIT_TYPE_PROMPT,
     INTAKE_INTERPRET_AUDIT_TYPE_SYSTEM,
     INTAKE_INTERPRET_CLIENT_PROMPT,
@@ -164,6 +178,7 @@ from auditor.prompts import (
 from auditor.secrets_file import (
     InventorySshTarget,
     bind_ssh_target,
+    list_client_access_endpoints,
     list_client_ssh_targets,
     read_client_credentials,
 )
@@ -595,6 +610,76 @@ class AuditorGraph:
         )
         return resolve_audit_type(str(raw or ""), payload)
 
+    def _persist_intake_progress(
+        self,
+        state: AuditorState,
+        intake: dict[str, Any],
+        *,
+        thread_id: str = "",
+    ) -> None:
+        """Save mid-intake answers to evidence meta so resume skips rediscovery.
+
+        LangGraph re-runs the whole ``intake_gate`` node on each interrupt
+        resume; without disk persistence, access=yes would rediscover hosts.
+        """
+        store = self._store_from_state(state)
+        if store is None:
+            return
+        tid = thread_id or str(state.get("thread_id") or "")
+        try:
+            store.write_run_meta(
+                intake=intake,
+                intake_checkpoint_thread=tid,
+                intake_complete=False,
+            )
+        except OSError:
+            pass
+
+    def _load_intake_progress(
+        self,
+        state: AuditorState,
+        *,
+        thread_id: str = "",
+    ) -> dict[str, Any]:
+        """Reload discovery/plan fields only (never yes/no answers).
+
+        LangGraph restarts ``intake_gate`` on every resume and assigns
+        ``Command(resume=…)`` by interrupt call order. Restoring
+        ``has_cmdb`` / ``has_access`` from disk and skipping earlier
+        ``interrupt()`` calls mis-assigns answers (CMDB ``no`` → access).
+        Questionnaire answers must come from interrupt replay; disk is only
+        for expensive discovery so SSH is not repeated.
+        """
+        intake: dict[str, Any] = dict(state.get("intake") or {})
+        store = self._store_from_state(state)
+        if store is None:
+            return intake
+        meta = store.read_run_meta()
+        if meta.get("intake_complete"):
+            return intake
+        tid = thread_id or str(state.get("thread_id") or "")
+        saved_tid = str(meta.get("intake_checkpoint_thread") or "")
+        if tid and saved_tid and saved_tid != tid:
+            return intake
+        saved = meta.get("intake")
+        if not isinstance(saved, dict):
+            return intake
+        # Discovery / plan outputs only — not client/cmdb/access/scope answers.
+        keep_keys = (
+            "artifacts_run_id",
+            "discovery_complete",
+            "proposed_jobs",
+            "host_access_rows",
+            "access_probe",
+            "discovery_error",
+            "access_list_error",
+            "highlight_packages",
+        )
+        for key in keep_keys:
+            if key in saved and key not in intake:
+                intake[key] = saved[key]
+        return intake
+
     async def intake_gate(self, state: AuditorState) -> dict[str, Any]:
         """Multi-step pre-audit questionnaire via successive interrupts."""
         if not self.settings.intake_enabled or state.get("intake_complete"):
@@ -602,7 +687,10 @@ class AuditorGraph:
 
         lang = self._report_language(state)
         prompts = prompts_for_language(lang.code)
-        intake: dict[str, Any] = dict(state.get("intake") or {})
+        thread_hint = str(state.get("thread_id") or "")
+        intake: dict[str, Any] = self._load_intake_progress(
+            state, thread_id=thread_hint
+        )
 
         # 1) Client name
         while not intake.get("client_name"):
@@ -650,6 +738,9 @@ class AuditorGraph:
                 intake["credentials_loaded"] = sorted(applied.keys())
                 # Credentials stay run-scoped via ContextVar on invoke/resume;
                 # do not mutate process os.environ (concurrent audits).
+                self._persist_intake_progress(
+                    state, intake, thread_id=thread_hint
+                )
                 break
             prompts = prompts_for_language(lang.code)
             prompts = type(prompts)(
@@ -695,8 +786,9 @@ class AuditorGraph:
                 intake["inventory_scope"] = scope
                 intake["inventory_found"] = found
                 intake["inventory_path"] = str(inv_path) if inv_path else ""
+            self._persist_intake_progress(state, intake, thread_id=thread_hint)
 
-        # 3) Access — only after checking client inventory folder when no CMDB
+        # 3) Access — ask yes/no, then list host/service reachability (once).
         cmdb_summary = summarize_cmdb_capabilities(
             intake.get("cmdb_probe") or {}, language=lang.code
         )
@@ -726,9 +818,9 @@ class AuditorGraph:
                     if found
                     else f"**Inventory not found** at `{inv_path}`"
                 )
+            # Keep this short — a full inventory dump in the prompt confused yes/no.
             scope_block = (
-                f"\n\n### Client inventory check\n\n{status}\n\n{cred_line}\n\n"
-                + str(intake.get("inventory_scope") or "")[:4000]
+                f"\n\n### Client inventory check\n\n{status}\n\n{cred_line}\n"
             )
         else:
             scope_block = f"\n\n{cred_line}\n"
@@ -743,90 +835,194 @@ class AuditorGraph:
             )
             if yn == "unknown":
                 continue
+            intake["access_raw"] = str(raw or "").strip()
             intake["has_access"] = yn == "yes"
-            if yn == "yes":
-                slug = str(intake.get("client_slug") or "").strip()
-                try:
-                    creds = (
-                        read_client_credentials(self.settings.inventory_dir, slug)
-                        if slug
-                        else {}
-                    )
-                except (OSError, ValueError, FileNotFoundError):
-                    creds = {}
-                if creds:
-                    with bind_runtime_credentials(creds):
-                        access = await probe_access_services(effective_settings())
-                else:
-                    access = await probe_access_services(effective_settings())
-                intake["access_probe"] = access
-                # 3b) Preaudit: discover hosts + propose frameworks (both domains).
-                store = self._store_from_state(state)
-                if store is not None:
-                    try:
-                        discovered = await self._discover_inventory_hosts(
-                            intake=intake, store=store
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        discovered = []
-                        intake["discovery_error"] = f"{type(exc).__name__}: {exc}"
-                    proposed: list[dict[str, Any]] = []
-                    for target, facts in discovered:
-                        if facts.error:
-                            matched_ids: list[str] = []
-                            it_fw = get_framework(
-                                "it_audit", self.settings.agents_dir
-                            )
-                            if it_fw is not None:
-                                matched_ids = [it_fw.id]
-                            proposed.append(
-                                {
-                                    "host_id": target.slug,
-                                    "hostname": facts.hostname or "",
-                                    "ssh_host": target.host,
-                                    "frameworks": matched_ids,
-                                    "error": facts.error,
-                                }
-                            )
-                        else:
-                            matched = select_frameworks_for_host(
-                                facts,
-                                domains=["it", "cybersecurity"],
-                                agents_dir=self.settings.agents_dir,
-                            )
-                            proposed.append(
-                                {
-                                    "host_id": target.slug,
-                                    "hostname": facts.hostname or "",
-                                    "ssh_host": target.host,
-                                    "frameworks": [fw.id for fw in matched],
-                                    "error": "",
-                                }
-                            )
-                    intake["proposed_jobs"] = proposed
-                else:
-                    intake["proposed_jobs"] = []
-            else:
-                intake["access_probe"] = {
-                    "services": [],
-                    "any_ok": False,
-                    "skipped": True,
-                }
-                intake["proposed_jobs"] = []
+            # On later resumes access is replayed; do not wipe discovery.
+            if yn == "yes" and not intake.get("discovery_complete"):
+                intake.pop("proposed_jobs", None)
+                intake.pop("host_access_rows", None)
+            self._persist_intake_progress(state, intake, thread_id=thread_hint)
 
-        access_summary = summarize_access_probe(
-            intake.get("access_probe") or {}, language=lang.code
-        )
+        # 3b) Probe endpoints + discover hosts once (skipped on exclude resume).
+        if intake.get("has_access") and not intake.get("discovery_complete"):
+            slug = str(intake.get("client_slug") or "").strip()
+            try:
+                creds = (
+                    read_client_credentials(self.settings.inventory_dir, slug)
+                    if slug
+                    else {}
+                )
+            except (OSError, ValueError, FileNotFoundError):
+                creds = {}
+            if creds:
+                with bind_runtime_credentials(creds):
+                    access = await probe_access_services(effective_settings())
+            else:
+                access = await probe_access_services(effective_settings())
+            intake["access_probe"] = access
+
+            endpoints = (
+                list_client_access_endpoints(self.settings.inventory_dir, slug)
+                if slug
+                else []
+            )
+            try:
+                host_access_rows = await probe_access_endpoints(endpoints)
+            except Exception as exc:  # noqa: BLE001
+                host_access_rows = []
+                intake["access_list_error"] = f"{type(exc).__name__}: {exc}"
+            intake["host_access_rows"] = host_access_rows
+
+            store = self._store_from_state(state)
+            if store is not None:
+                try:
+                    discovered = await self._discover_inventory_hosts(
+                        intake=intake, store=store
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    discovered = []
+                    intake["discovery_error"] = f"{type(exc).__name__}: {exc}"
+                proposed: list[dict[str, Any]] = []
+                for target, facts in discovered:
+                    llm_ids = [
+                        x.strip()
+                        for x in str(
+                            (facts.raw or {}).get("_llm_framework_ids") or ""
+                        ).split(",")
+                        if x.strip()
+                    ]
+                    hl_pkgs = [
+                        x
+                        for x in str(
+                            (facts.raw or {}).get("_llm_highlight_packages") or ""
+                        ).splitlines()
+                        if x.strip()
+                    ]
+                    notes = str(
+                        (facts.raw or {}).get("_llm_software_notes") or ""
+                    ).strip()
+                    if facts.error:
+                        matched_ids: list[str] = []
+                        it_fw = get_framework(
+                            "it_audit", self.settings.agents_dir
+                        )
+                        if it_fw is not None:
+                            matched_ids = [it_fw.id]
+                        for fid in llm_ids:
+                            if fid not in matched_ids and get_framework(
+                                fid, self.settings.agents_dir
+                            ):
+                                matched_ids.append(fid)
+                        proposed.append(
+                            {
+                                "host_id": target.slug,
+                                "hostname": facts.hostname or "",
+                                "ssh_host": target.host,
+                                "frameworks": matched_ids,
+                                "error": facts.error,
+                                "os_id": facts.os_id or "",
+                                "os_pretty_name": facts.os_pretty_name or "",
+                                "binaries": list(facts.binaries or []),
+                                "packages": list(facts.packages or []),
+                                "key_files": list(facts.key_files or []),
+                                "highlight_packages": hl_pkgs,
+                                "software_notes": notes,
+                            }
+                        )
+                    else:
+                        matched = select_frameworks_for_host(
+                            facts,
+                            domains=["it", "cybersecurity"],
+                            agents_dir=self.settings.agents_dir,
+                        )
+                        matched_ids = [fw.id for fw in matched]
+                        for fid in llm_ids:
+                            if fid not in matched_ids and get_framework(
+                                fid, self.settings.agents_dir
+                            ):
+                                matched_ids.append(fid)
+                        proposed.append(
+                            {
+                                "host_id": target.slug,
+                                "hostname": facts.hostname or "",
+                                "ssh_host": target.host,
+                                "frameworks": matched_ids,
+                                "error": "",
+                                "os_id": facts.os_id or "",
+                                "os_pretty_name": facts.os_pretty_name or "",
+                                "binaries": list(facts.binaries or []),
+                                "packages": list(facts.packages or []),
+                                "key_files": list(facts.key_files or []),
+                                "highlight_packages": hl_pkgs,
+                                "software_notes": notes,
+                            }
+                        )
+                    # Prefer live hostname on matching SSH access rows; attach frameworks.
+                    for row in host_access_rows:
+                        if str(row.get("host") or "") != target.host:
+                            continue
+                        if facts.hostname and str(row.get("kind") or "") != "pg":
+                            row["service"] = facts.hostname
+                        row["frameworks"] = list(matched_ids)
+                intake["proposed_jobs"] = proposed
+                intake["host_access_rows"] = host_access_rows
+            else:
+                intake["proposed_jobs"] = []
+            intake["discovery_complete"] = True
+            self._persist_intake_progress(state, intake, thread_id=thread_hint)
+        elif not intake.get("has_access") and not intake.get("discovery_complete"):
+            intake["access_probe"] = {
+                "services": [],
+                "any_ok": False,
+                "skipped": True,
+            }
+            intake["proposed_jobs"] = []
+            intake["host_access_rows"] = []
+            intake["discovery_complete"] = True
+            self._persist_intake_progress(state, intake, thread_id=thread_hint)
+
         proposed_jobs = list(intake.get("proposed_jobs") or [])
         has_plan = bool(
             proposed_jobs
             and any((row.get("frameworks") or []) for row in proposed_jobs)
         )
+        host_access_md = format_host_access_list_markdown(
+            list(intake.get("host_access_rows") or []),
+            language=lang.code,
+            proposed_jobs=proposed_jobs,
+        )
+
+        # 3c) Reachability + applicable frameworks (no full package dump).
+        if intake.get("has_access") and "access_list_acked" not in intake:
+            if lang.code.startswith("ru"):
+                access_list_prompt = (
+                    "## Предварительный опрос (3/4) — доступность и фреймворки\n\n"
+                    f"{host_access_md}\n"
+                    "Ответьте **продолжить** / **ok**, чтобы подтвердить или "
+                    "исключить фреймворки на следующем шаге."
+                )
+            else:
+                access_list_prompt = (
+                    "## Pre-audit intake (3/4) — reachability & frameworks\n\n"
+                    f"{host_access_md}\n"
+                    "Reply **continue** / **ok** to confirm or exclude frameworks "
+                    "in the next step."
+                )
+            while "access_list_acked" not in intake:
+                interrupt(
+                    intake_interrupt_payload(
+                        step="access_list", prompt=access_list_prompt
+                    )
+                )
+                intake["access_list_acked"] = True
+                self._persist_intake_progress(
+                    state, intake, thread_id=thread_hint
+                )
 
         # 4) Scope: confirm / exclude proposed frameworks (or domain fallback).
         if has_plan:
             plan_md = format_proposed_jobs_markdown(proposed_jobs)
-            scope_prompt = f"{prompts.scope}\n\n{access_summary}\n\n{plan_md}"
+            scope_prompt = f"{prompts.scope}\n\n{host_access_md}\n\n{plan_md}"
             while "selected_jobs" not in intake:
                 raw = interrupt(
                     intake_interrupt_payload(step="scope", prompt=scope_prompt)
@@ -849,7 +1045,9 @@ class AuditorGraph:
                         else "\n\n_Не удалось разобрать ответ. Напишите "
                         "**подтвердить** или `exclude <framework>, …`._"
                     )
-                    scope_prompt = f"{prompts.scope}{hint}\n\n{plan_md}"
+                    scope_prompt = (
+                        f"{prompts.scope}{hint}\n\n{host_access_md}\n\n{plan_md}"
+                    )
                     continue
                 if not selected:
                     hint = (
@@ -859,7 +1057,9 @@ class AuditorGraph:
                         else "\n\n_После исключений нечего запускать. "
                         "Подтвердите весь план или исключите меньше._"
                     )
-                    scope_prompt = f"{prompts.scope}{hint}\n\n{plan_md}"
+                    scope_prompt = (
+                        f"{prompts.scope}{hint}\n\n{host_access_md}\n\n{plan_md}"
+                    )
                     continue
                 intake["selected_jobs"] = selected
                 proposed_pairs = {
@@ -884,7 +1084,7 @@ class AuditorGraph:
                 intake["audit_types"] = "both"
                 break
         else:
-            audit_prompt = f"{prompts.audit_type}\n\n{access_summary}"
+            audit_prompt = f"{prompts.audit_type}\n\n{host_access_md}"
             while not intake.get("audit_types"):
                 raw = interrupt(
                     intake_interrupt_payload(
@@ -944,6 +1144,45 @@ class AuditorGraph:
             out["evidence_run_dir"] = str(store.root)
         return out
 
+    async def _collect_host_facts(
+        self,
+        *,
+        store: EvidenceStore | None = None,
+        host_id: str = "",
+        user_request: str = "",
+        extra_binaries: list[str] | None = None,
+    ) -> HostFacts:
+        """One-shot SSH host-facts probe (no LLM tool loop).
+
+        Avoids the UI “stuck on ``df -h``” stall where progress shows the last
+        SSH tool while the model thinks for another round. Uses local-only
+        ``df -hl`` inside :func:`host_facts_probe_script`.
+        """
+        del user_request  # kept for call-site compatibility
+        ssh_host = str(effective_settings(self.settings).ssh_host or "")
+        if store is not None and host_id:
+            store.host_segment = host_id
+
+        script = host_facts_probe_script(extra_binaries=extra_binaries or [])
+        cmd = f"bash -s <<'AUDITOR_EOF'\n{script}\nAUDITOR_EOF"
+        try:
+            raw = str(await ssh_run.ainvoke({"command": cmd}))
+        except Exception as exc:  # noqa: BLE001
+            raw = f"SSH error: {type(exc).__name__}: {exc}"
+        if store is not None:
+            store.write_tool_result(
+                "host_facts",
+                "discover",
+                "ssh_run",
+                {"command": "host_facts_probe_script"},
+                raw,
+            )
+        facts = parse_host_facts_probe(raw, ssh_host=ssh_host)
+        if not facts.hostname and not facts.error and "SSH error" in raw:
+            facts.error = raw.strip().splitlines()[0][:300]
+        facts.raw["host_facts_source"] = "ssh_probe"
+        return facts
+
     async def _collect_host_facts_llm(
         self,
         *,
@@ -951,91 +1190,12 @@ class AuditorGraph:
         host_id: str = "",
         user_request: str = "",
     ) -> HostFacts:
-        """SSH-only tool loop + JSON fill → ``HostFacts`` (parser fallback)."""
-        ssh_host = str(effective_settings(self.settings).ssh_host or "")
-        evidence_fw = "host_facts"
-        evidence_req = "discover"
-        if store is not None and host_id:
-            store.host_segment = host_id
-
-        messages: list = [
-            SystemMessage(content=HOST_FACTS_SYSTEM_PROMPT),
-            HumanMessage(
-                content=HOST_FACTS_PROMPT.format(
-                    user_request=truncate_text(
-                        user_request or "Discover host inventory for audit routing.",
-                        self.settings.max_user_request_chars,
-                        "user_request",
-                    ),
-                    ssh_host=ssh_host or "(unknown)",
-                )
-            ),
-        ]
-        chunks: list[str] = []
-        raw: dict[str, str] = {}
-        max_rounds = self.settings.max_tool_rounds_per_item
-        tool_idx = 0
-
-        for _ in range(max_rounds + 1):
-            rounds = count_tool_rounds(messages)
-            if rounds >= max_rounds:
-                messages.append(HumanMessage(content=HOST_FACTS_FORCE_PROMPT))
-                response = await self.fill_model.ainvoke(messages)
-                chunks.append(str(response.content or ""))
-                break
-
-            response = await self.evidence_model_ssh.ainvoke(messages)
-            messages.append(response)
-            tool_calls = getattr(response, "tool_calls", None) or []
-            if not tool_calls:
-                chunks.append(str(response.content or ""))
-                break
-
-            tool_messages = await self._execute_tool_calls(
-                tool_calls,
-                framework_id=evidence_fw,
-                req_id=evidence_req,
-                store=store,
-                has_cmdb=False,
-            )
-            messages.extend(tool_messages)
-            for tm in tool_messages:
-                tool_idx += 1
-                text = str(tm.content or "")
-                raw[f"tool_{tool_idx}_{tm.name or 'ssh'}"] = text
-                chunks.append(f"[{tm.name}] {text}")
-
-        evidence = "\n---\n".join(c.strip() for c in chunks if c and c.strip())
-        evidence = truncate_text(
-            evidence,
-            self.settings.max_tool_output_chars * 2,
-            "host_facts_evidence",
+        """Legacy LLM SSH tool loop — prefer :meth:`_collect_host_facts`."""
+        return await self._collect_host_facts(
+            store=store,
+            host_id=host_id,
+            user_request=user_request,
         )
-
-        fill_messages = [
-            SystemMessage(content=HOST_FACTS_FILL_SYSTEM_PROMPT),
-            HumanMessage(
-                content=HOST_FACTS_FILL_PROMPT.format(
-                    ssh_host=ssh_host or "(unknown)",
-                    evidence=evidence or "(no evidence collected)",
-                )
-            ),
-        ]
-        try:
-            fill_response = await self.fill_model.ainvoke(fill_messages)
-            payload = _extract_json(str(fill_response.content or ""))
-        except Exception as exc:  # noqa: BLE001
-            payload = {"error": f"{type(exc).__name__}: {exc}"}
-
-        facts = parse_host_facts_json(payload, ssh_host=ssh_host, raw=raw)
-        facts = merge_facts_from_raw(facts, raw)
-        if not facts.ssh_host:
-            facts.ssh_host = ssh_host
-        if not facts.collected_at:
-            from datetime import datetime, timezone
-
-            facts.collected_at = datetime.now(timezone.utc).isoformat()
-        return facts
 
     async def collect_host_facts(self, state: AuditorState) -> dict[str, Any]:
         """Gather hostname/OS/software/disk/RAM/CPU; compare NetBox; refresh INVENTORY.md."""
@@ -1057,7 +1217,7 @@ class AuditorGraph:
 
         if has_access and effective_settings(self.settings).ssh_host:
             store = self._store_from_state(state)
-            facts = await self._collect_host_facts_llm(
+            facts = await self._collect_host_facts(
                 store=store,
                 host_id=host_id,
                 user_request=str(state.get("user_request") or ""),
@@ -2353,16 +2513,21 @@ class AuditorGraph:
         if state.get("host_facts_md"):
             preamble_parts.append(str(state.get("host_facts_md")))
         preamble = ("\n".join(preamble_parts) + "\n\n---\n\n") if preamble_parts else ""
-        final_text = f"{header}{preamble}{summary}\n\n---\n\n{full_report}"
-
+        # Full report stays on disk; chat gets management summary + archive only.
+        disk_report = f"{header}{preamble}{summary}\n\n---\n\n{full_report}"
         if self.settings.compliance_charts_in_report:
             try:
-                final_text = (
-                    f"{final_text.rstrip()}\n"
+                disk_report = (
+                    f"{disk_report.rstrip()}\n"
                     f"{format_compliance_markdown(full_report, language=report_lang)}"
                 )
             except Exception:  # noqa: BLE001
                 pass
+
+        chat_text = (
+            f"{header}"
+            f"## Management summary\n\n{summary.strip()}\n"
+        )
 
         archive_path = ""
         archive_url = ""
@@ -2373,25 +2538,27 @@ class AuditorGraph:
         )
         if store is not None and self.settings.archive_enabled and not in_multi:
             try:
-                store.write_root_report(final_text)
+                store.write_root_report(disk_report)
                 packaged = await package_and_publish_archive(
                     store.root, self.settings
                 )
                 archive_path = str(packaged.get("zip_path") or "")
                 archive_url = str(packaged.get("download_url") or "")
-                final_text = f"{final_text.rstrip()}\n{packaged.get('chat_section') or ''}"
+                chat_text = (
+                    f"{chat_text.rstrip()}\n{packaged.get('chat_section') or ''}"
+                )
             except Exception as exc:  # noqa: BLE001
-                final_text = (
-                    f"{final_text.rstrip()}\n\n---\n\n"
+                chat_text = (
+                    f"{chat_text.rstrip()}\n\n---\n\n"
                     f"(Archive packaging failed: {type(exc).__name__}: {exc})\n"
                 )
         elif store is not None and not in_multi:
-            store.write_root_report(final_text)
+            store.write_root_report(disk_report)
 
-        final_text = f"{final_text.rstrip()}{followup_footer()}"
+        chat_text = f"{chat_text.rstrip()}{followup_footer()}"
 
         return {
-            "report": final_text,
+            "report": chat_text,
             "evidence_run_id": state.get("evidence_run_id") or "",
             "evidence_run_dir": state.get("evidence_run_dir") or (
                 str(store.root) if store else ""
@@ -2402,7 +2569,7 @@ class AuditorGraph:
             "awaiting_hitl": False,
             "messages": [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                AIMessage(content=final_text),
+                AIMessage(content=chat_text),
             ],
         }
 
@@ -2561,7 +2728,8 @@ class AuditorGraph:
         if not isinstance(intake_for_scope, dict):
             intake_for_scope = {}
         with self._target_scope(intake=intake_for_scope, ssh_target=ssh_target):
-            return await _invoke()
+            with bind_host_segment(evidence_host_id):
+                return await _invoke()
 
     async def aresume(self, thread_id: str, user_text: str) -> dict[str, Any]:
         """Resume a graph paused on intake or ``human_gate``."""
@@ -2925,6 +3093,143 @@ class AuditorGraph:
             "awaiting_hitl": False,
         }
 
+    async def _collect_software_inventory(
+        self,
+        *,
+        store: EvidenceStore | None = None,
+        host_id: str = "",
+        extra_binaries: list[str] | None = None,
+    ) -> dict[str, list[str] | str]:
+        """One-shot SSH package inventory (deb/rpm; Windows PowerShell fallback).
+
+        Avoids the multi-round LLM tool loop that stalled intake while the model
+        tried to re-emit hundreds of ``PKG:`` lines after ``dpkg-query``.
+        """
+        if store is not None and host_id:
+            store.host_segment = host_id
+
+        script = audit_software_probe_script(extra_binaries=extra_binaries or [])
+        # Run via bash -s so a multi-line script is one remote command.
+        cmd = f"bash -s <<'AUDITOR_EOF'\n{script}\nAUDITOR_EOF"
+        try:
+            raw = str(await ssh_run.ainvoke({"command": cmd}))
+        except Exception as exc:  # noqa: BLE001
+            raw = f"ssh error: {type(exc).__name__}: {exc}"
+        if store is not None:
+            store.write_tool_result(
+                "host_facts",
+                "packages_full",
+                "ssh_run",
+                {"command": "audit_software_probe_script"},
+                raw,
+            )
+        parsed = parse_audit_software_probe(raw)
+
+        # Windows / non-bash hosts: one PowerShell listing if Linux probe empty.
+        if not parsed.get("packages"):
+            win_cmd = (
+                "powershell -NoProfile -Command "
+                "\"Get-Package -ErrorAction SilentlyContinue | "
+                "ForEach-Object { 'PKG:' + $_.Name }; "
+                "Get-ItemProperty HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\"
+                "Uninstall\\*,"
+                "HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\"
+                "Uninstall\\* -ErrorAction SilentlyContinue | "
+                "ForEach-Object { if ($_.DisplayName) { 'PKG:' + $_.DisplayName } }\""
+            )
+            try:
+                win_raw = str(await ssh_run.ainvoke({"command": win_cmd}))
+            except Exception as exc:  # noqa: BLE001
+                win_raw = f"ssh error: {type(exc).__name__}: {exc}"
+            if store is not None:
+                store.write_tool_result(
+                    "host_facts",
+                    "packages_full",
+                    "ssh_run",
+                    {"command": "windows_package_probe"},
+                    win_raw,
+                )
+            win_parsed = parse_audit_software_probe(win_raw)
+            if win_parsed.get("packages"):
+                parsed = win_parsed
+        return parsed
+
+    async def _llm_route_frameworks_from_software(
+        self,
+        facts: HostFacts,
+    ) -> dict[str, Any]:
+        """Ask the LLM which agents/ frameworks match the full package inventory.
+
+        Args:
+            facts: Host facts including full ``packages`` list from the probe.
+
+        Returns:
+            Dict with ``framework_ids``, ``highlight_packages``,
+            ``highlight_binaries``, ``notes`` (empty lists on failure).
+        """
+        known = {fw.id for fw in list_frameworks(self.settings.agents_dir)}
+        pkg_lines = "\n".join(f"PKG:{p}" for p in (facts.packages or []))
+        bin_lines = "\n".join(f"BIN:{b}" for b in (facts.binaries or []))
+        file_lines = "\n".join(f"FILE:{f}" for f in (facts.key_files or []))
+        inventory = "\n".join(
+            x for x in (bin_lines, file_lines, pkg_lines) if x
+        ) or "(empty inventory)"
+        # Keep routing prompt small — full dumps belong on disk, not in the LLM.
+        inventory = truncate_text(
+            inventory,
+            min(self.settings.max_tool_output_chars * 4, 24_000),
+            "software_inventory",
+        )
+        os_line = (
+            facts.os_pretty_name
+            or f"{facts.os_id} {facts.os_version_id}".strip()
+            or "unknown"
+        )
+        messages = [
+            SystemMessage(content=SOFTWARE_FRAMEWORK_ROUTE_SYSTEM),
+            HumanMessage(
+                content=SOFTWARE_FRAMEWORK_ROUTE_PROMPT.format(
+                    ssh_host=facts.ssh_host or "(unknown)",
+                    os_line=os_line,
+                    framework_catalog=frameworks_detect_catalog_text(
+                        self.settings.agents_dir
+                    ),
+                    software_inventory=inventory,
+                )
+            ),
+        ]
+        try:
+            response = await self.fill_model.ainvoke(messages)
+            payload = _extract_json(str(response.content or "")) or {}
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "framework_ids": [],
+                "highlight_packages": [],
+                "highlight_binaries": [],
+                "notes": f"LLM software routing failed: {type(exc).__name__}: {exc}",
+            }
+        ids = [
+            str(x).strip()
+            for x in (payload.get("framework_ids") or [])
+            if str(x).strip() in known
+        ]
+        highlights = [
+            str(x).strip()
+            for x in (payload.get("highlight_packages") or [])
+            if str(x).strip()
+        ][:40]
+        hl_bins = [
+            str(x).strip()
+            for x in (payload.get("highlight_binaries") or [])
+            if str(x).strip()
+        ][:40]
+        return {
+            "framework_ids": ids,
+            "highlight_packages": highlights,
+            "highlight_binaries": hl_bins,
+            "notes": str(payload.get("notes") or "").strip()[:500],
+        }
+
     async def _discover_inventory_hosts(
         self,
         *,
@@ -2945,15 +3250,67 @@ class AuditorGraph:
                     private_key_path=effective.ssh_private_key_path or "",
                 )
             ]
+        # Extra binaries from framework detect rules (grows when agents/ grow).
+        extra_bins: list[str] = []
+        for fw in list_frameworks(self.settings.agents_dir):
+            extra_bins.extend(list(fw.detect.binaries or ()))
+
         discovered: list[tuple[InventorySshTarget, HostFacts]] = []
         for target in targets:
             with self._target_scope(client_slug=slug, ssh_target=target, intake=intake):
-                facts = await self._collect_host_facts_llm(
+                facts = await self._collect_host_facts(
                     store=store,
                     host_id=target.slug,
                     user_request=str(intake.get("client_name") or ""),
+                    extra_binaries=extra_bins,
                 )
+                # Full package inventory via one-shot SSH probe (not LLM).
+                try:
+                    inv = await self._collect_software_inventory(
+                        store=store,
+                        host_id=target.slug,
+                        extra_binaries=extra_bins,
+                    )
+                    merge_software_probe_into_facts(facts, inv)
+                    facts.raw["software_inventory_source"] = "ssh_probe"
+                    host_base = store.host_root(target.slug)
+                    packages_path = host_base / "packages_full.txt"
+                    packages_path.write_text(
+                        "\n".join(facts.packages)
+                        + ("\n" if facts.packages else ""),
+                        encoding="utf-8",
+                    )
+                    if store is not None:
+                        store.write_tool_result(
+                            "host_facts",
+                            "packages_full",
+                            "llm_software_inventory",
+                            {"path": str(packages_path), "count": len(facts.packages)},
+                            "\n".join(facts.packages[:200])
+                            + (
+                                f"\n… ({len(facts.packages)} total)"
+                                if len(facts.packages) > 200
+                                else ""
+                            ),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    facts.raw["software_inventory_error"] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                route = await self._llm_route_frameworks_from_software(facts)
+                facts.raw["software_route"] = str(route)
             facts.ssh_host = target.host
+            # Stash LLM routing on facts.raw for proposed_jobs builder.
+            facts.raw["_llm_framework_ids"] = ",".join(
+                route.get("framework_ids") or []
+            )
+            facts.raw["_llm_highlight_packages"] = "\n".join(
+                route.get("highlight_packages") or []
+            )
+            facts.raw["_llm_highlight_binaries"] = "\n".join(
+                route.get("highlight_binaries") or []
+            )
+            facts.raw["_llm_software_notes"] = str(route.get("notes") or "")
             host_base = store.host_root(target.slug)
             write_host_facts_json(host_base / "host_facts.json", facts, [])
             md = format_host_facts_markdown(facts, None, language="en")
@@ -3186,6 +3543,75 @@ class AuditorGraph:
             plan_md=plan_md,
         )
 
+    @staticmethod
+    def _host_lock_key_from_target(target: InventorySshTarget | None) -> str:
+        """Return same-host lock key for an inventory SSH target."""
+        if target is None:
+            return "_none_"
+        return target.slug or target.host or "_none_"
+
+    @staticmethod
+    def _host_lock_key_from_job(job: dict[str, Any]) -> str:
+        """Return same-host lock key for a serialized job dict."""
+        host = str(job.get("evidence_host_id") or "").strip()
+        return host or "_none_"
+
+    @staticmethod
+    def _serialize_host_job(
+        target: InventorySshTarget | None,
+        fw: Any,
+    ) -> dict[str, Any]:
+        """Serialize one (host, framework) job for multi-session persistence."""
+        return {
+            "framework_id": fw.id,
+            "framework_title": fw.title,
+            "evidence_host_id": target.slug if target else "",
+            "ssh_host": target.host if target else "",
+            "ssh_port": target.port if target else "",
+            "ssh_user": target.user if target else "",
+            "ssh_password": target.password if target else "",
+            "ssh_key": target.private_key_path if target else "",
+            "ssh_strict": target.strict_host_key if target else "",
+            "ssh_label": target.label if target else "",
+        }
+
+    @staticmethod
+    def _job_dict_key(job: dict[str, Any]) -> str:
+        """Stable key for a serialized host/framework job."""
+        host = str(job.get("evidence_host_id") or "").strip()
+        fw = str(job.get("framework_id") or "")
+        return f"{host}/{fw}" if host else fw
+
+    @staticmethod
+    def _job_dict_thread_id(base_thread: str, job: dict[str, Any]) -> str:
+        """Derive LangGraph thread id for a serialized job."""
+        host = str(job.get("evidence_host_id") or "").strip()
+        fw = str(job.get("framework_id") or "")
+        return f"{base_thread}:{host}:{fw}" if host else f"{base_thread}:{fw}"
+
+    @staticmethod
+    def _target_from_job_dict(job: dict[str, Any]) -> InventorySshTarget | None:
+        """Rebuild ``InventorySshTarget`` from a serialized multi-session job."""
+        host = str(job.get("ssh_host") or "").strip()
+        if not host:
+            return None
+        return InventorySshTarget(
+            host=host,
+            port=str(job.get("ssh_port") or "22"),
+            user=str(job.get("ssh_user") or ""),
+            password=str(job.get("ssh_password") or ""),
+            private_key_path=str(job.get("ssh_key") or ""),
+            strict_host_key=str(job.get("ssh_strict") or ""),
+            label=str(job.get("ssh_label") or ""),
+        )
+
+    @staticmethod
+    def _job_display_title(job: dict[str, Any]) -> str:
+        """Human-readable title for progress / merge sections."""
+        host = str(job.get("ssh_host") or job.get("evidence_host_id") or "").strip()
+        title = str(job.get("framework_title") or job.get("framework_id") or "")
+        return f"{host} — {title}" if host else title
+
     async def _run_framework_jobs(
         self,
         *,
@@ -3196,7 +3622,7 @@ class AuditorGraph:
         jobs: list[tuple[InventorySshTarget | None, HostFacts | None, Any]],
         plan_md: str,
     ) -> dict[str, Any]:
-        """Run ordered (host, framework) audits with HITL sequencing."""
+        """Run (host, framework) audits with bounded cross-host parallelism."""
         if not jobs:
             return {
                 "report": "No frameworks selected.",
@@ -3204,90 +3630,250 @@ class AuditorGraph:
                 "awaiting_hitl": False,
             }
 
-        def _job_key(target: InventorySshTarget | None, fw: Any) -> str:
-            """Stable key for a host/framework job (``host/fw`` or ``fw``)."""
-            if target is None:
-                return fw.id
-            return f"{target.slug}/{fw.id}"
-
-        def _thread_id(target: InventorySshTarget | None, fw: Any) -> str:
-            """Derive LangGraph thread id for one host/framework job."""
-            if target is None:
-                return f"{base_thread}:{fw.id}"
-            return f"{base_thread}:{target.slug}:{fw.id}"
-
-        if len(jobs) == 1:
-            target, _facts, fw = jobs[0]
-            result = await self.arun_one(
-                user_text,
-                framework_id=fw.id,
+        pending = [self._serialize_host_job(target, fw) for target, _facts, fw in jobs]
+        if len(pending) == 1:
+            result = await self._schedule_framework_jobs(
+                user_text=user_text,
+                base_thread=base_thread,
                 run_id=run_id,
-                thread_id=_thread_id(target, fw),
                 intake_state=intake_state,
-                evidence_host_id=target.slug if target else None,
-                ssh_target=target,
+                pending_jobs=pending,
+                completed=[],
+                plan_md=plan_md,
             )
-            if plan_md and not result.get("awaiting_hitl"):
-                result["report"] = f"{plan_md}\n{result.get('report') or ''}"
-            elif plan_md:
-                result["report"] = f"{plan_md}\n{result.get('report') or ''}"
+            if plan_md and result.get("report"):
+                report = str(result.get("report") or "")
+                if not report.startswith(plan_md):
+                    result["report"] = f"{plan_md}\n{report}"
             return result
 
-        # Always sequential for multi-host (SSH env binding is process-global).
-        completed: list[tuple[str, str, str]] = []
-        for index, (target, _facts, fw) in enumerate(jobs):
-            key = _job_key(target, fw)
-            fw_tid = _thread_id(target, fw)
-            remaining = [_job_key(t, f) for t, _, f in jobs[index + 1 :]]
-            self._remember_multi_session(fw_tid, {
+        return await self._schedule_framework_jobs(
+            user_text=user_text,
+            base_thread=base_thread,
+            run_id=run_id,
+            intake_state=intake_state,
+            pending_jobs=pending,
+            completed=[],
+            plan_md=plan_md,
+        )
+
+    async def _schedule_framework_jobs(
+        self,
+        *,
+        user_text: str,
+        base_thread: str,
+        run_id: str,
+        intake_state: dict[str, Any] | None,
+        pending_jobs: list[dict[str, Any]],
+        completed: list[tuple[str, str, str]],
+        plan_md: str,
+    ) -> dict[str, Any]:
+        """Run pending host/framework jobs with host-exclusive concurrency.
+
+        Up to ``max_parallel_host_jobs`` graphs run at once, but at most one job
+        per host slug. On HITL, new starts stop; in-flight jobs drain; the first
+        paused job is returned with remaining work recorded for resume.
+        """
+        pending = list(pending_jobs)
+        if not pending:
+            merged = await self._merge_multi_reports(
+                completed,
+                run_id=run_id,
+                base_thread=base_thread,
+            )
+            if plan_md:
+                merged["report"] = f"{plan_md}\n{merged.get('report') or ''}"
+            return merged
+
+        limit = max(1, int(self.settings.max_parallel_host_jobs))
+        completed_list = list(completed)
+        stop_starting = False
+        in_flight: dict[asyncio.Task[dict[str, Any]], dict[str, Any]] = {}
+        busy_hosts: set[str] = set()
+        hitl_paused: list[dict[str, Any]] = []
+
+        def _session_payload(
+            job: dict[str, Any],
+            *,
+            remaining: list[dict[str, Any]],
+            siblings: list[dict[str, Any]] | None = None,
+            hitl_report: str = "",
+        ) -> dict[str, Any]:
+            """Build multi-session orchestration state for one job thread."""
+            return {
                 "base_thread": base_thread,
                 "run_id": run_id,
                 "user_text": user_text,
-                "framework_id": fw.id,
-                "framework_title": fw.title,
-                "job_key": key,
-                "evidence_host_id": target.slug if target else "",
-                "ssh_target": target,
-                "remaining_jobs": [
-                    {
-                        "framework_id": f.id,
-                        "framework_title": f.title,
-                        "evidence_host_id": t.slug if t else "",
-                        "ssh_host": t.host if t else "",
-                        "ssh_port": t.port if t else "",
-                        "ssh_user": t.user if t else "",
-                        "ssh_password": t.password if t else "",
-                        "ssh_key": t.private_key_path if t else "",
-                        "ssh_strict": t.strict_host_key if t else "",
-                        "ssh_label": t.label if t else "",
-                    }
-                    for t, _, f in jobs[index + 1 :]
+                "framework_id": str(job.get("framework_id") or ""),
+                "framework_title": str(
+                    job.get("framework_title") or job.get("framework_id") or ""
+                ),
+                "job_key": self._job_dict_key(job),
+                "evidence_host_id": str(job.get("evidence_host_id") or ""),
+                "ssh_target": self._target_from_job_dict(job),
+                "remaining_jobs": list(remaining),
+                "remaining": [
+                    str(j.get("framework_id") or "") for j in remaining
                 ],
-                "remaining": remaining,
-                "completed": list(completed),
+                "completed": list(completed_list),
                 "intake_state": intake_state,
                 "plan_md": plan_md,
-            })
-            result = await self.arun_one(
+                "paused_siblings": list(siblings or []),
+                "hitl_report": hitl_report,
+                "parallel_scheduler": True,
+            }
+
+        async def _run_one(job: dict[str, Any]) -> dict[str, Any]:
+            """Invoke a single host/framework audit for the scheduler."""
+            fw_id = str(job.get("framework_id") or "")
+            host_id = str(job.get("evidence_host_id") or "")
+            tid = self._job_dict_thread_id(base_thread, job)
+            return await self.arun_one(
                 user_text,
-                framework_id=fw.id,
+                framework_id=fw_id,
                 run_id=run_id,
-                thread_id=fw_tid,
+                thread_id=tid,
                 intake_state=intake_state,
-                evidence_host_id=target.slug if target else None,
-                ssh_target=target,
+                evidence_host_id=host_id or None,
+                ssh_target=self._target_from_job_dict(job),
             )
-            if result.get("awaiting_hitl"):
-                prefix = self._multi_progress_preamble(completed, key)
-                preamble = f"{plan_md}\n{prefix}" if plan_md else prefix
-                result["report"] = f"{preamble}{result.get('report') or ''}"
-                return result
-            self._forget_multi_session(fw_tid)
-            title = fw.title if target is None else f"{target.host} — {fw.title}"
-            completed.append((key, title, result.get("report") or ""))
+
+        while pending or in_flight:
+            while (
+                not stop_starting
+                and len(in_flight) < limit
+                and pending
+            ):
+                started = False
+                for index, job in enumerate(pending):
+                    host_key = self._host_lock_key_from_job(job)
+                    if host_key in busy_hosts:
+                        continue
+                    pending.pop(index)
+                    tid = self._job_dict_thread_id(base_thread, job)
+                    self._remember_multi_session(
+                        tid,
+                        _session_payload(job, remaining=list(pending)),
+                    )
+                    task = asyncio.create_task(
+                        _run_one(job),
+                        name=f"host-job:{self._job_dict_key(job)}",
+                    )
+                    in_flight[task] = {
+                        "job": job,
+                        "thread_id": tid,
+                        "host_key": host_key,
+                    }
+                    busy_hosts.add(host_key)
+                    started = True
+                    break
+                if not started:
+                    break
+
+            if not in_flight:
+                break
+
+            done, _ = await asyncio.wait(
+                set(in_flight.keys()),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                meta = in_flight.pop(task)
+                busy_hosts.discard(str(meta["host_key"]))
+                job = meta["job"]
+                tid = str(meta["thread_id"])
+                key = self._job_dict_key(job)
+                try:
+                    result = task.result()
+                except Exception as exc:  # noqa: BLE001
+                    result = {
+                        "report": (
+                            f"Host/framework job `{key}` failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                        "awaiting_hitl": False,
+                        "thread_id": tid,
+                        "messages": [
+                            AIMessage(
+                                content=(
+                                    f"Host/framework job `{key}` failed: "
+                                    f"{type(exc).__name__}: {exc}"
+                                )
+                            )
+                        ],
+                    }
+
+                if result.get("awaiting_hitl"):
+                    stop_starting = True
+                    hitl_paused.append(
+                        {
+                            "job": job,
+                            "thread_id": tid,
+                            "result": result,
+                            "job_key": key,
+                        }
+                    )
+                    continue
+
+                self._forget_multi_session(tid)
+                completed_list.append(
+                    (key, self._job_display_title(job), result.get("report") or "")
+                )
+
+        if hitl_paused:
+            siblings = [
+                {
+                    "thread_id": item["thread_id"],
+                    "job_key": item["job_key"],
+                    "framework_id": str(item["job"].get("framework_id") or ""),
+                    "framework_title": str(
+                        item["job"].get("framework_title")
+                        or item["job"].get("framework_id")
+                        or ""
+                    ),
+                    "evidence_host_id": str(
+                        item["job"].get("evidence_host_id") or ""
+                    ),
+                }
+                for item in hitl_paused
+            ]
+            for item in hitl_paused:
+                others = [
+                    s
+                    for s in siblings
+                    if s["thread_id"] != item["thread_id"]
+                ]
+                report = str(item["result"].get("report") or "")
+                self._remember_multi_session(
+                    str(item["thread_id"]),
+                    _session_payload(
+                        item["job"],
+                        remaining=list(pending),
+                        siblings=others,
+                        hitl_report=report,
+                    ),
+                )
+            primary = hitl_paused[0]
+            prefix = self._multi_progress_preamble(
+                completed_list,
+                str(primary["job_key"]),
+                in_flight_keys=[
+                    str(p["job_key"]) for p in hitl_paused[1:]
+                ],
+                queued_keys=[self._job_dict_key(j) for j in pending],
+            )
+            preamble = f"{plan_md}\n{prefix}" if plan_md else prefix
+            result = dict(primary["result"])
+            body = str(result.get("report") or "")
+            report = f"{preamble}{body}" if preamble else body
+            result["report"] = report
+            result["awaiting_hitl"] = True
+            result["thread_id"] = primary["thread_id"]
+            result["messages"] = [AIMessage(content=report)]
+            return result
 
         merged = await self._merge_multi_reports(
-            completed,
+            completed_list,
             run_id=run_id,
             base_thread=base_thread,
         )
@@ -3303,7 +3889,7 @@ class AuditorGraph:
         """Advance a multi-framework queue after one graph thread finishes.
 
         Pops session state for ``thread_id``, records the completed report,
-        and starts the next host/framework job or merges final output.
+        surfaces any sibling HITL pauses, then schedules remaining jobs.
 
         Args:
             thread_id: LangGraph thread that just completed or paused.
@@ -3331,131 +3917,152 @@ class AuditorGraph:
         plan_md = session.get("plan_md") or ""
         intake_state = session.get("intake_state")
 
-        if not remaining_jobs and not remaining:
-            merged = await self._merge_multi_reports(
-                completed,
-                run_id=str(run_id or ""),
-                base_thread=base_thread,
-            )
-            if plan_md:
-                merged["report"] = f"{plan_md}\n{merged.get('report') or ''}"
-            return merged
+        # Surface other HITL-paused siblings before starting new work.
+        paused_siblings = [
+            s
+            for s in list(session.get("paused_siblings") or [])
+            if isinstance(s, dict)
+            and str(s.get("thread_id") or "") in self._multi_sessions
+        ]
+        if paused_siblings:
+            for sib in paused_siblings:
+                sib_tid = str(sib.get("thread_id") or "")
+                sib_sess = self._multi_sessions.get(sib_tid)
+                if not sib_sess:
+                    continue
+                others = [
+                    s
+                    for s in paused_siblings
+                    if str(s.get("thread_id") or "") != sib_tid
+                ]
+                sib_sess = dict(sib_sess)
+                sib_sess["completed"] = list(completed)
+                sib_sess["remaining_jobs"] = list(remaining_jobs)
+                sib_sess["remaining"] = [
+                    str(j.get("framework_id") or "") for j in remaining_jobs
+                ]
+                sib_sess["paused_siblings"] = others
+                self._remember_multi_session(sib_tid, sib_sess)
 
-        def _target_from_job(job: dict[str, Any]) -> InventorySshTarget | None:
-            """Rebuild ``InventorySshTarget`` from serialized multi-session job."""
-            host = str(job.get("ssh_host") or "").strip()
-            if not host:
-                return None
-            return InventorySshTarget(
-                host=host,
-                port=str(job.get("ssh_port") or "22"),
-                user=str(job.get("ssh_user") or ""),
-                password=str(job.get("ssh_password") or ""),
-                private_key_path=str(job.get("ssh_key") or ""),
-                strict_host_key=str(job.get("ssh_strict") or ""),
-                label=str(job.get("ssh_label") or ""),
+            nxt = paused_siblings[0]
+            nxt_tid = str(nxt.get("thread_id") or "")
+            nxt_key = str(nxt.get("job_key") or nxt.get("framework_id") or "")
+            sib_sess = self._multi_sessions.get(nxt_tid) or {}
+            body = str(sib_sess.get("hitl_report") or "")
+            if not body:
+                body = (
+                    f"Continue human review for `{nxt_key}` "
+                    f"(thread `{nxt_tid}`)."
+                )
+            prefix = self._multi_progress_preamble(
+                completed,
+                nxt_key,
+                in_flight_keys=[
+                    str(s.get("job_key") or "")
+                    for s in paused_siblings[1:]
+                ],
+                queued_keys=[self._job_dict_key(j) for j in remaining_jobs],
             )
+            preamble = f"{plan_md}\n{prefix}" if plan_md else prefix
+            report = f"{preamble}{body}" if preamble else body
+            return {
+                "report": report,
+                "awaiting_hitl": True,
+                "thread_id": nxt_tid,
+                "evidence_run_id": str(run_id or ""),
+                "messages": [AIMessage(content=report)],
+            }
 
         if remaining_jobs:
-            nxt_job = remaining_jobs[0]
-            next_id = str(nxt_job.get("framework_id") or "")
-            next_host = str(nxt_job.get("evidence_host_id") or "")
-            next_fw = get_framework(next_id, self.settings.agents_dir)
-            next_title = next_fw.title if next_fw else next_id
-            next_key = f"{next_host}/{next_id}" if next_host else next_id
-            next_tid = (
-                f"{base_thread}:{next_host}:{next_id}"
-                if next_host
-                else f"{base_thread}:{next_id}"
+            return await self._schedule_framework_jobs(
+                user_text=str(user_text),
+                base_thread=str(base_thread),
+                run_id=str(run_id or ""),
+                intake_state=intake_state if isinstance(intake_state, dict) else None,
+                pending_jobs=remaining_jobs,
+                completed=completed,
+                plan_md=str(plan_md or ""),
             )
-            ssh_target = _target_from_job(nxt_job)
-            self._remember_multi_session(next_tid, {
-                "base_thread": base_thread,
-                "run_id": run_id,
-                "user_text": user_text,
-                "framework_id": next_id,
-                "framework_title": next_title,
-                "job_key": next_key,
-                "evidence_host_id": next_host,
-                "ssh_target": ssh_target,
-                "remaining_jobs": remaining_jobs[1:],
-                "remaining": [str(j.get("framework_id") or "") for j in remaining_jobs[1:]],
-                "completed": completed,
-                "intake_state": intake_state,
-                "plan_md": plan_md,
-            })
-            nxt = await self.arun_one(
-                user_text,
-                framework_id=next_id,
-                run_id=run_id,
-                thread_id=next_tid,
-                intake_state=intake_state,
-                evidence_host_id=next_host or None,
-                ssh_target=ssh_target,
-            )
-            if nxt.get("awaiting_hitl"):
-                prefix = self._multi_progress_preamble(completed, next_key)
-                preamble = f"{plan_md}\n{prefix}" if plan_md else prefix
-                nxt["report"] = f"{preamble}{nxt.get('report') or ''}"
-                return nxt
-            return await self._continue_multi_after_resume(next_tid, nxt)
 
-        # Legacy remaining framework ids (no host)
-        next_id = remaining[0]
-        next_fw = get_framework(next_id, self.settings.agents_dir)
-        title = next_fw.title if next_fw else next_id
-        next_tid = f"{base_thread}:{next_id}"
-        self._remember_multi_session(next_tid, {
-            "base_thread": base_thread,
-            "run_id": run_id,
-            "user_text": user_text,
-            "framework_id": next_id,
-            "framework_title": title,
-            "job_key": next_id,
-            "remaining_jobs": [],
-            "remaining": remaining[1:],
-            "completed": completed,
-            "intake_state": intake_state,
-            "plan_md": plan_md,
-        })
-        nxt = await self.arun_one(
-            user_text,
-            framework_id=next_id,
-            run_id=run_id,
-            thread_id=next_tid,
-            intake_state=intake_state,
+        if remaining:
+            # Legacy remaining framework ids (no host) → serialize and schedule.
+            legacy_jobs: list[dict[str, Any]] = []
+            for fw_id in remaining:
+                fw = get_framework(str(fw_id), self.settings.agents_dir)
+                legacy_jobs.append(
+                    {
+                        "framework_id": str(fw_id),
+                        "framework_title": fw.title if fw else str(fw_id),
+                        "evidence_host_id": "",
+                        "ssh_host": "",
+                        "ssh_port": "",
+                        "ssh_user": "",
+                        "ssh_password": "",
+                        "ssh_key": "",
+                        "ssh_strict": "",
+                        "ssh_label": "",
+                    }
+                )
+            return await self._schedule_framework_jobs(
+                user_text=str(user_text),
+                base_thread=str(base_thread),
+                run_id=str(run_id or ""),
+                intake_state=intake_state if isinstance(intake_state, dict) else None,
+                pending_jobs=legacy_jobs,
+                completed=completed,
+                plan_md=str(plan_md or ""),
+            )
+
+        merged = await self._merge_multi_reports(
+            completed,
+            run_id=str(run_id or ""),
+            base_thread=base_thread,
         )
-        if nxt.get("awaiting_hitl"):
-            prefix = self._multi_progress_preamble(completed, next_id)
-            nxt["report"] = f"{prefix}{nxt.get('report') or ''}"
-            return nxt
-        return await self._continue_multi_after_resume(next_tid, nxt)
+        if plan_md:
+            merged["report"] = f"{plan_md}\n{merged.get('report') or ''}"
+        return merged
 
     def _multi_progress_preamble(
         self,
         completed: list[tuple[str, str, str]],
         current_id: str,
+        *,
+        in_flight_keys: list[str] | None = None,
+        queued_keys: list[str] | None = None,
     ) -> str:
         """Build a short markdown header for multi-framework HITL pauses.
 
         Args:
             completed: ``(job_key, title, report)`` tuples finished so far.
             current_id: Job key currently waiting on operator input.
+            in_flight_keys: Other paused / in-flight job keys.
+            queued_keys: Not-yet-started job keys.
 
         Returns:
-            Preamble string, or empty when ``completed`` is empty.
+            Preamble string (may be empty when there is nothing useful to show).
         """
-        if not completed:
+        if not completed and not in_flight_keys and not queued_keys:
             return ""
         lines = [
             "# Multi-framework audit (in progress)",
             "",
-            f"Completed before pause: {', '.join(f'`{c[0]}`' for c in completed)}",
-            f"Now waiting on: `{current_id}`",
-            "",
-            "---",
-            "",
         ]
+        if completed:
+            lines.append(
+                "Completed before pause: "
+                + ", ".join(f"`{c[0]}`" for c in completed)
+            )
+        lines.append(f"Now waiting on: `{current_id}`")
+        if in_flight_keys:
+            lines.append(
+                "Also paused / in flight: "
+                + ", ".join(f"`{k}`" for k in in_flight_keys if k)
+            )
+        if queued_keys:
+            lines.append(
+                "Queued: " + ", ".join(f"`{k}`" for k in queued_keys if k)
+            )
+        lines.extend(["", "---", ""])
         return "\n".join(lines)
 
     async def _merge_multi_reports(
@@ -3489,42 +4096,60 @@ class AuditorGraph:
                     key = path.parent.name
                 disk_reports[key] = path.read_text(encoding="utf-8")
 
-        sections = [
+        full_sections = [
             "# Multi-host / multi-framework audit",
             "",
             "Sections: " + ", ".join(f"`{c[0]}`" for c in completed),
             "",
         ]
+        summary_sections = [
+            "# Management summary",
+            "",
+            "Sections: " + ", ".join(f"`{c[0]}`" for c in completed),
+            "",
+        ]
         if store is not None:
-            sections.extend([f"Evidence directory: `{store.root}`", ""])
+            full_sections.extend([f"Evidence directory: `{store.root}`", ""])
+            summary_sections.extend([f"Evidence directory: `{store.root}`", ""])
         for fw_id, title, report in completed:
-            sections.append(f"## `{fw_id}` — {title}")
-            sections.append("")
             body = (disk_reports.get(fw_id) or report or "(empty report)").strip()
             if "## Audit archive" in body:
                 body = body.split("## Audit archive", 1)[0].rstrip()
-            sections.append(body)
-            sections.append("")
-            sections.append("---")
-            sections.append("")
+            full_sections.append(f"## `{fw_id}` — {title}")
+            full_sections.append("")
+            full_sections.append(body)
+            full_sections.append("")
+            full_sections.append("---")
+            full_sections.append("")
+            mgmt = extract_management_summary(body) or "(no summary)"
+            summary_sections.append(f"## `{fw_id}` — {title}")
+            summary_sections.append("")
+            summary_sections.append(mgmt)
+            summary_sections.append("")
         # Include any extra on-disk framework reports not listed in completed.
         known = {c[0] for c in completed}
         for fw_id, body in disk_reports.items():
             if fw_id in known:
                 continue
-            sections.append(f"## `{fw_id}`")
-            sections.append("")
             if "## Audit archive" in body:
                 body = body.split("## Audit archive", 1)[0].rstrip()
-            sections.append(body.strip())
-            sections.append("")
-            sections.append("---")
-            sections.append("")
-        combined = "\n".join(sections).strip() + "\n"
+            full_sections.append(f"## `{fw_id}`")
+            full_sections.append("")
+            full_sections.append(body.strip())
+            full_sections.append("")
+            full_sections.append("---")
+            full_sections.append("")
+            mgmt = extract_management_summary(body) or "(no summary)"
+            summary_sections.append(f"## `{fw_id}`")
+            summary_sections.append("")
+            summary_sections.append(mgmt)
+            summary_sections.append("")
+        combined_full = "\n".join(full_sections).strip() + "\n"
+        chat_text = "\n".join(summary_sections).strip() + "\n"
         archive_path = ""
         archive_url = ""
         if store is not None:
-            store.write_root_report(combined)
+            store.write_root_report(combined_full)
             if self.settings.archive_enabled:
                 try:
                     packaged = await package_and_publish_archive(
@@ -3532,17 +4157,18 @@ class AuditorGraph:
                     )
                     archive_path = str(packaged.get("zip_path") or "")
                     archive_url = str(packaged.get("download_url") or "")
-                    combined = (
-                        f"{combined.rstrip()}\n{packaged.get('chat_section') or ''}"
+                    chat_text = (
+                        f"{chat_text.rstrip()}\n{packaged.get('chat_section') or ''}"
                     )
                 except Exception as exc:  # noqa: BLE001
-                    combined = (
-                        f"{combined.rstrip()}\n\n---\n\n"
+                    chat_text = (
+                        f"{chat_text.rstrip()}\n\n---\n\n"
                         f"(Archive packaging failed: {type(exc).__name__}: {exc})\n"
                     )
+        chat_text = f"{chat_text.rstrip()}{followup_footer()}"
         return {
-            "report": combined,
-            "messages": [AIMessage(content=combined)],
+            "report": chat_text,
+            "messages": [AIMessage(content=chat_text)],
             "framework_id": ",".join(c[0] for c in completed),
             "evidence_run_id": run_id,
             "evidence_run_dir": str(store.root) if store else "",

@@ -369,6 +369,11 @@ def framework_matches_host(fw: Framework, facts: Any) -> bool:
         for b in (getattr(facts, "binaries", None) or [])
         if str(b).strip()
     }
+    packages = {
+        str(p).strip().lower()
+        for p in (getattr(facts, "packages", None) or [])
+        if str(p).strip()
+    }
     ports: set[int] = set()
     for p in getattr(facts, "listening_ports", None) or []:
         try:
@@ -386,6 +391,13 @@ def framework_matches_host(fw: Framework, facts: Any) -> bool:
         soft = False
         if detect.binaries and any(b.lower() in binaries for b in detect.binaries):
             soft = True
+        # Package names (full dpkg/rpm list) — e.g. mysql-server ↔ binary "mysql".
+        if detect.binaries and packages:
+            for want in detect.binaries:
+                w = want.lower()
+                if any(w == pkg or w in pkg or pkg.startswith(w) for pkg in packages):
+                    soft = True
+                    break
         if detect.ports and any(p in ports for p in detect.ports):
             soft = True
         if not soft:
@@ -459,4 +471,33 @@ def frameworks_catalog_text(agents_dir: Path | str | None = None) -> str:
             f"- `{fw.id}` [{fw.domain}]: {fw.title} — {fw.description} "
             f"(aliases: {alias_preview})"
         )
+    return "\n".join(lines)
+
+
+def frameworks_detect_catalog_text(agents_dir: Path | str | None = None) -> str:
+    """Catalog frameworks with ``detect`` rules for LLM software routing.
+
+    Args:
+        agents_dir: Directory to scan for ``*.md`` frameworks.
+
+    Returns:
+        Multi-line text listing id, domain, and detect signals per framework.
+    """
+    frameworks = list_frameworks(agents_dir)
+    if not frameworks:
+        return "No frameworks in agents/."
+    lines = ["Framework detect rules (from agents/ frontmatter):"]
+    for fw in frameworks:
+        d = fw.detect
+        parts = [f"`{fw.id}` [{fw.domain}]"]
+        if d.always:
+            parts.append("always=true")
+        if d.os_ids:
+            parts.append("os_ids=" + ",".join(d.os_ids))
+        if d.binaries:
+            parts.append("binaries=" + ",".join(d.binaries))
+        if d.ports:
+            parts.append("ports=" + ",".join(str(p) for p in d.ports))
+        parts.append(fw.description or fw.title)
+        lines.append("- " + " | ".join(parts))
     return "\n".join(lines)

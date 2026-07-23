@@ -81,7 +81,11 @@ async def _run_remote(command: str, settings: Settings | None = None) -> str:
     settings = settings or effective_settings()
     try:
         async with asyncssh.connect(**_ssh_kwargs(settings)) as conn:
-            result = await conn.run(command, check=False)
+            result = await conn.run(
+                command,
+                check=False,
+                timeout=float(settings.ssh_command_timeout or 30),
+            )
             stdout = result.stdout or ""
             stderr = result.stderr or ""
             parts = [
@@ -91,6 +95,11 @@ async def _run_remote(command: str, settings: Settings | None = None) -> str:
             if stderr.strip():
                 parts.append(f"stderr:\n{stderr.strip()}")
             return "\n".join(parts)
+    except TimeoutError as exc:
+        return (
+            f"SSH error: TimeoutError: command exceeded "
+            f"{settings.ssh_command_timeout}s ({exc})"
+        )
     except Exception as exc:  # noqa: BLE001 — surface to agent as evidence
         return f"SSH error: {type(exc).__name__}: {exc}"
 

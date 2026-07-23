@@ -36,15 +36,56 @@ import json
 import re
 import shutil
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from uuid import uuid4
 
 from auditor.tools.secrets import redact_secrets
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 _SEQ_FILE = re.compile(r"^(\d{3})_.+\.(txt|json)$", re.IGNORECASE)
+
+# Per-task host slug so parallel host/framework jobs share one EvidenceStore
+# without racing on the mutable ``host_segment`` attribute.
+_active_host_segment: ContextVar[str | None] = ContextVar(
+    "evidence_host_segment", default=None
+)
+
+
+@contextmanager
+def bind_host_segment(host_id: str | None) -> Iterator[str | None]:
+    """Bind the active multi-host evidence slug for the current async context.
+
+    Args:
+        host_id: Host slug (or empty/None to clear for this scope).
+
+    Yields:
+        Normalized host slug, or ``None``.
+    """
+    segment = (host_id or "").strip() or None
+    token = _active_host_segment.set(segment)
+    try:
+        yield segment
+    finally:
+        _active_host_segment.reset(token)
+
+
+def effective_host_segment(store_segment: str | None = None) -> str | None:
+    """Return ContextVar host slug, falling back to a store attribute.
+
+    Args:
+        store_segment: Optional :attr:`EvidenceStore.host_segment` fallback.
+
+    Returns:
+        Active host slug, or ``None``.
+    """
+    bound = _active_host_segment.get()
+    if bound:
+        return bound
+    return (store_segment or "").strip() or None
 
 
 def new_run_id() -> str:
@@ -122,7 +163,10 @@ class EvidenceStore:
         Returns:
             ``<run_root>/<host>/`` when a host is set, else ``<run_root>``.
         """
-        segment = host_id if host_id is not None else self.host_segment
+        if host_id is not None:
+            segment = (host_id or "").strip() or None
+        else:
+            segment = effective_host_segment(self.host_segment)
         if segment:
             path = self.root / _safe_segment(segment, "host")
             path.mkdir(parents=True, exist_ok=True)
@@ -140,12 +184,13 @@ class EvidenceStore:
             Path to framework directory under the run (created on write).
         """
         parts = [p for p in str(framework_id).replace("\\", "/").split("/") if p]
+        active = (
+            (host_id or "").strip() or None
+            if host_id is not None
+            else effective_host_segment(self.host_segment)
+        )
         # Explicit ``host/framework`` key (no active host_segment)
-        if (
-            len(parts) >= 2
-            and host_id is None
-            and not self.host_segment
-        ):
+        if len(parts) >= 2 and host_id is None and not active:
             return self.root.joinpath(*[_safe_segment(p, "x") for p in parts])
         base = self.host_root(host_id)
         fw = parts[-1] if parts else "framework"
@@ -476,7 +521,7 @@ class EvidenceStore:
             Path to the ``.txt`` evidence file.
         """
         req_dir = self.requirement_dir(framework_id, req_id)
-        host = self.host_segment or ""
+        host = effective_host_segment(self.host_segment) or ""
         key = f"{host}/{framework_id}/{req_id}" if host else f"{framework_id}/{req_id}"
         with self._lock:
             self._counters[key] = self._counters.get(key, 0) + 1

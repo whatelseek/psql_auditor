@@ -944,6 +944,7 @@ async def _stream_audit(
             yield _sse_chunk(
                 f"Starting audit for {len(selected)} framework(s): {names} "
                 f"(REQ workers={settings.max_parallel_assessments}; "
+                f"host jobs={settings.max_parallel_host_jobs}; "
                 f"HITL={'on' if settings.hitl_enabled else 'off'})…\n\n",
                 model,
                 completion_id,

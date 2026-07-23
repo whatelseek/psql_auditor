@@ -11,10 +11,81 @@ which tools (SSH, MCP Postgres) are expected to succeed during evidence gatherin
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from auditor.config import Settings
 from auditor.runtime_target import effective_settings
+
+
+async def probe_tcp_endpoint(
+    host: str,
+    port: int | str,
+    *,
+    timeout: float = 3.0,
+) -> bool:
+    """Return True when a TCP connect to ``host:port`` succeeds.
+
+    Args:
+        host: Hostname or IP.
+        port: TCP port.
+        timeout: Connect timeout in seconds.
+
+    Returns:
+        ``True`` when the socket connects; ``False`` on timeout/error.
+    """
+    try:
+        port_i = int(port)
+    except (TypeError, ValueError):
+        return False
+    if not host or port_i <= 0:
+        return False
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port_i),
+            timeout=timeout,
+        )
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def probe_access_endpoints(
+    endpoints: list[dict[str, str]],
+    *,
+    timeout: float = 3.0,
+) -> list[dict[str, str]]:
+    """Probe inventory Access endpoints and return status rows for intake step 3.
+
+    Args:
+        endpoints: Rows from :func:`~auditor.secrets_file.list_client_access_endpoints`.
+        timeout: Per-endpoint TCP connect timeout.
+
+    Returns:
+        Rows with ``service``, ``host``, ``port``, ``status``
+        (``accessible`` / ``not accessible``).
+    """
+    rows: list[dict[str, str]] = []
+    for ep in endpoints:
+        host = str(ep.get("host") or "").strip()
+        port = str(ep.get("port") or "").strip()
+        service = str(ep.get("service") or ep.get("kind") or "service").strip()
+        ok = await probe_tcp_endpoint(host, port, timeout=timeout)
+        rows.append(
+            {
+                "service": service,
+                "host": host,
+                "port": port,
+                "kind": str(ep.get("kind") or "").strip(),
+                "status": "accessible" if ok else "not accessible",
+            }
+        )
+    return rows
 
 
 async def probe_access_services(settings: Settings | None = None) -> dict[str, Any]:

@@ -113,7 +113,7 @@ def parse_yes_no(text: str) -> YesNo:
 
 
 def resolve_yes_no(text: str, llm_payload: dict[str, Any] | None = None) -> YesNo:
-    """Resolve yes/no from LLM JSON payload or regex fallback.
+    """Resolve yes/no — clear regex wins over LLM (avoids yes→no misfires).
 
     Args:
         text: Raw operator reply.
@@ -122,17 +122,16 @@ def resolve_yes_no(text: str, llm_payload: dict[str, Any] | None = None) -> YesN
     Returns:
         ``"yes"``, ``"no"``, or ``"unknown"``.
     """
+    regex = parse_yes_no(text)
+    if regex in {"yes", "no"}:
+        return regex
     if isinstance(llm_payload, dict):
         ans = str(llm_payload.get("answer") or "").strip().lower()
         if ans in {"yes", "y", "true", "1", "да"}:
             return "yes"
         if ans in {"no", "n", "false", "0", "нет", "nay", "nope"}:
             return "no"
-        if ans == "unknown":
-            # Still try regex in case the model hedged on a clear reply
-            regex = parse_yes_no(text)
-            return regex if regex != "unknown" else "unknown"
-    return parse_yes_no(text)
+    return "unknown"
 
 
 def resolve_client_name(
@@ -292,15 +291,16 @@ def prompts_for_language(code: str) -> IntakePrompts:
                 "## Предварительный опрос (3/4)\n\n"
                 "Есть ли у меня **доступ к серверам и сервисам** для проверки?\n\n"
                 "Ответьте **да** или **нет**.\n\n"
-                "При ответе **да** будет выполнен предварительный обход хостов "
-                "и предложен план фреймворков."
+                "При ответе **да** будет показана таблица досягаемости "
+                "(сервис / IP / порт / статус / применимые фреймворки)."
             ),
             scope=(
                 "## Предварительный опрос (4/4)\n\n"
-                "Ниже — предложенный план **хост → фреймворки** после проверки доступа.\n\n"
+                "Ниже — предложенный план **хост → фреймворки**.\n\n"
                 "Ответьте **подтвердить** / **все**, чтобы запустить весь план, "
                 "или перечислите, что **исключить** из области, например:\n"
                 "- `exclude ubuntu_cis_24_l2, postgres_cis`\n"
+                "- `exclude it_audit`\n"
                 "- `exclude 10.0.0.1/ubuntu_cis_24_l2`\n"
             ),
             audit_type=(
@@ -327,15 +327,16 @@ def prompts_for_language(code: str) -> IntakePrompts:
             "## Pre-audit intake (3/4)\n\n"
             "Do I have **access to servers and services** to probe?\n\n"
             "Reply **yes** or **no**.\n\n"
-            "If **yes**, I will pre-scan inventory hosts and propose frameworks "
-            "per host."
+            "If **yes**, I will list host/service reachability "
+            "(service / IP / port / status / applicable frameworks)."
         ),
         scope=(
             "## Pre-audit intake (4/4)\n\n"
-            "Below is the proposed **host → frameworks** plan after the access check.\n\n"
+            "Below is the proposed **host → frameworks** plan.\n\n"
             "Reply **confirm** / **all** / **run all** to accept the full plan, "
             "or list what to **exclude** from scope, e.g.:\n"
             "- `exclude ubuntu_cis_24_l2, postgres_cis`\n"
+            "- `exclude it_audit`\n"
             "- `exclude 10.0.0.1/ubuntu_cis_24_l2`\n"
         ),
         audit_type=(
@@ -348,6 +349,146 @@ def prompts_for_language(code: str) -> IntakePrompts:
             "Reply: `IT`, `Cybersecurity`, or `both`."
         ),
     )
+
+
+def format_discovered_software_markdown(
+    proposed_jobs: list[dict[str, Any]],
+    *,
+    language: str = "en",
+) -> str:
+    """Render prerun software inventory used to choose audit frameworks.
+
+    Args:
+        proposed_jobs: Host rows that may include ``binaries``, ``packages``,
+            ``key_files``, ``os_pretty_name``.
+        language: ``en`` or Russian when starting with ``ru``.
+
+    Returns:
+        Markdown sections per host, or empty-state text.
+    """
+    ru = (language or "en").startswith("ru")
+    if not proposed_jobs:
+        return (
+            "_Нет данных о ПО для выбора фреймворков._"
+            if ru
+            else "_No software inventory for framework selection._"
+        )
+    title = (
+        "### Установленное ПО / файлы (для выбора фреймворка)"
+        if ru
+        else "### Installed packages / files (for framework selection)"
+    )
+    lines = [title, ""]
+    for row in proposed_jobs:
+        host = str(row.get("ssh_host") or row.get("host_id") or "—")
+        hn = str(row.get("hostname") or "").strip()
+        head = f"**`{host}`**" + (f" ({hn})" if hn else "")
+        lines.append(head)
+        os_name = str(row.get("os_pretty_name") or row.get("os_id") or "").strip()
+        if os_name:
+            lines.append(f"- **OS:** {os_name}")
+        bins = [str(x) for x in (row.get("binaries") or []) if str(x).strip()]
+        pkgs = [str(x) for x in (row.get("packages") or []) if str(x).strip()]
+        highlights = [
+            str(x) for x in (row.get("highlight_packages") or []) if str(x).strip()
+        ]
+        files = [str(x) for x in (row.get("key_files") or []) if str(x).strip()]
+        notes = str(row.get("software_notes") or "").strip()
+        lines.append(
+            "- **Binaries:** " + (", ".join(f"`{b}`" for b in bins) if bins else "—")
+        )
+        if highlights:
+            lines.append(
+                "- **Packages (LLM highlights for frameworks):** "
+                + ", ".join(f"`{p}`" for p in highlights)
+            )
+        if pkgs:
+            if len(pkgs) <= 60:
+                lines.append(
+                    "- **Packages (full):** " + ", ".join(f"`{p}`" for p in pkgs)
+                )
+            else:
+                preview = ", ".join(f"`{p}`" for p in pkgs[:40])
+                lines.append(
+                    f"- **Packages (full list: {len(pkgs)}):** {preview}, …"
+                )
+        else:
+            lines.append("- **Packages:** —")
+        lines.append(
+            "- **Files / paths:** "
+            + (", ".join(f"`{f}`" for f in files) if files else "—")
+        )
+        if notes:
+            lines.append(f"- **Routing notes:** {notes[:300]}")
+        err = str(row.get("error") or "").strip()
+        if err:
+            lines.append(f"- **Probe error:** {err[:160]}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def format_host_access_list_markdown(
+    rows: list[dict[str, Any]],
+    *,
+    language: str = "en",
+    proposed_jobs: list[dict[str, Any]] | None = None,
+) -> str:
+    """Render intake step-3 table: service / IP / port / status / frameworks.
+
+    Args:
+        rows: Dicts with ``service`` (hostname or Access label), ``host``,
+            ``port``, ``status``, optional ``frameworks``.
+        language: ``en`` or Russian when starting with ``ru``.
+        proposed_jobs: Optional host→framework rows; matched to access rows by IP.
+
+    Returns:
+        Markdown table, or a short empty-state line.
+    """
+    ru = (language or "en").startswith("ru")
+    if not rows:
+        return (
+            "_Нет строк доступа в inventory._"
+            if ru
+            else "_No access endpoints found in inventory._"
+        )
+    fw_by_host: dict[str, list[str]] = {}
+    for job in proposed_jobs or []:
+        host = str(job.get("ssh_host") or "").strip()
+        if not host:
+            continue
+        fws = [str(x).strip() for x in (job.get("frameworks") or []) if str(x).strip()]
+        if fws:
+            fw_by_host[host] = fws
+    if ru:
+        lines = [
+            "### Доступность хостов / сервисов",
+            "",
+            "| Hostname / Service | IP | Порт | Статус | Применимые фреймворки |",
+            "|--------------------|----|------|--------|------------------------|",
+        ]
+    else:
+        lines = [
+            "### Host / service reachability",
+            "",
+            "| Hostname / Service | IP | Port | Status | Applicable frameworks |",
+            "|--------------------|----|------|--------|-----------------------|",
+        ]
+    for row in rows:
+        service = str(row.get("service") or row.get("hostname") or "—").strip() or "—"
+        ip = str(row.get("host") or row.get("ip") or "—").strip() or "—"
+        port = str(row.get("port") or "—").strip() or "—"
+        status = str(row.get("status") or "—").strip() or "—"
+        row_fws = [str(x).strip() for x in (row.get("frameworks") or []) if str(x).strip()]
+        fws = row_fws or fw_by_host.get(ip) or []
+        # PG endpoint: prefer DB frameworks when present on that host.
+        if str(row.get("kind") or "").lower() == "pg" and fws:
+            dbish = [f for f in fws if "postgres" in f.lower() or "pgsql" in f.lower()]
+            if dbish:
+                fws = dbish
+        fw_txt = ", ".join(f"`{x}`" for x in fws) if fws else "—"
+        lines.append(f"| {service} | `{ip}` | `{port}` | {status} | {fw_txt} |")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def format_proposed_jobs_markdown(proposed_jobs: list[dict[str, Any]]) -> str:
@@ -371,6 +512,48 @@ def format_proposed_jobs_markdown(proposed_jobs: list[dict[str, Any]]) -> str:
         lines.append(f"| `{host}` | {hn} | {fw_txt} |")
     lines.append("")
     return "\n".join(lines)
+
+
+def extract_management_summary(report_text: str) -> str:
+    """Pull the executive/management summary from a full framework report.
+
+    Framework reports are stored as ``summary + --- + full checklist``.
+    Chat delivery should use the summary only.
+
+    Args:
+        report_text: Full or partial report Markdown.
+
+    Returns:
+        Summary section, or a truncated fallback when no separator exists.
+    """
+    text = (report_text or "").strip()
+    if not text:
+        return ""
+    # Drop archive / follow-up appendices if present.
+    for marker in ("\n## Audit archive", "\n---\n\n**Next steps"):
+        if marker in text:
+            text = text.split(marker, 1)[0].rstrip()
+    # Primary layout from finalize: summary before the first horizontal rule.
+    if "\n---\n" in text:
+        head, tail = text.split("\n---\n", 1)
+        head = head.strip()
+        # Prefer head when it looks like a short summary (not the checklist table).
+        if head and "| REQ-" not in head and "### REQ-" not in head:
+            return head
+        text = tail.strip() or head
+    # Fallback: keep a short lead-in without the summary table dump.
+    lines = text.splitlines()
+    clipped: list[str] = []
+    for line in lines:
+        if line.strip().startswith("## ") and "summary" not in line.lower():
+            if clipped:
+                break
+        if "| REQ-" in line or line.strip().startswith("### REQ-"):
+            break
+        clipped.append(line)
+        if len(clipped) >= 40:
+            break
+    return "\n".join(clipped).strip() or text[:2000]
 
 
 def is_scope_confirm(text: str) -> bool:

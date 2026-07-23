@@ -47,7 +47,7 @@ services:
       MEMORY_ENABLED: ${MEMORY_ENABLED:-true}
       MEMORY_LEARN: ${MEMORY_LEARN:-true}
       EVIDENCE_DIR: /app/artifacts
-      HITL_ENABLED: ${HITL_ENABLED:-true}
+      HITL_ENABLED: ${HITL_ENABLED:-false}
       ARCHIVE_ENABLED: ${ARCHIVE_ENABLED:-true}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8001}
       OPEN_WEBUI_URL: ${OPEN_WEBUI_URL:-http://open-webui:8080}

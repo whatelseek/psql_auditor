@@ -2,11 +2,19 @@
 
 from pathlib import Path
 
+from auditor.host_facts import (
+    HostFacts,
+    merge_software_probe_into_facts,
+    parse_audit_software_probe,
+)
 from auditor.intake import (
     apply_scope_exclusions,
     client_slug,
     domains_for_audit_type,
     extract_intake_thread_id,
+    extract_management_summary,
+    format_discovered_software_markdown,
+    format_host_access_list_markdown,
     format_proposed_jobs_markdown,
     frameworks_for_audit_type,
     is_scope_confirm,
@@ -31,6 +39,9 @@ def test_parse_yes_no():
 
 
 def test_resolve_yes_no_llm_payload():
+    # Clear regex wins even if LLM disagrees (prevents yes→no misfires).
+    assert resolve_yes_no("yes", {"answer": "no"}) == "yes"
+    assert resolve_yes_no("no", {"answer": "yes"}) == "no"
     # Typo that regex rejects — LLM JSON wins
     assert resolve_yes_no("nayn", {"answer": "no"}) == "no"
     assert resolve_yes_no("yep!", {"answer": "yes"}) == "yes"
@@ -151,3 +162,114 @@ def test_scope_confirm_and_exclusions():
 
     assert resolve_scope_decision("maybe later", proposed) is None
     assert "Proposed host" in format_proposed_jobs_markdown(proposed)
+
+
+def test_parse_and_merge_software_probe():
+    out = parse_audit_software_probe(
+        "\n".join(
+            [
+                "exit_code=0",
+                "BIN:psql",
+                "BIN:postgres",
+                "PKG:postgresql-16",
+                "PKG:mysql-server",
+                "PKG:bash",
+                "FILE:/etc/postgresql",
+                "OSID:ubuntu",
+                "OSPRETTY:Ubuntu 24.04.2 LTS",
+            ]
+        )
+    )
+    assert out["binaries"] == ["psql", "postgres"]
+    assert "postgresql-16" in out["packages"]
+    assert "mysql-server" in out["packages"]
+    assert "bash" in out["packages"]
+    assert "/etc/postgresql" in out["key_files"]
+    facts = HostFacts()
+    merge_software_probe_into_facts(facts, out)
+    assert "psql" in facts.binaries
+    assert "mysql-server" in facts.packages
+    assert facts.os_id == "ubuntu"
+
+
+def test_framework_matches_host_via_package_name():
+    from auditor.frameworks import Framework, FrameworkDetect, framework_matches_host
+
+    fw = Framework(
+        id="mysql_cis",
+        title="MySQL",
+        path=__file__,  # unused
+        description="test",
+        domain="cybersecurity",
+        detect=FrameworkDetect(binaries=("mysql", "mysqld")),
+    )
+    facts = HostFacts(packages=["mysql-server", "bash"])
+    assert framework_matches_host(fw, facts)
+
+
+def test_format_discovered_software_markdown():
+    md = format_discovered_software_markdown(
+        [
+            {
+                "ssh_host": "10.0.0.1",
+                "hostname": "db-01",
+                "os_pretty_name": "Ubuntu 24.04",
+                "binaries": ["psql", "postgres"],
+                "packages": ["postgresql-16"],
+                "key_files": ["/etc/postgresql"],
+            }
+        ]
+    )
+    assert "framework selection" in md.lower() or "фреймворк" in md.lower()
+    assert "postgresql-16" in md
+    assert "/etc/postgresql" in md
+    assert "psql" in md
+
+
+def test_format_host_access_list_markdown():
+    md = format_host_access_list_markdown(
+        [
+            {
+                "service": "db-01",
+                "host": "10.0.0.1",
+                "port": "22",
+                "status": "accessible",
+            },
+            {
+                "service": "PostgreSQL",
+                "host": "10.0.0.1",
+                "port": "5432",
+                "kind": "pg",
+                "status": "not accessible",
+            },
+        ],
+        proposed_jobs=[
+            {
+                "ssh_host": "10.0.0.1",
+                "frameworks": ["it_audit", "ubuntu_cis_24_l2", "postgres_cis"],
+            }
+        ],
+    )
+    assert "Hostname / Service" in md
+    assert "Applicable frameworks" in md
+    assert "db-01" in md
+    assert "5432" in md
+    assert "not accessible" in md
+    assert "ubuntu_cis_24_l2" in md
+    assert "postgres_cis" in md
+    assert "Frameworks" not in md
+
+
+def test_extract_management_summary():
+    report = (
+        "Client: **Acme** | Framework: `ubuntu_cis`\n\n"
+        "## Management summary\n\n"
+        "Key risks fixed on SSH.\n\n"
+        "---\n\n"
+        "| REQ-001 | fail |\n"
+        "### REQ-001\n\n"
+        "long evidence\n"
+    )
+    summary = extract_management_summary(report)
+    assert "Key risks" in summary or "Management summary" in summary
+    assert "REQ-001" not in summary or summary.index("Management") < summary.find("REQ")
