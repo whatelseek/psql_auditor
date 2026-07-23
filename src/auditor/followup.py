@@ -48,7 +48,9 @@ from auditor.secrets_file import (
     InventorySshTarget,
     bind_ssh_target,
     list_client_ssh_targets,
+    read_client_credentials,
 )
+from auditor.runtime_target import bind_runtime_credentials
 from auditor.results_store import record_results_safe
 from auditor.state import Finding, render_report
 
@@ -124,12 +126,13 @@ def _ssh_bind_for_target(
     settings: Any,
     target: ResolvedTarget,
 ) -> Iterator[InventorySshTarget | None]:
-    """Temporarily bind process SSH env to the evidence host for tool calls.
+    """Temporarily bind run-scoped SSH/PG credentials for tool calls.
 
     Resolves the inventory SSH target for ``target.host_id`` and enters
-    :func:`~auditor.secrets_file.bind_ssh_target` for the duration of the
-    context. When ``host_id`` is empty (single-host runs such as ``it_audit``),
-    falls back to the first SSH row in the client inventory.
+    :func:`~auditor.secrets_file.bind_ssh_target` (ContextVar) for the duration
+    of the context. Also binds client inventory PostgreSQL credentials when the
+    client slug is known. When ``host_id`` is empty (single-host runs such as
+    ``it_audit``), falls back to the first SSH row in the client inventory.
 
     Args:
         settings: Auditor settings (``inventory_dir``).
@@ -138,6 +141,8 @@ def _ssh_bind_for_target(
     Yields:
         Bound :class:`~auditor.secrets_file.InventorySshTarget`, or ``None``.
     """
+    from contextlib import ExitStack
+
     ssh = _resolve_ssh_target(
         inventory_dir=settings.inventory_dir,
         client_run_id=target.run_id,
@@ -149,11 +154,19 @@ def _ssh_bind_for_target(
         except (OSError, ValueError, FileNotFoundError):
             targets = []
         ssh = targets[0] if targets else None
-    if ssh is None:
-        yield None
-        return
-    with bind_ssh_target(ssh):
-        yield ssh
+
+    with ExitStack() as stack:
+        try:
+            creds = read_client_credentials(settings.inventory_dir, target.run_id)
+        except (OSError, ValueError, FileNotFoundError):
+            creds = {}
+        if creds:
+            stack.enter_context(bind_runtime_credentials(creds))
+        if ssh is not None:
+            stack.enter_context(bind_ssh_target(ssh))
+            yield ssh
+        else:
+            yield None
 
 
 async def run_revise_req(

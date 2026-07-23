@@ -29,7 +29,8 @@ from typing import Any
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from auditor.config import Settings, get_settings
+from auditor.config import Settings
+from auditor.runtime_target import effective_settings, pg_fingerprint
 from auditor.tools.postgres import is_readonly_sql
 
 _DEFAULT_COMMAND = "npx"
@@ -74,13 +75,14 @@ def postgres_mcp_connection(settings: Settings | None = None) -> dict[str, Any]:
     """Build a ``MultiServerMCPClient`` stdio connection dict for Postgres MCP.
 
     Args:
-        settings: Application settings; defaults to ``get_settings()``.
+        settings: Application settings; defaults to
+            :func:`~auditor.runtime_target.effective_settings`.
 
     Returns:
         Connection spec with ``transport``, ``command``, ``args``, and minimal
         ``env`` (Postgres vars from ``settings.pg_env_for_mcp()``).
     """
-    settings = settings or get_settings()
+    settings = settings or effective_settings()
     command = settings.mcp_postgres_command or _DEFAULT_COMMAND
     args = shlex.split(settings.mcp_postgres_args or _DEFAULT_ARGS)
     env: dict[str, str] = {
@@ -139,6 +141,7 @@ class PostgresMcpSession:
         self._stack: AsyncExitStack | None = None
         self._client: MultiServerMCPClient | None = None
         self._session: Any = None
+        self._pg_fingerprint: str | None = None
 
     def _build_client(self, settings: Settings) -> MultiServerMCPClient:
         """Create a ``MultiServerMCPClient`` for the configured Postgres MCP server.
@@ -157,12 +160,19 @@ class PostgresMcpSession:
     async def _ensure_session(self, settings: Settings) -> Any:
         """Start LangChain MCP client and enter a persistent session if needed.
 
+        When the run-scoped PostgreSQL fingerprint differs from the session's
+        last bind, the stdio subprocess is recycled so concurrent clients do
+        not share one DB connection.
+
         Args:
             settings: Used to spawn ``npx mcp-postgres-server`` (or override).
 
         Returns:
             Active MCP session handle for ``call_tool``.
         """
+        fingerprint = pg_fingerprint(settings)
+        if self._session is not None and self._pg_fingerprint != fingerprint:
+            await self._reset_unlocked()
         if self._session is not None:
             return self._session
 
@@ -174,6 +184,7 @@ class PostgresMcpSession:
         self._client = client
         self._stack = stack
         self._session = session
+        self._pg_fingerprint = fingerprint
         return session
 
     async def call_tool(
@@ -195,7 +206,7 @@ class PostgresMcpSession:
         Returns:
             Formatted result text or ``MCP error: …``.
         """
-        settings = settings or get_settings()
+        settings = settings or effective_settings()
         arguments = arguments or {}
         if tool_name in _BLOCKED_REMOTE_TOOLS:
             return (
@@ -221,7 +232,7 @@ class PostgresMcpSession:
         Returns:
             Bullet-list of tool names and descriptions, or error string.
         """
-        settings = settings or get_settings()
+        settings = settings or effective_settings()
         async with self._lock:
             try:
                 session = await self._ensure_session(settings)
@@ -242,6 +253,7 @@ class PostgresMcpSession:
         self._stack = None
         self._session = None
         self._client = None
+        self._pg_fingerprint = None
 
     async def close(self) -> None:
         """Shut down the MCP subprocess (tests / graceful shutdown)."""
@@ -257,7 +269,7 @@ class PostgresMcpSession:
         Returns:
             Success or failure message for the operator / graph reconnect node.
         """
-        settings = settings or get_settings()
+        settings = settings or effective_settings()
         async with self._lock:
             await self._reset_unlocked()
             try:
@@ -344,7 +356,7 @@ class PostgresMcpPool:
         Returns:
             Formatted MCP result from the borrowed worker.
         """
-        settings = settings or get_settings()
+        settings = settings or effective_settings()
         await self._ensure(settings)
         assert self._queue is not None
         session = await self._queue.get()
@@ -355,7 +367,7 @@ class PostgresMcpPool:
 
     async def list_tools(self, settings: Settings | None = None) -> str:
         """List tools via one pooled session (same as single-session ``list_tools``)."""
-        settings = settings or get_settings()
+        settings = settings or effective_settings()
         await self._ensure(settings)
         assert self._queue is not None
         session = await self._queue.get()
@@ -383,7 +395,7 @@ class PostgresMcpPool:
         Returns:
             Aggregate success message or first failure summary.
         """
-        settings = settings or get_settings()
+        settings = settings or effective_settings()
         await self._ensure(settings)
         results = [await session.reconnect(settings) for session in self._sessions]
         failures = [r for r in results if "failed" in r.lower()]
@@ -528,7 +540,7 @@ async def mcp_connect_db(
 
     Credentials are never echoed back; evidence logs redact ``password``.
     """
-    settings = get_settings()
+    settings = effective_settings()
     args = {
         "host": host or settings.pg_host or "",
         "port": port or settings.pg_port,
