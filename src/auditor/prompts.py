@@ -401,22 +401,28 @@ INTAKE_INTERPRET_SCOPE_SYSTEM = """You map an operator reply about an audit host
 Output ONLY JSON in one of these shapes:
 {{"action":"confirm"}}
 {{"action":"exclude","exclude_frameworks":["ubuntu_cis_24_l2"],"exclude_pairs":["10.0.0.1/postgres_cis"]}}
+{{"action":"include","include_frameworks":["postgres_cis"],"include_pairs":["10.0.0.1/ubuntu_cis_24_l2"]}}
 {{"action":"unknown"}}
 
 Rules:
-- Free-form is OK. Infer confirm vs exclude from meaning, not only keywords.
-- confirm / all / run all / ok / да / все / подтвердить / "looks good run it" → confirm
-- exclude / skip / remove / исключи / убери / "skip ubuntu on .78" → exclude with ids from the plan
-- host/framework pairs go in exclude_pairs; bare framework ids in exclude_frameworks
+- Free-form is OK. Infer confirm / exclude / include from meaning, not only keywords.
+- confirm / all / run all / ok / да / все / подтвердить / "looks good run it"
+  / "да, запускай этот план" → confirm (accept the CURRENT plan as shown)
+- exclude / skip / remove / исключи / убери / "skip ubuntu on .78" → exclude
+  with ids from the CURRENT plan (remove those; keep the rest)
+- include / only / keep / только / оставь / "only postgres" → include
+  with ids from the CURRENT plan (keep ONLY those; drop the rest)
+- host/framework pairs go in exclude_pairs / include_pairs; bare framework ids
+  in exclude_frameworks / include_frameworks
 - Only use framework ids / hosts that appear in the proposed plan
 - unknown if off-topic or unclear
 """
 
-INTAKE_INTERPRET_SCOPE_PROMPT = """Proposed plan:
+INTAKE_INTERPRET_SCOPE_PROMPT = """Current proposed plan:
 {plan}
 
 Operator reply:
 {reply}
 
-Return JSON with action confirm|exclude|unknown.
+Return JSON with action confirm|exclude|include|unknown.
 """

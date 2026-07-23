@@ -107,6 +107,37 @@ def test_resolve_scope_llm_only():
     assert trimmed is not None
     assert "ubuntu_cis_24_l2" not in trimmed[0]["frameworks"]
     assert "postgres_cis" in trimmed[0]["frameworks"]
+    only = resolve_scope_decision(
+        "only postgres",
+        proposed,
+        {
+            "action": "include",
+            "include_frameworks": ["postgres_cis"],
+            "include_pairs": [],
+        },
+    )
+    assert only is not None
+    assert only[0]["frameworks"] == ["postgres_cis"]
+    only_pair = resolve_scope_decision(
+        "only ubuntu on this host",
+        proposed,
+        {
+            "action": "include",
+            "include_frameworks": [],
+            "include_pairs": ["10.0.0.1/ubuntu_cis_24_l2"],
+        },
+    )
+    assert only_pair is not None
+    assert only_pair[0]["frameworks"] == ["ubuntu_cis_24_l2"]
+    # Empty include lists → re-prompt
+    assert (
+        resolve_scope_decision(
+            "only something",
+            proposed,
+            {"action": "include", "include_frameworks": [], "include_pairs": []},
+        )
+        is None
+    )
     # No regex fallback — bare confirm / missing payload → re-prompt
     assert resolve_scope_decision("confirm", proposed, {"action": "unknown"}) is None
     assert resolve_scope_decision("confirm", proposed, None) is None
@@ -189,6 +220,19 @@ def test_scope_exclusions_via_llm_resolve():
         set(),
     )
     assert emptied == []
+
+    only = resolve_scope_decision(
+        "only it_audit and postgres",
+        proposed,
+        {
+            "action": "include",
+            "include_frameworks": ["it_audit", "postgres_cis"],
+            "include_pairs": [],
+        },
+    )
+    assert only is not None
+    assert only[0]["frameworks"] == ["it_audit", "postgres_cis"]
+    assert only[1]["frameworks"] == ["it_audit"]
 
     assert resolve_scope_decision("maybe later", proposed) is None
     assert "Proposed host" in format_proposed_jobs_markdown(proposed)

@@ -1035,9 +1035,11 @@ class AuditorGraph:
                     state, intake, thread_id=thread_hint
                 )
 
-        # 3) Scope: подтвердить / исключить предложенные фреймворки (или fallback по домену).
+        # 3) Scope: confirm / exclude / include; after trim, re-show plan and require confirm.
         if has_plan:
-            plan_md = format_proposed_jobs_markdown(proposed_jobs)
+            working_jobs = [dict(r) for r in proposed_jobs]
+            original_jobs = [dict(r) for r in proposed_jobs]
+            plan_md = format_proposed_jobs_markdown(working_jobs)
             scope_prompt = f"{prompts.scope}\n\n{host_access_md}\n\n{plan_md}"
             while "selected_jobs" not in intake:
                 raw = interrupt(
@@ -1050,16 +1052,17 @@ class AuditorGraph:
                         plan=plan_md,
                     ),
                 )
+                action = str((payload or {}).get("action") or "").strip().lower()
                 selected = resolve_scope_decision(
-                    str(raw or ""), proposed_jobs, payload
+                    str(raw or ""), working_jobs, payload
                 )
                 if selected is None:
                     hint = (
-                        "\n\n_Could not parse that. Reply **confirm** or "
-                        "`exclude <framework>, …`._"
+                        "\n\n_Could not parse that. Reply **confirm**, or describe "
+                        "what to **exclude** / keep **only**._"
                         if lang.code == "en"
                         else "\n\n_Не удалось разобрать ответ. Напишите "
-                        "**подтвердить** или `exclude <framework>, …`._"
+                        "**подтвердить**, или что **исключить** / оставить **только**._"
                     )
                     scope_prompt = (
                         f"{prompts.scope}{hint}\n\n{host_access_md}\n\n{plan_md}"
@@ -1067,38 +1070,62 @@ class AuditorGraph:
                     continue
                 if not selected:
                     hint = (
-                        "\n\n_Nothing left to run after exclusions. "
-                        "Confirm the full plan or exclude fewer items._"
+                        "\n\n_Nothing left to run after that change. "
+                        "Confirm the previous plan or exclude/include fewer items._"
                         if lang.code == "en"
-                        else "\n\n_После исключений нечего запускать. "
-                        "Подтвердите весь план или исключите меньше._"
+                        else "\n\n_После изменения нечего запускать. "
+                        "Подтвердите предыдущий план или измените меньше._"
                     )
                     scope_prompt = (
                         f"{prompts.scope}{hint}\n\n{host_access_md}\n\n{plan_md}"
                     )
                     continue
-                intake["selected_jobs"] = selected
-                proposed_pairs = {
-                    (str(r.get("host_id") or ""), str(fw))
-                    for r in proposed_jobs
-                    for fw in (r.get("frameworks") or [])
-                }
-                selected_pairs = {
-                    (str(r.get("host_id") or ""), str(fw))
-                    for r in selected
-                    for fw in (r.get("frameworks") or [])
-                }
-                intake["excluded_pairs"] = sorted(
-                    f"{h}/{fw}" for h, fw in (proposed_pairs - selected_pairs)
-                )
-                intake["excluded_frameworks"] = sorted(
-                    {
-                        fw
-                        for _h, fw in (proposed_pairs - selected_pairs)
+
+                if action in {"confirm", "all", "run_all", "accept"}:
+                    intake["selected_jobs"] = selected
+                    proposed_pairs = {
+                        (str(r.get("host_id") or ""), str(fw))
+                        for r in original_jobs
+                        for fw in (r.get("frameworks") or [])
                     }
+                    selected_pairs = {
+                        (str(r.get("host_id") or ""), str(fw))
+                        for r in selected
+                        for fw in (r.get("frameworks") or [])
+                    }
+                    intake["excluded_pairs"] = sorted(
+                        f"{h}/{fw}" for h, fw in (proposed_pairs - selected_pairs)
+                    )
+                    intake["excluded_frameworks"] = sorted(
+                        {fw for _h, fw in (proposed_pairs - selected_pairs)}
+                    )
+                    intake["proposed_jobs"] = original_jobs
+                    intake["audit_types"] = "both"
+                    break
+
+                # exclude / include → update working plan and ask for confirm
+                working_jobs = selected
+                intake["proposed_jobs"] = working_jobs
+                plan_md = format_proposed_jobs_markdown(working_jobs)
+                if lang.code.startswith("ru"):
+                    confirm_block = (
+                        "\n\n### Обновлённый план\n\n"
+                        "План изменён. Ответьте **подтвердить**, чтобы запустить "
+                        "**этот** план, или снова опишите exclude/include.\n"
+                    )
+                else:
+                    confirm_block = (
+                        "\n\n### Updated plan\n\n"
+                        "Plan updated. Reply **confirm** to run **this** plan, "
+                        "or describe more exclusions/inclusions.\n"
+                    )
+                scope_prompt = (
+                    f"{prompts.scope}{confirm_block}\n{host_access_md}\n\n{plan_md}"
                 )
-                intake["audit_types"] = "both"
-                break
+                self._persist_intake_progress(
+                    state, intake, thread_id=thread_hint
+                )
+                continue
         else:
             audit_prompt = f"{prompts.audit_type}\n\n{host_access_md}"
             while not intake.get("audit_types"):

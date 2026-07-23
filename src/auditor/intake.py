@@ -40,7 +40,7 @@ class IntakePrompts:
         client: Шаг 1 — название клиента / организации.
         cmdb: Устарело (CMDB/NetBox удалён); пустая строка для совместимости.
         access: Шаг 2 — доступ SSH/сервисов для пробы.
-        scope: Шаг 3 — подтвердить или исключить host→framework.
+        scope: Шаг 3 — подтвердить / исключить / оставить только host→framework.
         audit_type: Fallback шага 3 без плана хостов — выбор домена.
     """
 
@@ -219,9 +219,17 @@ def resolve_scope_decision(
     proposed_jobs: list[dict[str, Any]],
     llm_payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
-    """Выбрать задания только из JSON LLM (шаг 4 intake).
+    """Выбрать задания только из JSON LLM (шаг scope intake).
 
     Без regex-fallback. Неясный / отсутствующий payload → ``None`` (повтор вопроса).
+
+    Actions:
+        ``confirm`` — принять текущий план как есть.
+        ``exclude`` — убрать указанные фреймворки / пары.
+        ``include`` — оставить только указанные фреймворки / пары.
+
+    После ``exclude`` / ``include`` граф показывает обновлённый план и снова
+    ждёт ``confirm`` (не стартует оценку сразу).
 
     Returns:
         Отфильтрованный список заданий или ``None``, если ответ неясен.
@@ -247,6 +255,37 @@ def resolve_scope_decision(
                 h, f = pair.split("/", 1)
                 excl_pairs.add((h.strip().lower(), f.strip().lower()))
         return apply_scope_exclusions(proposed_jobs, excl_fw, excl_pairs)
+    if action in {"include", "only", "keep"}:
+        incl_fw = {
+            str(x).strip().lower()
+            for x in (llm_payload.get("include_frameworks") or [])
+            if str(x).strip()
+        }
+        incl_pairs: set[tuple[str, str]] = set()
+        for pair in llm_payload.get("include_pairs") or []:
+            if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                incl_pairs.add((str(pair[0]).lower(), str(pair[1]).lower()))
+            elif isinstance(pair, str) and "/" in pair:
+                h, f = pair.split("/", 1)
+                incl_pairs.add((h.strip().lower(), f.strip().lower()))
+        if not incl_fw and not incl_pairs:
+            return None
+        out: list[dict[str, Any]] = []
+        for row in proposed_jobs:
+            host_id = str(row.get("host_id") or "")
+            ssh = str(row.get("ssh_host") or "")
+            host_keys = {host_id.lower(), ssh.lower()} - {""}
+            kept: list[str] = []
+            for fw in row.get("frameworks") or []:
+                fw_s = str(fw)
+                low = fw_s.lower()
+                pair_hit = any((h, low) in incl_pairs for h in host_keys)
+                fw_hit = low in incl_fw
+                if pair_hit or fw_hit:
+                    kept.append(fw_s)
+            if kept:
+                out.append({**row, "frameworks": kept})
+        return out
     return None
 
 
@@ -296,7 +335,7 @@ def prompts_for_language(code: str) -> IntakePrompts:
         code: Код BCP-47 / ISO; русский, если начинается с ``ru``.
 
     Returns:
-        :class:`IntakePrompts` с Markdown для всех четырёх шагов.
+        :class:`IntakePrompts` с Markdown для шагов опросника.
     """
     if (code or "en").startswith("ru"):
         return IntakePrompts(
@@ -317,12 +356,11 @@ def prompts_for_language(code: str) -> IntakePrompts:
             scope=(
                 "## Предварительный опрос (3/3)\n\n"
                 "Ниже — предложенный план **хост → фреймворки**.\n\n"
-                "Ответьте **подтвердить** / **все**, чтобы запустить весь план, "
-                "или опишите, что **исключить** (свободный текст ок), например:\n"
-                "- `exclude ubuntu_cis_24_l2, postgres_cis`\n"
-                "- `exclude it_audit`\n"
-                "- `exclude 10.0.0.1/ubuntu_cis_24_l2`\n"
-                "- «убери ubuntu на .78»\n"
+                "- **Подтвердить** / **все** — запустить **текущий** план как есть.\n"
+                "- **Исключить** что-то — опишите своими словами; покажем "
+                "обновлённый план и попросим подтвердить перед стартом.\n"
+                "- **Только** некоторые фреймворки — тоже ок "
+                "(например: «только postgres_cis»).\n"
             ),
             audit_type=(
                 "## Предварительный опрос (3/3)\n\n"
@@ -349,12 +387,11 @@ def prompts_for_language(code: str) -> IntakePrompts:
         scope=(
             "## Pre-audit intake (3/3)\n\n"
             "Below is the proposed **host → frameworks** plan.\n\n"
-            "Reply **confirm** / **all** / **run all** to accept the full plan, "
-            "or say what to **exclude** (free-form OK), e.g.:\n"
-            "- `exclude ubuntu_cis_24_l2, postgres_cis`\n"
-            "- `exclude it_audit`\n"
-            "- `exclude 10.0.0.1/ubuntu_cis_24_l2`\n"
-            "- \"skip ubuntu on .78\"\n"
+            "- **Confirm** / **all** — run the **current** plan as shown.\n"
+            "- **Exclude** items — describe in your own words; we will show "
+            "the updated plan and ask you to confirm before starting.\n"
+            "- **Only** some frameworks — also OK "
+            "(e.g. \"postgres_cis only\").\n"
         ),
         audit_type=(
             "## Pre-audit intake (3/3)\n\n"

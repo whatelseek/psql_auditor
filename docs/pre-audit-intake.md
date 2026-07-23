@@ -1,6 +1,6 @@
 # Pre-audit intake
 
-Intake is the **four-step questionnaire** that runs at the start of a **full
+Intake is the **three-step questionnaire** that runs at the start of a **full
 audit** (when `INTAKE_ENABLED=true`). It collects scope and environment facts
 before checklist assessment begins.
 
@@ -16,8 +16,8 @@ intent classification.
 | File | `intent.py` | `intake.py` |
 | Purpose | Route the chat message to a feature | Ask setup questions for a new audit |
 | Runs when | Every message | Only after intent = `audit` |
-| Output | `audit` / `adhoc` / `revise_req` / … | Client name, CMDB flag, access, domain → frameworks |
-| Mechanism | Regex | LangGraph `interrupt()` + `[AUDIT_INTAKE:<thread>]` |
+| Output | `audit` / `adhoc` / `revise_req` / … | Client name, access, host→framework plan |
+| Mechanism | Step 1 deterministic; steps 2–3 LLM JSON | LangGraph `interrupt()` + `[AUDIT_INTAKE:<thread>]` |
 
 Ad-hoc commands, REQ revise/refill, report update, and session listing **skip**
 intake entirely.
@@ -30,8 +30,9 @@ Intent = audit
       ▼
 intake_gate (may interrupt between steps)
   1. Client name          → artifacts/<Client>/ …
-  3. Access to servers?   → probe SSH (+ Postgres MCP when configured)
-  4. Domain               → IT / Cybersecurity / both
+  2. Access to servers?   → probe SSH (+ Postgres MCP when configured)
+  3. Scope plan           → confirm / exclude / include frameworks
+                            (after exclude|include → show updated plan → confirm)
       │
       ▼
 Main audit graph
@@ -64,28 +65,34 @@ hints only).
 - Becomes the evidence root: `artifacts/<ClientName>/`
 - Used for results-warehouse session numbering (`results_<client_slug>`)
 - Clear short names work best (EN or RU)
+- Parsed deterministically (no LLM)
 
-### 3. Access probe
+### 2. Access probe
 
 Checks whether SSH (and Postgres MCP when credentials exist) can reach targets.
 Failures are summarized in chat; the operator can still continue depending on
-framework needs.
+framework needs. Answer interpreted via LLM yes/no JSON.
 
-### 4. Audit domain → frameworks
+### 3. Scope — host→framework plan
 
-| Domain | Typical frameworks |
-|--------|--------------------|
-| **IT** | `it_audit` (+ host detect rules) |
-| **Cybersecurity** / CIS | e.g. `ubuntu_cis_24_l2`, `postgres_cis` via detect / chat |
-| **Both** | Union of IT + cybersecurity frameworks |
+When inventory hosts are reachable, intake proposes a host→framework plan.
 
-Exact mapping: `frameworks_for_audit_type()` in `intake.py`, combined with
-`agents/*.md` frontmatter (`domain`, `detect`, `aliases`).
+| Reply intent | Effect |
+|--------------|--------|
+| **Confirm** | Accept the **current** plan and start assessment |
+| **Exclude** | Remove named frameworks / host pairs, then **re-show** the plan |
+| **Include / only** | Keep only named frameworks / pairs, then **re-show** the plan |
+
+After exclude or include, assessment does **not** start until the operator
+explicitly **confirms** the updated plan (they may trim again first).
+
+If no host plan is available, step 3 falls back to a free-form domain choice
+(IT / cybersecurity / both) via `frameworks_for_audit_type()`.
 
 ## Parsing answers
 
-- Fast path: regex for yes/no, audit type aliases, simple client names
-- Ambiguous replies: LLM JSON interpretation (same pattern as HITL)
+- Step 1 (client name): deterministic parser
+- Steps 2–3: LLM JSON interpretation only (no regex fallback on unclear replies)
 - Prompts are localized (EN / RU) via `prompts_for_language`
 
 ## Markers and resume
