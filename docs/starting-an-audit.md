@@ -32,7 +32,7 @@ Agent — intake (chat Q&A, marker [AUDIT_INTAKE:…])   ← pre-audit-intake.md
   ▼
 Agent — assessment
   ├─ Run selected (host, framework) jobs under artifacts/<Client>/<host>/…
-  └─ Finalize → combined report.md + ZIP (+ optional results DB session)
+  └─ Finalize → combined report.md + report.docx + report.xlsx + ZIP (+ optional results DB session)
 ```
 
 Disable intake with `INTAKE_ENABLED=false` (Compose / `.env`). Ad-hoc and
