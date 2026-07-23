@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import shlex
 from contextlib import AsyncExitStack
@@ -30,6 +29,11 @@ from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from auditor.config import Settings
+from auditor.mcp_registry import (
+    build_stdio_connection,
+    format_registry_markdown,
+    load_mcp_registry,
+)
 from auditor.runtime_target import effective_settings, pg_fingerprint
 from auditor.tools.postgres import is_readonly_sql
 
@@ -37,26 +41,8 @@ _DEFAULT_COMMAND = "npx"
 _DEFAULT_ARGS = "-y mcp-postgres-server"
 _SERVER_NAME = "postgres"
 
-# Remote MCP tools we refuse to bind / call.
+# Remote MCP tools we refuse to bind / call (merged with registry blockedTools).
 _BLOCKED_REMOTE_TOOLS = frozenset({"execute"})
-
-# Minimal env for the MCP child (avoid copying the whole process environment).
-_ENV_PASSTHROUGH = frozenset(
-    {
-        "PATH",
-        "HOME",
-        "USER",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        "XDG_CACHE_HOME",
-        "npm_config_cache",
-        "NPM_CONFIG_CACHE",
-    }
-)
 
 _TRANSPORT_EXC_NAMES = frozenset(
     {
@@ -71,8 +57,22 @@ _TRANSPORT_EXC_NAMES = frozenset(
 )
 
 
+def _postgres_blocked_tools(settings: Settings) -> frozenset[str]:
+    """Merge hard-coded blocked tools with ``mcps/registry.json`` for postgres."""
+    blocked = set(_BLOCKED_REMOTE_TOOLS)
+    registry = load_mcp_registry(settings.mcps_dir)
+    spec = registry.get(_SERVER_NAME)
+    if spec is not None:
+        blocked.update(spec.blocked_tools)
+    return frozenset(blocked)
+
+
 def postgres_mcp_connection(settings: Settings | None = None) -> dict[str, Any]:
     """Build a ``MultiServerMCPClient`` stdio connection dict for Postgres MCP.
+
+    Prefers ``mcps/registry.json`` (server ``postgres``). Legacy
+    ``MCP_POSTGRES_COMMAND`` / ``MCP_POSTGRES_ARGS`` still override command/args.
+    Credentials come from inventory/settings via registry ``envFrom``.
 
     Args:
         settings: Application settings; defaults to
@@ -83,14 +83,33 @@ def postgres_mcp_connection(settings: Settings | None = None) -> dict[str, Any]:
         ``env`` (Postgres vars from ``settings.pg_env_for_mcp()``).
     """
     settings = settings or effective_settings()
+    registry = load_mcp_registry(settings.mcps_dir)
+    spec = registry.get(_SERVER_NAME)
     command = settings.mcp_postgres_command or _DEFAULT_COMMAND
     args = shlex.split(settings.mcp_postgres_args or _DEFAULT_ARGS)
-    env: dict[str, str] = {
-        k: v
-        for k, v in os.environ.items()
-        if isinstance(v, str)
-        and (k in _ENV_PASSTHROUGH or k.startswith("NODE") or k.startswith("NPM"))
-    }
+    if spec is not None and spec.enabled and spec.transport == "stdio":
+        # Registry owns the package identity; env settings may still override
+        # command/args for air-gapped / pinned installs.
+        use_cmd = (
+            settings.mcp_postgres_command
+            if "mcp_postgres_command" in settings.model_fields_set
+            else (spec.command or command)
+        )
+        use_args = (
+            args
+            if "mcp_postgres_args" in settings.model_fields_set
+            else (list(spec.args) if spec.args else args)
+        )
+        return build_stdio_connection(
+            spec,
+            settings,
+            command_override=use_cmd,
+            args_override=use_args,
+        )
+    # Legacy fallback when registry is missing / postgres disabled.
+    from auditor.mcp_registry import base_passthrough_env
+
+    env = base_passthrough_env()
     env.update(settings.pg_env_for_mcp())
     return {
         "transport": "stdio",
@@ -208,7 +227,7 @@ class PostgresMcpSession:
         """
         settings = settings or effective_settings()
         arguments = arguments or {}
-        if tool_name in _BLOCKED_REMOTE_TOOLS:
+        if tool_name in _postgres_blocked_tools(settings):
             return (
                 "MCP error: mutating execute is disabled for the auditor. "
                 "Use mcp_query for SELECT evidence."
@@ -615,12 +634,24 @@ async def mcp_list_tools() -> str:
     return await _POOL.list_tools()
 
 
+@tool
+async def mcp_list_servers() -> str:
+    """List MCP servers from ``mcps/registry.json`` and credential readiness.
+
+    Does not print secrets. Use this to see which DB MCPs are enabled and whether
+    inventory/settings look configured. To add a server, edit the registry and
+    inventory — do not write passwords into ``registry.json``.
+    """
+    settings = effective_settings()
+    registry = load_mcp_registry(settings.mcps_dir)
+    return format_registry_markdown(registry, settings)
+
+
 def get_mcp_tools() -> list:
     """Return curated LangChain tools that query Postgres via MCP adapters.
 
     Returns:
-        ``[mcp_connect_db, mcp_query, mcp_list_schemas, mcp_list_tables,
-        mcp_describe_table, mcp_list_tools]`` for ``bind_tools``.
+        Curated ``mcp_*`` tools plus ``mcp_list_servers`` for ``bind_tools``.
     """
     return [
         mcp_connect_db,
@@ -629,4 +660,5 @@ def get_mcp_tools() -> list:
         mcp_list_tables,
         mcp_describe_table,
         mcp_list_tools,
+        mcp_list_servers,
     ]

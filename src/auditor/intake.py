@@ -531,6 +531,18 @@ def enrich_facts_from_access_rows(
                 if name not in bins_l:
                     binaries.append(name)
                     bins_l.add(name)
+        elif kind == "mysql" or port == 3306:
+            ports.add(3306)
+            for name in ("mysql", "mysqld"):
+                if name not in bins_l:
+                    binaries.append(name)
+                    bins_l.add(name)
+        elif kind == "oracle" or port == 1521:
+            ports.add(1521)
+            for name in ("oracle", "sqlplus"):
+                if name not in bins_l:
+                    binaries.append(name)
+                    bins_l.add(name)
     try:
         facts.listening_ports = sorted(ports)
         facts.binaries = binaries

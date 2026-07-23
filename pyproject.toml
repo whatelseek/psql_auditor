@@ -46,7 +46,7 @@ auditor = "auditor.api.app:main"
 packages = ["src/auditor"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/auditor", "agents", "README.md"]
+include = ["src/auditor", "agents", "mcps", "README.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

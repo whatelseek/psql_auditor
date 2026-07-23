@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "mcpServers": {
+    "postgres": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "mcp-postgres-server"],
+      "envFrom": "inventory:pg",
+      "frameworks": ["postgres_cis"],
+      "curatedTools": true,
+      "blockedTools": ["execute"],
+      "description": "PostgreSQL read-only evidence via antonorlov/mcp-postgres-server"
+    },
+    "mysql": {
+      "enabled": false,
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "REPLACE_WITH_MYSQL_MCP_PACKAGE"],
+      "envFrom": "inventory:mysql",
+      "envMap": {
+        "MYSQL_HOST": "MYSQL_HOST",
+        "MYSQL_PORT": "MYSQL_PORT",
+        "MYSQL_USER": "MYSQL_USER",
+        "MYSQL_PASSWORD": "MYSQL_PASSWORD",
+        "MYSQL_DATABASE": "MYSQL_DATABASE"
+      },
+      "frameworks": ["mysql_cis"],
+      "curatedTools": false,
+      "blockedTools": ["execute"],
+      "description": "Template: enable after installing a MySQL MCP and agents/mysql_cis.md"
+    },
+    "oracle": {
+      "enabled": false,
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "REPLACE_WITH_ORACLE_MCP_PACKAGE"],
+      "envFrom": "inventory:oracle",
+      "envMap": {
+        "ORACLE_HOST": "ORACLE_HOST",
+        "ORACLE_PORT": "ORACLE_PORT",
+        "ORACLE_USER": "ORACLE_USER",
+        "ORACLE_PASSWORD": "ORACLE_PASSWORD",
+        "ORACLE_SERVICE": "ORACLE_SERVICE"
+      },
+      "frameworks": ["oracle_cis"],
+      "curatedTools": false,
+      "blockedTools": ["execute"],
+      "description": "Template: enable after installing an Oracle MCP and agents/oracle_cis.md"
+    }
+  }
+}

@@ -26,7 +26,7 @@ Operator and developer docs for **auditor** (`psql_auditor`).
 
 | Doc | Topic |
 |-----|--------|
-| [LangChain MCP](langchain-mcp.md) | Postgres MCP pool / read-only SQL |
+| [LangChain MCP](langchain-mcp.md) | MCP registry (`mcps/`) + Postgres pool / read-only SQL |
 
 ## Architecture snapshot
 

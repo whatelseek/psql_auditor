@@ -117,7 +117,7 @@ Procedural memory remembers **how to verify** each REQ (SSH/SQL recipes) per fra
 ## Stack
 
 - **LangGraph** orchestration + **LangChain** tools/models
-- DB evidence: [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters) (`MultiServerMCPClient` stateful sessions + pool) → [antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server) — see [`docs/langchain-mcp.md`](docs/langchain-mcp.md) and [LangChain MCP docs](https://docs.langchain.com/oss/python/langchain/mcp)
+- DB evidence: declarative [`mcps/registry.json`](mcps/registry.json) + [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters) (`MultiServerMCPClient` stateful sessions + pool) → [antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server) — see [`docs/langchain-mcp.md`](docs/langchain-mcp.md) and [LangChain MCP docs](https://docs.langchain.com/oss/python/langchain/mcp)
 - Host evidence: SSH (`ssh_run` / `ssh_read_file`)
 - Models: LiteLLM · UI: Open WebUI (`/v1`)
 
@@ -230,9 +230,9 @@ checkpoint query — resume with **continue**. Details:
 
 ## Config
 
-See [`.env.example`](.env.example): `AGENTS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `ADHOC_COMMANDS_ENABLED`, `RESULTS_DB_*`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `MAX_PARALLEL_HOST_JOBS`, `LITELLM_*`, `PG_*`, `SSH_*`, `MCP_POSTGRES_*`.
+See [`.env.example`](.env.example): `AGENTS_DIR`, `MCPS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `ADHOC_COMMANDS_ENABLED`, `RESULTS_DB_*`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `MAX_PARALLEL_HOST_JOBS`, `LITELLM_*`, `PG_*`, `SSH_*`, `MCP_POSTGRES_*`.
 
-MCP architecture: [`docs/langchain-mcp.md`](docs/langchain-mcp.md).
+MCP architecture: [`docs/langchain-mcp.md`](docs/langchain-mcp.md) · add servers via [`mcps/`](mcps/).
 
 ## Development
 

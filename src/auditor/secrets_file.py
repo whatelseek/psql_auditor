@@ -60,7 +60,8 @@ _FENCE = re.compile(
 
 _TABLE_ROW = re.compile(r"^\|(.+)\|$")
 _EXTRA_KV = re.compile(
-    r"(?P<key>database|db|key|private_key|ssh_key|path|strict_host_key|ssh_strict_host_key)\s*=\s*(?P<val>\S+)",
+    r"(?P<key>database|db|service|sid|service_name|key|private_key|ssh_key|path|"
+    r"strict_host_key|ssh_strict_host_key)\s*=\s*(?P<val>\S+)",
     re.IGNORECASE,
 )
 
@@ -90,7 +91,7 @@ def _norm_header(cell: str) -> str:
 
 
 def _parse_extra(extra: str) -> dict[str, str]:
-    """Parse ``Extra`` cell: ``database=…``, ``key=/path``, ``strict_host_key=false``."""
+    """Parse ``Extra`` cell: ``database=…``, ``service=…``, ``key=/path``, …."""
     text = (extra or "").strip()
     out: dict[str, str] = {}
     if not text:
@@ -100,12 +101,15 @@ def _parse_extra(extra: str) -> dict[str, str]:
         val = match.group("val").strip().strip("'\"")
         if key in {"database", "db"}:
             out["database"] = val
+        elif key in {"service", "sid", "service_name"}:
+            out["service"] = val
         elif key in {"key", "private_key", "ssh_key", "path"}:
             out["key"] = val
         elif key in {"strict_host_key", "ssh_strict_host_key"}:
             out["strict_host_key"] = val
     if (
         "database" not in out
+        and "service" not in out
         and "key" not in out
         and "strict_host_key" not in out
         and "=" not in text
@@ -116,13 +120,13 @@ def _parse_extra(extra: str) -> dict[str, str]:
 
 
 def _access_kind(label: str) -> str | None:
-    """Map an inventory ``Access`` column label to ``ssh`` or ``pg``.
+    """Map an inventory ``Access`` column label to a credential kind.
 
     Args:
-        label: Access/service type cell (e.g. ``SSH``, ``PostgreSQL``, ``1C Ubuntu``).
+        label: Access/service type cell (e.g. ``SSH``, ``PostgreSQL``, ``MySQL``).
 
     Returns:
-        Kind string or ``None`` when the row is not a recognized credential type.
+        ``ssh`` / ``pg`` / ``mysql`` / ``oracle``, or ``None`` when unrecognized.
     """
     low = (label or "").strip().lower()
     if not low:
@@ -145,6 +149,10 @@ def _access_kind(label: str) -> str | None:
         return "ssh"
     if low.startswith("postgres") or low in {"pg", "psql", "database", "db"}:
         return "pg"
+    if low.startswith("mysql") or low in {"mariadb", "maria"}:
+        return "mysql"
+    if low.startswith("oracle") or low in {"ora", "oracledb"}:
+        return "oracle"
     return None
 
 
@@ -256,6 +264,40 @@ def _parse_credentials_table(text: str) -> dict[str, str]:
                 db = extra.get("bare") or ""
             if db:
                 out["PG_DATABASE"] = db
+        elif kind == "mysql":
+            if host:
+                out["MYSQL_HOST"] = host
+            if port:
+                out["MYSQL_PORT"] = port
+            if user:
+                out["MYSQL_USER"] = user
+            if secret:
+                out["MYSQL_PASSWORD"] = secret
+            db = extra.get("database") or extra.get("bare") or ""
+            if not db and i_extra is not None and headers[i_extra] in {
+                "database",
+                "db",
+            }:
+                db = extra_raw
+            if db:
+                out["MYSQL_DATABASE"] = db
+        elif kind == "oracle":
+            if host:
+                out["ORACLE_HOST"] = host
+            if port:
+                out["ORACLE_PORT"] = port
+            if user:
+                out["ORACLE_USER"] = user
+            if secret:
+                out["ORACLE_PASSWORD"] = secret
+            svc = (
+                extra.get("service")
+                or extra.get("database")
+                or extra.get("bare")
+                or ""
+            )
+            if svc:
+                out["ORACLE_SERVICE"] = svc
     return out
 
 
@@ -477,11 +519,16 @@ def list_client_access_endpoints(
         for row in _iter_credential_rows(text):
             kind = (row.get("kind") or "").strip()
             host = (row.get("host") or "").strip()
-            if kind not in {"ssh", "pg"} or not host:
+            if kind not in {"ssh", "pg", "mysql", "oracle"} or not host:
                 continue
             port = (row.get("port") or "").strip()
             if not port:
-                port = "5432" if kind == "pg" else "22"
+                port = {
+                    "pg": "5432",
+                    "mysql": "3306",
+                    "oracle": "1521",
+                    "ssh": "22",
+                }.get(kind, "22")
             key = f"{kind}|{host.lower()}|{port}"
             if key in seen:
                 continue

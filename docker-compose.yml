@@ -78,6 +78,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./agents:/app/agents:ro
+      - ./mcps:/app/mcps:ro
       - ./memory:/app/memory
       - ./artifacts:/app/artifacts
       - ./secrets:/app/secrets:ro

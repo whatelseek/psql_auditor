@@ -122,6 +122,7 @@ ADHOC_SYSTEM_PROMPT = """You execute audit commands the operator asked for on th
 Available tools:
 - ssh_run / ssh_read_file — host checks (Linux/Ubuntu; Windows via powershell when needed)
 - mcp_query — read-only PostgreSQL (SELECT / SHOW only)
+- mcp_list_servers — which MCPs are registered in ``mcps/registry.json``
 
 Rules:
 - Run ONLY what the operator requested. Do not invent a full CIS checklist audit.

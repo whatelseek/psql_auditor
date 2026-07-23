@@ -1,9 +1,29 @@
-# LangChain / LangGraph MCP (PostgreSQL)
+# LangChain / LangGraph MCP
 
 Postgres evidence follows the official LangChain MCP guide:
 [Model Context Protocol (MCP)](https://docs.langchain.com/oss/python/langchain/mcp)
 via [`langchain-mcp-adapters`](https://github.com/langchain-ai/langchain-mcp-adapters)
 (`>=0.3.0`) and [antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server).
+
+## Declarative registry (`mcps/`)
+
+MCP servers are listed in [`mcps/registry.json`](../mcps/registry.json) (see
+[`mcps/README.md`](../mcps/README.md)). The auditor loads that file, injects
+credentials from **inventory / secrets** (`envFrom: inventory:pg|mysql|oracle`),
+and builds `MultiServerMCPClient` stdio connection dicts.
+
+| Concern | Where it lives |
+|---------|----------------|
+| How to launch MCP (`command` / `args`) | `mcps/registry.json` |
+| Host / user / password / DB | Inventory Access table or `secrets/` |
+| Framework checklist | `agents/*.md` |
+
+Enable MySQL/Oracle templates in the registry after you install a real MCP
+package and add the matching framework Markdown. The agent can call
+`mcp_list_servers` to see readiness; it must **not** write passwords into the
+registry.
+
+Setting: `MCPS_DIR` (default `mcps`).
 
 ## Design (aligned with LangChain docs)
 
@@ -19,13 +39,17 @@ async with client.session("postgres") as session:
 
 The auditor does that inside each `PostgresMcpSession` (via `AsyncExitStack`),
 then pools several such sessions so parallel REQ workers are not stuck on one
-stdio pipe.
+stdio pipe. Connection env for `postgres` comes from the registry +
+`settings.pg_env_for_mcp()`.
 
 ```text
 AuditorGraph.bind_tools(SSH + mcp_*)
         │
         ▼
-curated tools: mcp_query, mcp_connect_db, …
+curated tools: mcp_query, mcp_connect_db, mcp_list_servers, …
+        │
+        ▼
+mcps/registry.json  →  postgres_mcp_connection()
         │
         ▼
 PostgresMcpPool  (MCP_POSTGRES_POOL_SIZE workers, default 3)
@@ -38,7 +62,7 @@ PostgresMcpPool  (MCP_POSTGRES_POOL_SIZE workers, default 3)
 
 | LangChain concept | Auditor implementation |
 |-------------------|-------------------------|
-| stdio transport | `postgres_mcp_connection()` → `command`/`args`/`env` |
+| stdio transport | `build_stdio_connection()` / `postgres_mcp_connection()` |
 | Stateful `client.session(name)` | `PostgresMcpSession._ensure_session` |
 | `handle_tool_errors=True` (≥0.3.0) | Set on `MultiServerMCPClient` / `load_mcp_tools` |
 | `load_mcp_tools(session)` | Not used in production (curated ``mcp_*`` only) |
@@ -48,7 +72,7 @@ Why not raw `client.get_tools()` for production? Remote tool names are `query`,
 `list_tables`, … Playbooks need stable **`mcp_query`**, etc. Curated wrappers also:
 
 - honor ``CallToolResult.isError`` (prefix ``MCP error:``)
-- block mutating ``execute``
+- block mutating ``execute`` (plus registry ``blockedTools``)
 - rewrite ``SHOW`` → ``SELECT`` on ``pg_settings``
 - reject non-read-only SQL (`WITH … SELECT` ok; multi-statement blocked)
 - merge `DATABASE_URL` into `PG_*`
@@ -58,6 +82,7 @@ Why not raw `client.get_tools()` for production? Remote tool names are `query`,
 ## Config
 
 ```env
+MCPS_DIR=mcps
 MCP_POSTGRES_COMMAND=npx
 MCP_POSTGRES_ARGS=-y mcp-postgres-server
 MCP_POSTGRES_POOL_SIZE=3
@@ -76,6 +101,7 @@ Tips:
 - For faster DB-heavy audits, raise both `MAX_PARALLEL_ASSESSMENTS` (e.g. `10`)
   and `MCP_POSTGRES_POOL_SIZE` toward that value (hard cap `16`).
 - Each pool worker is an extra Node/`npx` process — keep the pool modest.
+- Prefer inventory Access rows over baking secrets into Compose.
 
 ## Reconnect
 

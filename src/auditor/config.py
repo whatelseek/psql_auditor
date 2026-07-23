@@ -38,6 +38,8 @@ class Settings(BaseSettings):
         model_id: Model id advertised on ``GET /v1/models`` and used as default
             in chat completions (Open WebUI selects this name).
         agents_dir: Directory of drop-in framework Markdown files (``agents/*.md``).
+        mcps_dir: Declarative MCP registry directory (``mcps/registry.json``);
+            credentials come from inventory via ``envFrom``, not the JSON file.
         playbooks_dir: Seed YAML playbooks for long-term procedural memory
             (default ``agents/playbooks``).
         memory_dir: Persisted learned playbook overlay (LangGraph-style store).
@@ -129,6 +131,8 @@ class Settings(BaseSettings):
     memory_dir: Path = Field(default=Path("memory"))
     memory_enabled: bool = True
     memory_learn: bool = True
+    # Declarative MCP servers (``mcps/registry.json``); credentials stay in inventory
+    mcps_dir: Path = Field(default=Path("mcps"))
     # Per-requirement command execution artifacts
     evidence_dir: Path = Field(default=Path("artifacts"))
     # Durable LangGraph checkpointer (Sqlite) — survives agent restarts
