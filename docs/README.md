@@ -27,6 +27,7 @@ Operator and developer docs for **auditor** (`psql_auditor`).
 | Doc | Topic |
 |-----|--------|
 | [LangChain MCP](langchain-mcp.md) | MCP registry (`mcps/`) + Postgres pool / read-only SQL |
+| [WinRM](winrm.md) | Windows hosts via PowerShell / pywinrm |
 
 ## Architecture snapshot
 

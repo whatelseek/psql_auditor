@@ -47,7 +47,7 @@ _ADHOC_PATTERNS = (
     re.compile(r"\badihoc\b|\bad-hoc\b|\bone-?shot\b", re.I),
     re.compile(r"\brun\s+req[-\s]?\d+\b", re.I),
     re.compile(
-        r"\b(ssh_run|ssh_read_file|mcp_query)\b",
+        r"\b(ssh_run|ssh_read_file|winrm_run|winrm_read_file|mcp_query)\b",
         re.I,
     ),
     re.compile(

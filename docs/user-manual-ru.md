@@ -45,7 +45,8 @@
 
 - Docker и Docker Compose
 - Ключ к модели для LiteLLM (например `OPENAI_API_KEY`)
-- Доступ по **SSH** к целевому хосту (для Ubuntu/Linux-проверок; Windows — при своём фреймворке)
+- Доступ по **SSH** к Linux/Ubuntu; **WinRM** к Windows (или OpenSSH на Windows)
+- Фреймворки Windows — отдельные `agents/*.md` (в поставке нет готового CIS Windows)
 - Учётные данные **PostgreSQL** (для проверок БД через MCP)
 - Браузер → Open WebUI на порту **3001** (по умолчанию, `WEBUI_HOST_PORT`)
 
@@ -411,7 +412,9 @@ description: Чек-лист безопасности My App
 
 Агент использует:
 
-- **SSH:** `ssh_run`, `ssh_read_file` — хост Linux/Ubuntu; для Windows — команды через OpenSSH/PowerShell на цели;
+- **SSH:** `ssh_run`, `ssh_read_file` — хост Linux/Ubuntu; Windows с OpenSSH
+- **WinRM:** `winrm_run`, `winrm_read_file` — PowerShell на Windows (см. [`winrm.md`](winrm.md))
+- **MCP Postgres:** `mcp_query` и др. — SQL только для PostgreSQL
 - **PostgreSQL:** `mcp_query` (только чтение: `SELECT` / `SHOW`) через
   [LangChain MCP adapters](https://github.com/langchain-ai/langchain-mcp-adapters) →
   [antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server).

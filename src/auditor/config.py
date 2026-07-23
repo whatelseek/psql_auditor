@@ -183,6 +183,16 @@ class Settings(BaseSettings):
     # When false, skip host-key verification (lab only). Default verifies known_hosts.
     ssh_strict_host_key: bool = True
 
+    # --- WinRM target (Windows hosts without OpenSSH) ---
+    winrm_host: str | None = None
+    winrm_port: int = 5985
+    winrm_user: str | None = None
+    winrm_password: str | None = None
+    winrm_transport: str = "ntlm"
+    winrm_use_ssl: bool = False
+    winrm_verify_ssl: bool = True
+    winrm_command_timeout: int = 30
+
     # --- PostgreSQL credentials for antonorlov/mcp-postgres-server ---
     database_url: str | None = None
     pg_host: str | None = None

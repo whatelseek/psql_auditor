@@ -22,6 +22,7 @@ dependencies = [
   "langchain-mcp-adapters>=0.3.0",
   "litellm>=1.50.0",
   "asyncssh>=2.17.0",
+  "pywinrm>=0.4.3",
   "asyncpg>=0.30.0",
   "mcp>=1.0.0",
   "httpx>=0.27.0",

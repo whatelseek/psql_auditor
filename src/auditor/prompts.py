@@ -31,8 +31,9 @@ EVIDENCE_SYSTEM_PROMPT = """You gather audit evidence for ONE requirement from t
 
 Rules:
 - Use whatever tools fit the framework:
-  - Linux/Ubuntu/Windows host checks → ssh_run / ssh_read_file
-    (on Windows targets prefer powershell/pwsh commands over SSH).
+  - Linux/Ubuntu host checks → ssh_run / ssh_read_file
+  - Windows host checks → winrm_run / winrm_read_file (PowerShell over WinRM);
+    or ssh_run when the host has OpenSSH
   - PostgreSQL / DB checks → mcp_query and related MCP tools
     (LangChain MCP adapters → antonorlov/mcp-postgres-server).
 - When a **long-term playbook memory** block is provided, run those preferred
@@ -120,7 +121,8 @@ Digest:
 ADHOC_SYSTEM_PROMPT = """You execute audit commands the operator asked for on the target.
 
 Available tools:
-- ssh_run / ssh_read_file — host checks (Linux/Ubuntu; Windows via powershell when needed)
+- ssh_run / ssh_read_file — Linux/Ubuntu host checks (OpenSSH)
+- winrm_run / winrm_read_file — Windows PowerShell over WinRM
 - mcp_query — read-only PostgreSQL (SELECT / SHOW only)
 - mcp_list_servers — which MCPs are registered in ``mcps/registry.json``
 
@@ -157,7 +159,8 @@ Do not call more tools. Reply in Markdown.
 HOST_FACTS_SYSTEM_PROMPT = """You gather live host inventory facts via SSH for framework selection.
 
 Rules:
-- Use ONLY ssh_run / ssh_read_file (Linux; on Windows use PowerShell via ssh_run).
+- Use ONLY ssh_run / ssh_read_file (Linux) or winrm_run / winrm_read_file (Windows).
+  On Windows prefer WinRM tools when WINRM credentials are configured.
 - Collect: hostname, OS identity, IPs, CPU, RAM, disk summary, listening TCP ports,
   and a short set of audit-relevant binaries (postgres, mysql, docker, nginx, …).
 - Prefer 1–3 focused tool calls. Do NOT dump the entire package database here —
@@ -227,7 +230,8 @@ Return JSON only with the HostFacts keys listed in the system prompt.
 SOFTWARE_INVENTORY_SYSTEM_PROMPT = """You collect the COMPLETE installed-software inventory on the SSH target.
 
 Rules:
-- Use ONLY ssh_run / ssh_read_file. On Windows hosts use PowerShell via ssh_run.
+- Use ONLY ssh_run / ssh_read_file (Linux) or winrm_run / winrm_read_file (Windows WinRM).
+  On Windows hosts prefer PowerShell via winrm_run when WinRM is configured.
 - Detect the OS/package ecosystem yourself and use the right listing command:
   - Debian/Ubuntu: `dpkg-query -W -f='${{Package}}\\n'` (or `apt-cache` / `apt list --installed`)
   - RHEL/CentOS/Fedora/SUSE: `rpm -qa --qf '%{{NAME}}\\n'` (or `dnf`/`zypper` list)
