@@ -16,6 +16,8 @@ from auditor.intake import (
     format_proposed_jobs_markdown,
     frameworks_for_audit_type,
     intake_clarification_from_payload,
+    load_client_audit_plan,
+    parse_audit_plan_markdown,
     parse_client_name,
     resolve_audit_type,
     resolve_client_name,
@@ -147,6 +149,47 @@ def test_resolve_scope_llm_only():
 def test_parse_client_and_slug():
     assert parse_client_name("Client: Acme Corp") == "Acme Corp"
     assert client_slug("Acme Corp!") == "acme_corp"
+
+
+def test_parse_audit_plan_markdown_table_and_bullets():
+    table = """
+| Host / IP | Frameworks / checks |
+|-----------|---------------------|
+| 10.0.0.10 | postgres_cis, ubuntu_cis_24_l2 |
+| 10.0.0.20 | it_audit |
+"""
+    jobs = parse_audit_plan_markdown(table)
+    assert len(jobs) == 2
+    assert jobs[0]["ssh_host"] == "10.0.0.10"
+    assert jobs[0]["frameworks"] == ["postgres_cis", "ubuntu_cis_24_l2"]
+    assert jobs[1]["frameworks"] == ["it_audit"]
+
+    bullets = """
+- 10.0.0.10: postgres_cis, ubuntu_cis_24_l2
+- 10.0.0.20: it_audit
+"""
+    assert [j["ssh_host"] for j in parse_audit_plan_markdown(bullets)] == [
+        "10.0.0.10",
+        "10.0.0.20",
+    ]
+    filtered = parse_audit_plan_markdown(
+        table, known_framework_ids={"postgres_cis", "it_audit"}
+    )
+    assert filtered[0]["frameworks"] == ["postgres_cis"]
+    assert parse_audit_plan_markdown("no plan here") == []
+
+
+def test_load_client_audit_plan(tmp_path: Path):
+    client = tmp_path / "Acme"
+    client.mkdir()
+    (client / "PLAN.md").write_text(
+        "| Host | Frameworks |\n|------|------------|\n| 10.1.1.1 | it_audit |\n",
+        encoding="utf-8",
+    )
+    jobs, path = load_client_audit_plan(tmp_path, "Acme")
+    assert path is not None and path.name == "PLAN.md"
+    assert jobs[0]["ssh_host"] == "10.1.1.1"
+    assert jobs[0]["frameworks"] == ["it_audit"]
 
 
 def test_domains_for_audit_type():

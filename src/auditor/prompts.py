@@ -413,6 +413,8 @@ Rules:
   with ids from the CURRENT plan (remove those; keep the rest)
 - include / only / keep / только / оставь / "only postgres" → include
   with ids from the CURRENT plan (keep ONLY those; drop the rest)
+- A pasted Markdown Host|Frameworks table is handled outside this JSON path;
+  if the reply is only such a table, return {"action":"unknown"}
 - host/framework pairs go in exclude_pairs / include_pairs; bare framework ids
   in exclude_frameworks / include_frameworks
 - Only use framework ids / hosts that appear in the proposed plan

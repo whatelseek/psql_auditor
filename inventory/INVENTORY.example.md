@@ -22,6 +22,11 @@ inventory table — never in the MCP registry.
 Optional dedicated file: `inventory/<ClientName>/connection.md` (same table or
 legacy ``env`` block).
 
+Optional **audit plan**: `inventory/<ClientName>/PLAN.md` — Markdown table of
+Host / IP → frameworks for the intake scope step (see
+[`PLAN.example.md`](PLAN.example.md)). Overrides auto-detected frameworks when
+present; you still confirm before the audit starts.
+
 ## Client
 
 - Name: Example Corp

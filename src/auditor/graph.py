@@ -127,6 +127,8 @@ from auditor.intake import (
     frameworks_for_audit_type,
     intake_clarification_from_payload,
     intake_interrupt_payload,
+    load_client_audit_plan,
+    parse_audit_plan_markdown,
     parse_client_name,
     prompts_for_language,
     resolve_audit_type,
@@ -998,6 +1000,37 @@ class AuditorGraph:
             self._persist_intake_progress(state, intake, thread_id=thread_hint)
 
         proposed_jobs = list(intake.get("proposed_jobs") or [])
+        # Prefer operator PLAN.md (host → frameworks) over auto-discovery when present.
+        slug = str(
+            intake.get("client_slug")
+            or client_slug(str(intake.get("client_name") or ""))
+        ).strip()
+        plan_note = ""
+        if slug and "plan_file_checked" not in intake:
+            plan_jobs, plan_path = load_client_audit_plan(
+                self.settings.inventory_dir,
+                slug,
+                agents_dir=self.settings.agents_dir,
+            )
+            intake["plan_file_checked"] = True
+            if plan_path is not None:
+                intake["plan_file_path"] = str(plan_path)
+            if plan_jobs:
+                intake["proposed_jobs"] = plan_jobs
+                proposed_jobs = plan_jobs
+                intake["plan_source"] = "markdown"
+                rel = str(plan_path) if plan_path else "PLAN.md"
+                plan_note = (
+                    f"\n\n_Loaded audit plan from `{rel}` "
+                    "(overrides auto-detected frameworks)._\n"
+                    if lang.code == "en"
+                    else f"\n\n_Загружен план аудита из `{rel}` "
+                    "(перекрывает автоопределение фреймворков)._\n"
+                )
+                self._persist_intake_progress(
+                    state, intake, thread_id=thread_hint
+                )
+
         has_plan = bool(
             proposed_jobs
             and any((row.get("frameworks") or []) for row in proposed_jobs)
@@ -1035,34 +1068,70 @@ class AuditorGraph:
                     state, intake, thread_id=thread_hint
                 )
 
-        # 3) Scope: confirm / exclude / include; after trim, re-show plan and require confirm.
+        # 3) Scope: confirm / exclude / include / paste PLAN.md table; after trim, re-confirm.
         if has_plan:
             working_jobs = [dict(r) for r in proposed_jobs]
             original_jobs = [dict(r) for r in proposed_jobs]
             plan_md = format_proposed_jobs_markdown(working_jobs)
-            scope_prompt = f"{prompts.scope}\n\n{host_access_md}\n\n{plan_md}"
+            scope_prompt = (
+                f"{prompts.scope}{plan_note}\n\n{host_access_md}\n\n{plan_md}"
+            )
             while "selected_jobs" not in intake:
                 raw = interrupt(
                     intake_interrupt_payload(step="scope", prompt=scope_prompt)
                 )
+                reply = str(raw or "").strip()
+                # Operator pasted a Host|Frameworks markdown plan → replace & re-confirm.
+                pasted = parse_audit_plan_markdown(reply)
+                if pasted and (
+                    "|" in reply or reply.lstrip().startswith(("-", "*", "•"))
+                ):
+                    working_jobs = pasted
+                    intake["proposed_jobs"] = working_jobs
+                    intake["plan_source"] = "markdown_paste"
+                    plan_md = format_proposed_jobs_markdown(working_jobs)
+                    if lang.code.startswith("ru"):
+                        confirm_block = (
+                            "\n\n### План из Markdown\n\n"
+                            "Принят вставленный список хостов/проверок. "
+                            "Ответьте **подтвердить**, чтобы запустить этот план, "
+                            "или снова исключите / вставьте таблицу.\n"
+                        )
+                    else:
+                        confirm_block = (
+                            "\n\n### Plan from Markdown\n\n"
+                            "Accepted the pasted host/checks list. "
+                            "Reply **confirm** to run this plan, or exclude / "
+                            "paste another table.\n"
+                        )
+                    scope_prompt = (
+                        f"{prompts.scope}{confirm_block}\n{host_access_md}\n\n{plan_md}"
+                    )
+                    self._persist_intake_progress(
+                        state, intake, thread_id=thread_hint
+                    )
+                    continue
+
                 payload = await self._intake_llm_json(
                     INTAKE_INTERPRET_SCOPE_SYSTEM,
                     INTAKE_INTERPRET_SCOPE_PROMPT.format(
-                        reply=str(raw or "").strip() or "(empty)",
+                        reply=reply or "(empty)",
                         plan=plan_md,
                     ),
                 )
                 action = str((payload or {}).get("action") or "").strip().lower()
                 selected = resolve_scope_decision(
-                    str(raw or ""), working_jobs, payload
+                    reply, working_jobs, payload
                 )
                 if selected is None:
                     hint = (
-                        "\n\n_Could not parse that. Reply **confirm**, or describe "
-                        "what to **exclude** / keep **only**._"
+                        "\n\n_Could not parse that. Reply **confirm**, describe "
+                        "what to **exclude** / keep **only**, or paste a "
+                        "Host | Frameworks Markdown table._"
                         if lang.code == "en"
                         else "\n\n_Не удалось разобрать ответ. Напишите "
-                        "**подтвердить**, или что **исключить** / оставить **только**._"
+                        "**подтвердить**, что **исключить** / оставить **только**, "
+                        "или вставьте таблицу Host | Frameworks._"
                     )
                     scope_prompt = (
                         f"{prompts.scope}{hint}\n\n{host_access_md}\n\n{plan_md}"
@@ -1128,13 +1197,78 @@ class AuditorGraph:
                 continue
         else:
             audit_prompt = f"{prompts.audit_type}\n\n{host_access_md}"
-            while not intake.get("audit_types"):
+            while not intake.get("audit_types") and "selected_jobs" not in intake:
                 raw = interrupt(
                     intake_interrupt_payload(
                         step="audit_type", prompt=audit_prompt
                     )
                 )
-                atype = await self._intake_resolve_audit_type(str(raw or ""))
+                reply = str(raw or "").strip()
+                pasted = parse_audit_plan_markdown(reply)
+                if pasted and (
+                    "|" in reply or reply.lstrip().startswith(("-", "*", "•"))
+                ):
+                    plan_md = format_proposed_jobs_markdown(pasted)
+                    if lang.code.startswith("ru"):
+                        confirm_block = (
+                            "\n\n### План из Markdown\n\n"
+                            "Принят список хостов/проверок. Ответьте **подтвердить** "
+                            "или вставьте другую таблицу.\n"
+                        )
+                    else:
+                        confirm_block = (
+                            "\n\n### Plan from Markdown\n\n"
+                            "Accepted host/checks list. Reply **confirm** "
+                            "or paste another table.\n"
+                        )
+                    # Mini confirm loop for pasted plan without prior discovery
+                    confirm_prompt = (
+                        f"{prompts.scope}{confirm_block}\n\n{plan_md}"
+                    )
+                    while "selected_jobs" not in intake:
+                        creply = interrupt(
+                            intake_interrupt_payload(
+                                step="scope", prompt=confirm_prompt
+                            )
+                        )
+                        ctext = str(creply or "").strip()
+                        again = parse_audit_plan_markdown(ctext)
+                        if again and (
+                            "|" in ctext
+                            or ctext.lstrip().startswith(("-", "*", "•"))
+                        ):
+                            pasted = again
+                            plan_md = format_proposed_jobs_markdown(pasted)
+                            confirm_prompt = (
+                                f"{prompts.scope}{confirm_block}\n\n{plan_md}"
+                            )
+                            continue
+                        payload = await self._intake_llm_json(
+                            INTAKE_INTERPRET_SCOPE_SYSTEM,
+                            INTAKE_INTERPRET_SCOPE_PROMPT.format(
+                                reply=ctext or "(empty)",
+                                plan=plan_md,
+                            ),
+                        )
+                        action = str(
+                            (payload or {}).get("action") or ""
+                        ).strip().lower()
+                        if action in {"confirm", "all", "run_all", "accept"}:
+                            intake["selected_jobs"] = pasted
+                            intake["proposed_jobs"] = pasted
+                            intake["plan_source"] = "markdown_paste"
+                            intake["audit_types"] = "both"
+                            break
+                        hint = (
+                            "\n\n_Reply **confirm** to run this plan._"
+                            if lang.code == "en"
+                            else "\n\n_Ответьте **подтвердить**, чтобы запустить план._"
+                        )
+                        confirm_prompt = (
+                            f"{prompts.scope}{confirm_block}{hint}\n\n{plan_md}"
+                        )
+                    break
+                atype = await self._intake_resolve_audit_type(reply)
                 if atype:
                     intake["audit_types"] = atype
                     break

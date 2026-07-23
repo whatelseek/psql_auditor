@@ -32,6 +32,7 @@ intake_gate (may interrupt between steps)
   1. Client name          → artifacts/<Client>/ …
   2. Access to servers?   → probe SSH (+ Postgres MCP when configured)
   3. Scope plan           → confirm / exclude / include frameworks
+                            (or PLAN.md / pasted Host|Frameworks table)
                             (after exclude|include → show updated plan → confirm)
       │
       ▼
@@ -75,24 +76,40 @@ framework needs. Answer interpreted via LLM yes/no JSON.
 
 ### 3. Scope — host→framework plan
 
-When inventory hosts are reachable, intake proposes a host→framework plan.
+When inventory hosts are reachable, intake proposes a host→framework plan from
+discovery. If `inventory/<Client>/PLAN.md` (or `AUDIT_PLAN.md` / `SCOPE.md`)
+exists, that **Markdown plan overrides** auto-detection.
 
 | Reply intent | Effect |
 |--------------|--------|
 | **Confirm** | Accept the **current** plan and start assessment |
 | **Exclude** | Remove named frameworks / host pairs, then **re-show** the plan |
 | **Include / only** | Keep only named frameworks / pairs, then **re-show** the plan |
+| **Paste Host \| Frameworks table** | Replace the plan, then ask to **confirm** |
 
-After exclude or include, assessment does **not** start until the operator
-explicitly **confirms** the updated plan (they may trim again first).
+Example `PLAN.md`:
+
+```markdown
+| Host / IP | Frameworks / checks |
+|-----------|---------------------|
+| 10.0.0.10 | postgres_cis, ubuntu_cis_24_l2 |
+| 10.0.0.20 | it_audit |
+```
+
+After exclude, include, or paste, assessment does **not** start until the
+operator explicitly **confirms**. Credentials stay in `INVENTORY.md` — the plan
+file only lists hosts and framework ids.
 
 If no host plan is available, step 3 falls back to a free-form domain choice
-(IT / cybersecurity / both) via `frameworks_for_audit_type()`.
+(IT / cybersecurity / both) via `frameworks_for_audit_type()`, or accepts a
+pasted Markdown plan the same way.
 
 ## Parsing answers
 
 - Step 1 (client name): deterministic parser
-- Steps 2–3: LLM JSON interpretation only (no regex fallback on unclear replies)
+- Step 2: LLM JSON yes/no
+- Step 3: LLM JSON for confirm/exclude/include; deterministic parse for
+  `PLAN.md` / pasted Host|Frameworks tables
 - Prompts are localized (EN / RU) via `prompts_for_language`
 
 ## Markers and resume

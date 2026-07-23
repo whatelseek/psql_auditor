@@ -16,6 +16,8 @@ host→framework, которое оператор может урезать. Inv
     :func:`resolve_client_name` — детерминированный шаг 1 (без LLM).
     :func:`resolve_yes_no` / :func:`resolve_audit_type`
     / :func:`resolve_scope_decision` — только JSON LLM для шагов 2–3.
+    :func:`parse_audit_plan_markdown` / :func:`load_client_audit_plan` —
+    операторский ``PLAN.md`` (хост → фреймворки) на шаге scope.
     :func:`frameworks_for_audit_type` — домен → id фреймворков
     (fallback без доступа).
     :func:`summarize_access_probe` — Markdown access-пробы.
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 # ``cis`` оставлен как алиас ``cybersecurity`` для обратной совместимости.
@@ -289,6 +292,237 @@ def resolve_scope_decision(
     return None
 
 
+_PLAN_FILE_NAMES = ("PLAN.md", "AUDIT_PLAN.md", "SCOPE.md", "plan.md")
+_HOST_HEADER_TOKENS = frozenset(
+    {
+        "host",
+        "hosts",
+        "hostip",
+        "ip",
+        "ips",
+        "target",
+        "targets",
+        "hostname",
+        "address",
+        "server",
+        "хост",
+        "адрес",
+        "сервер",
+    }
+)
+_FW_HEADER_TOKENS = frozenset(
+    {
+        "framework",
+        "frameworks",
+        "check",
+        "checks",
+        "checklist",
+        "audit",
+        "audits",
+        "scope",
+        "фреймворк",
+        "фреймворки",
+        "проверки",
+        "проверка",
+    }
+)
+_BULLET_PLAN = re.compile(
+    r"^\s*[-*•]\s*`?(?P<host>[A-Za-z0-9._:-]+)`?\s*[=:→\-]+\s*(?P<rest>.+)$"
+)
+_TABLE_ROW = re.compile(r"^\|(.+)\|$")
+
+
+def _host_slug(host: str) -> str:
+    """Filesystem-safe host id (same idea as inventory SSH slug)."""
+    raw = re.sub(r"[^A-Za-z0-9._-]+", "_", (host or "").strip()).strip("._-")
+    return raw or "host"
+
+
+def _norm_plan_header(cell: str) -> str:
+    """Normalize a plan-table header for column detection."""
+    return re.sub(r"[^a-z0-9а-яё]+", "", (cell or "").lower())
+
+
+def _split_framework_ids(text: str) -> list[str]:
+    """Split a frameworks/checks cell into framework ids."""
+    raw = (text or "").strip()
+    if not raw or raw in {"—", "-", "–"}:
+        return []
+    parts = re.split(r"[,;/|]+|\s+", raw)
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        fid = part.strip().strip("`").strip()
+        if not fid or fid.lower() in {"and", "и", "plus", "+"}:
+            continue
+        key = fid.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(fid)
+    return out
+
+
+def _job_row(host: str, frameworks: list[str]) -> dict[str, Any]:
+    """Build one proposed/selected job dict from host + framework ids."""
+    host_s = (host or "").strip()
+    return {
+        "host_id": _host_slug(host_s),
+        "hostname": "",
+        "ssh_host": host_s,
+        "frameworks": list(frameworks),
+        "error": "",
+        "plan_source": "markdown",
+    }
+
+
+def parse_audit_plan_markdown(
+    text: str,
+    *,
+    known_framework_ids: set[str] | frozenset[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Parse an operator Markdown audit plan into host→framework jobs.
+
+    Accepts a pipe table (Host | Frameworks / Checks) or bullet lines
+    (``- 10.0.0.10: postgres_cis, ubuntu_cis_24_l2``).
+
+    Args:
+        text: Markdown body (file contents or chat paste).
+        known_framework_ids: Optional allow-list; unknown tokens are dropped
+            when provided. When ``None``, all non-empty tokens are kept.
+
+    Returns:
+        Job rows compatible with intake ``proposed_jobs`` / ``selected_jobs``.
+        Empty list when no plan rows are found.
+    """
+    known = (
+        {x.lower() for x in known_framework_ids}
+        if known_framework_ids is not None
+        else None
+    )
+    lines = (text or "").splitlines()
+    by_host: dict[str, list[str]] = {}
+    host_labels: dict[str, str] = {}
+
+    def _add(host: str, fws: list[str]) -> None:
+        host_s = (host or "").strip().strip("`")
+        if not host_s:
+            return
+        kept: list[str] = []
+        for fw in fws:
+            if known is not None and fw.lower() not in known:
+                continue
+            if fw.lower() not in {x.lower() for x in kept}:
+                kept.append(fw)
+        if not kept:
+            return
+        key = host_s.lower()
+        host_labels.setdefault(key, host_s)
+        cur = by_host.setdefault(key, [])
+        for fw in kept:
+            if fw.lower() not in {x.lower() for x in cur}:
+                cur.append(fw)
+
+    # Table path
+    for i, line in enumerate(lines):
+        match = _TABLE_ROW.match(line.strip())
+        if not match:
+            continue
+        cells = [c.strip() for c in match.group(1).split("|")]
+        norms = [_norm_plan_header(c) for c in cells]
+        host_col = next(
+            (
+                j
+                for j, h in enumerate(norms)
+                if h in _HOST_HEADER_TOKENS
+                or "host" in h
+                or h in {"ip", "ips"}
+            ),
+            None,
+        )
+        fw_col = next(
+            (
+                j
+                for j, h in enumerate(norms)
+                if h in _FW_HEADER_TOKENS
+                or "framework" in h
+                or "check" in h
+                or "фрейм" in h
+            ),
+            None,
+        )
+        if host_col is None or fw_col is None:
+            continue
+        for line2 in lines[i + 1 :]:
+            stripped = line2.strip()
+            if not stripped.startswith("|"):
+                if by_host:
+                    break
+                continue
+            if re.match(r"^\|[\s|:-]+\|$", stripped):
+                continue
+            body = [c.strip() for c in stripped.strip("|").split("|")]
+            if len(body) <= max(host_col, fw_col):
+                body.extend([""] * (max(host_col, fw_col) + 1 - len(body)))
+            host = body[host_col] if host_col < len(body) else ""
+            fws = _split_framework_ids(body[fw_col] if fw_col < len(body) else "")
+            _add(host, fws)
+        break
+
+    # Bullet path when no table rows
+    if not by_host:
+        for line in lines:
+            m = _BULLET_PLAN.match(line)
+            if not m:
+                continue
+            _add(m.group("host"), _split_framework_ids(m.group("rest")))
+
+    return [_job_row(host_labels[k], fws) for k, fws in by_host.items()]
+
+
+def load_client_audit_plan(
+    inventory_dir: Path | str,
+    client_slug_name: str,
+    *,
+    agents_dir: Path | str | None = None,
+) -> tuple[list[dict[str, Any]], Path | None]:
+    """Load ``PLAN.md`` / ``AUDIT_PLAN.md`` / ``SCOPE.md`` from client inventory.
+
+    Args:
+        inventory_dir: Inventory root.
+        client_slug_name: Client folder slug.
+        agents_dir: Optional frameworks dir to validate ids.
+
+    Returns:
+        ``(jobs, path)`` — jobs may be empty; ``path`` is the file used or
+        ``None`` when no plan file exists.
+    """
+    from auditor.host_facts import resolve_client_dir
+
+    client_dir = resolve_client_dir(Path(inventory_dir), client_slug_name)
+    known: set[str] | None = None
+    if agents_dir is not None:
+        from auditor.frameworks import list_frameworks
+
+        known = {fw.id.lower() for fw in list_frameworks(agents_dir)}
+        # Also accept common aliases from frontmatter via list — ids only is fine
+
+    for name in _PLAN_FILE_NAMES:
+        path = client_dir / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        jobs = parse_audit_plan_markdown(text, known_framework_ids=known)
+        if jobs:
+            return jobs, path
+        # File exists but empty/unparsed — still report path for operator hint
+        return [], path
+    return [], None
+
+
 def parse_client_name(text: str) -> str:
     """Извлечь имя клиента из свободного текста, убрав типичные префиксы.
 
@@ -361,13 +595,17 @@ def prompts_for_language(code: str) -> IntakePrompts:
                 "обновлённый план и попросим подтвердить перед стартом.\n"
                 "- **Только** некоторые фреймворки — тоже ок "
                 "(например: «только postgres_cis»).\n"
+                "- Или вставьте / положите в inventory таблицу "
+                "``PLAN.md``: Host | Frameworks.\n"
             ),
             audit_type=(
                 "## Предварительный опрос (3/3)\n\n"
                 "Живой план хостов недоступен (нет доступа / нет хостов в inventory).\n\n"
                 "Какой **домен** аудита провести?\n\n"
                 "Опишите своими словами "
-                "(например: «только IT», «кибербезопасность / CIS», «и то и другое»)."
+                "(например: «только IT», «кибербезопасность / CIS», «и то и другое»), "
+                "или вставьте Markdown-таблицу Host | Frameworks / положите "
+                "``PLAN.md`` в каталог клиента."
             ),
         )
     return IntakePrompts(
@@ -392,13 +630,17 @@ def prompts_for_language(code: str) -> IntakePrompts:
             "the updated plan and ask you to confirm before starting.\n"
             "- **Only** some frameworks — also OK "
             "(e.g. \"postgres_cis only\").\n"
+            "- Or paste / place ``PLAN.md`` in the client inventory: "
+            "Host | Frameworks table.\n"
         ),
         audit_type=(
             "## Pre-audit intake (3/3)\n\n"
             "No live host plan is available (no access / no inventory hosts).\n\n"
             "Which audit **domain** should I run?\n\n"
             "Describe it in your own words "
-            "(e.g. \"IT only\", \"cybersecurity / CIS\", \"both\")."
+            "(e.g. \"IT only\", \"cybersecurity / CIS\", \"both\"), "
+            "or paste a Markdown Host | Frameworks table / put ``PLAN.md`` "
+            "in the client inventory folder."
         ),
     )
 
