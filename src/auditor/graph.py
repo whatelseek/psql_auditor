@@ -569,7 +569,7 @@ class AuditorGraph:
     async def _intake_llm_json(
         self, system: str, user: str
     ) -> dict[str, Any] | None:
-        """One fill_model call for intake answer interpretation."""
+        """Один вызов fill_model для интерпретации ответа intake."""
         try:
             response = await self.fill_model.ainvoke(
                 [
@@ -584,15 +584,15 @@ class AuditorGraph:
     async def _intake_resolve_yes_no(
         self, raw: str, *, question_hint: str
     ) -> tuple[str, str]:
-        """Interpret intake yes/no via LLM first; return answer + clarification.
+        """Интерпретировать да/нет intake через LLM; вернуть ответ + уточнение.
 
         Args:
-            raw: Operator reply text.
-            question_hint: Context for the classifier prompt.
+            raw: Текст ответа оператора.
+            question_hint: Контекст для промпта классификатора.
 
         Returns:
-            ``(yes|no|unknown, clarification)``. Clarification is set when the
-            operator asked what the step means (e.g. «что это?»).
+            ``(yes|no|unknown, clarification)``. Clarification заполняется,
+            когда оператор спросил смысл шага (например «что это?»).
         """
         payload = await self._intake_llm_json(
             INTAKE_INTERPRET_YES_NO_SYSTEM,
@@ -619,13 +619,13 @@ class AuditorGraph:
         return parse_client_name(str(raw or ""))
 
     async def _intake_resolve_audit_type(self, raw: str) -> str | None:
-        """Map intake reply to audit type via LLM JSON only (step 4).
+        """Сопоставить ответ intake с типом аудита только через JSON LLM (шаг 4).
 
         Args:
-            raw: Operator reply describing desired audit scope.
+            raw: Ответ оператора о желаемой области аудита.
 
         Returns:
-            Canonical audit type string, or ``None`` when unclear.
+            Каноническая строка типа аудита или ``None``, если неясно.
         """
         payload = await self._intake_llm_json(
             INTAKE_INTERPRET_AUDIT_TYPE_SYSTEM,
@@ -642,12 +642,12 @@ class AuditorGraph:
         *,
         thread_id: str = "",
     ) -> None:
-        """Save mid-intake answers to evidence meta so resume skips rediscovery.
+        """Сохранить промежуточные ответы intake в evidence meta для resume.
 
-        LangGraph re-runs the whole ``intake_gate`` node on each interrupt
-        resume; without disk persistence, access=yes would rediscover hosts.
-        Merges into any existing ``intake`` dict so a later partial write cannot
-        wipe earlier keys (e.g. ``has_cmdb``).
+        LangGraph при каждом resume заново выполняет весь узел ``intake_gate``;
+        без записи на диск при access=yes снова шёл бы rediscovery хостов.
+        Мержит в существующий dict ``intake``, чтобы частичная запись не стёрла
+        ранние ключи (например ``has_cmdb``).
         """
         store = self._store_from_state(state)
         if store is None:
@@ -711,7 +711,7 @@ class AuditorGraph:
         return intake
 
     async def intake_gate(self, state: AuditorState) -> dict[str, Any]:
-        """Multi-step pre-audit questionnaire via successive interrupts."""
+        """Многошаговый предварительный опрос через последовательные interrupt."""
         if not self.settings.intake_enabled or state.get("intake_complete"):
             return {"intake_complete": True}
 
