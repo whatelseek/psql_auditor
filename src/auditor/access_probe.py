@@ -95,7 +95,7 @@ async def probe_access_services(settings: Settings | None = None) -> dict[str, A
 
   * **SSH** — runs ``echo auditor_access_ok && hostname`` via :mod:`auditor.tools.ssh`.
   * **PostgreSQL (MCP)** — runs ``SELECT current_database(), current_user`` via MCP.
-  * **WinRM** — always reported as ``not_configured`` (not bundled in this release).
+  * **WinRM** — runs a PowerShell hostname probe via :mod:`auditor.tools.winrm`.
 
   Each service entry includes ``name``, ``status`` (``ok``, ``failed``,
   ``not_configured``), and a truncated ``detail`` string.
@@ -164,14 +164,31 @@ async def probe_access_services(settings: Settings | None = None) -> dict[str, A
             pg_detail = f"{type(exc).__name__}: {exc}"
     services.append({"name": "postgres_mcp", "status": pg_status, "detail": pg_detail})
 
-    # WinRM — not implemented in this release
-    services.append(
-        {
-            "name": "winrm",
-            "status": "not_configured",
-            "detail": "WinRM client not bundled; Windows targets use SSH/OpenSSH when available",
-        }
-    )
+    # WinRM (pywinrm)
+    winrm_status = "failed"
+    winrm_detail = ""
+    if not settings.winrm_host:
+        winrm_status = "not_configured"
+        winrm_detail = "WINRM_HOST not set (add a WinRM Access row in inventory)"
+    else:
+        try:
+            from auditor.tools.winrm import winrm_run
+
+            result = str(
+                await winrm_run.ainvoke(
+                    {"command": "Write-Output 'auditor_access_ok'; hostname"}
+                )
+            )
+            if result.lower().startswith("winrm error"):
+                winrm_status = "failed"
+                winrm_detail = result[:500]
+            else:
+                winrm_status = "ok"
+                winrm_detail = result[:500]
+        except Exception as exc:  # noqa: BLE001
+            winrm_status = "failed"
+            winrm_detail = f"{type(exc).__name__}: {exc}"
+    services.append({"name": "winrm", "status": winrm_status, "detail": winrm_detail})
 
     return {
         "services": services,

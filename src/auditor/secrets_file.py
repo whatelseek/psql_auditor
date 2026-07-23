@@ -38,6 +38,13 @@ _SECRET_ENV_KEYS = frozenset(
         "SSH_PASSWORD",
         "SSH_CONNECT_TIMEOUT",
         "SSH_STRICT_HOST_KEY",
+        "WINRM_HOST",
+        "WINRM_PORT",
+        "WINRM_USER",
+        "WINRM_PASSWORD",
+        "WINRM_TRANSPORT",
+        "WINRM_USE_SSL",
+        "WINRM_VERIFY_SSL",
         "DATABASE_URL",
         "PG_HOST",
         "PG_PORT",
@@ -61,7 +68,8 @@ _FENCE = re.compile(
 _TABLE_ROW = re.compile(r"^\|(.+)\|$")
 _EXTRA_KV = re.compile(
     r"(?P<key>database|db|service|sid|service_name|key|private_key|ssh_key|path|"
-    r"strict_host_key|ssh_strict_host_key)\s*=\s*(?P<val>\S+)",
+    r"strict_host_key|ssh_strict_host_key|transport|use_ssl|verify_ssl|"
+    r"winrm_transport|winrm_use_ssl|winrm_verify_ssl)\s*=\s*(?P<val>\S+)",
     re.IGNORECASE,
 )
 
@@ -107,11 +115,20 @@ def _parse_extra(extra: str) -> dict[str, str]:
             out["key"] = val
         elif key in {"strict_host_key", "ssh_strict_host_key"}:
             out["strict_host_key"] = val
+        elif key in {"transport", "winrm_transport"}:
+            out["transport"] = val
+        elif key in {"use_ssl", "winrm_use_ssl"}:
+            out["use_ssl"] = val
+        elif key in {"verify_ssl", "winrm_verify_ssl"}:
+            out["verify_ssl"] = val
     if (
         "database" not in out
         and "service" not in out
         and "key" not in out
         and "strict_host_key" not in out
+        and "transport" not in out
+        and "use_ssl" not in out
+        and "verify_ssl" not in out
         and "=" not in text
     ):
         # Bare value in Extra for PostgreSQL rows → database name
@@ -126,13 +143,16 @@ def _access_kind(label: str) -> str | None:
         label: Access/service type cell (e.g. ``SSH``, ``PostgreSQL``, ``MySQL``).
 
     Returns:
-        ``ssh`` / ``pg`` / ``mysql`` / ``oracle``, or ``None`` when unrecognized.
+        ``ssh`` / ``winrm`` / ``pg`` / ``mysql`` / ``oracle``, or ``None``.
     """
     low = (label or "").strip().lower()
     if not low:
         return None
     if low in {"ssh", "sftp", "os", "host"}:
         return "ssh"
+    # WinRM before generic "windows" OS-label → SSH (OpenSSH) mapping
+    if low in {"winrm", "wsman"} or "winrm" in low:
+        return "winrm"
     # OS / app host rows (e.g. "1C Ubuntu") that use SSH credentials
     if any(
         tok in low
@@ -143,7 +163,6 @@ def _access_kind(label: str) -> str | None:
             "rhel",
             "linux",
             "windows",
-            "winrm",
         )
     ):
         return "ssh"
@@ -298,6 +317,26 @@ def _parse_credentials_table(text: str) -> dict[str, str]:
             )
             if svc:
                 out["ORACLE_SERVICE"] = svc
+        elif kind == "winrm":
+            if host:
+                out["WINRM_HOST"] = host
+            if port:
+                out["WINRM_PORT"] = port
+            elif "WINRM_PORT" not in out:
+                out["WINRM_PORT"] = "5985"
+            if user:
+                out["WINRM_USER"] = user
+            if secret:
+                out["WINRM_PASSWORD"] = secret
+            if extra.get("transport"):
+                out["WINRM_TRANSPORT"] = extra["transport"]
+            if extra.get("use_ssl") is not None:
+                out["WINRM_USE_SSL"] = extra["use_ssl"]
+            if extra.get("verify_ssl") is not None:
+                out["WINRM_VERIFY_SSL"] = extra["verify_ssl"]
+            # Port 5986 implies HTTPS when use_ssl not set
+            if (port or "").strip() == "5986" and "WINRM_USE_SSL" not in out:
+                out["WINRM_USE_SSL"] = "true"
     return out
 
 
@@ -330,16 +369,20 @@ def _parse_env_text(text: str) -> dict[str, str]:
 
 @dataclass(frozen=True, slots=True)
 class InventorySshTarget:
-    """One SSH-capable inventory row (host + auth).
+    """One remote host inventory row (SSH or WinRM).
 
     Attributes:
         host: IP address or hostname.
-        port: SSH port (default ``22``).
-        user: SSH username.
-        password: SSH password when key auth is not used.
-        private_key_path: Path to private key file.
-        strict_host_key: ``true``/``false`` for host key checking.
+        port: SSH port (default ``22``) or WinRM port (``5985`` / ``5986``).
+        user: Username.
+        password: Password when key auth is not used.
+        private_key_path: Path to private key file (SSH only).
+        strict_host_key: ``true``/``false`` for SSH host key checking.
         label: Original Access column label from the inventory table.
+        transport: ``ssh`` (default) or ``winrm``.
+        winrm_transport: pywinrm auth transport (``ntlm``, ``basic``, …).
+        winrm_use_ssl: Optional override for HTTPS WinRM.
+        winrm_verify_ssl: Optional TLS verify flag for HTTPS WinRM.
     """
 
     host: str
@@ -349,12 +392,21 @@ class InventorySshTarget:
     private_key_path: str = ""
     strict_host_key: str = ""
     label: str = ""
+    transport: str = "ssh"
+    winrm_transport: str = "ntlm"
+    winrm_use_ssl: str = ""
+    winrm_verify_ssl: str = ""
 
     @property
     def slug(self) -> str:
         """Filesystem-safe id derived from host (IP or hostname)."""
         raw = re.sub(r"[^A-Za-z0-9._-]+", "_", (self.host or "").strip()).strip("._-")
         return raw or "host"
+
+    @property
+    def is_winrm(self) -> bool:
+        """True when this row should use WinRM tools."""
+        return (self.transport or "ssh").strip().lower() == "winrm"
 
 
 def _iter_credential_rows(text: str) -> list[dict[str, str]]:
@@ -437,30 +489,37 @@ def _iter_credential_rows(text: str) -> list[dict[str, str]]:
 
 
 def list_inventory_ssh_targets(text: str) -> list[InventorySshTarget]:
-    """Return every SSH-capable row from an inventory credentials table.
+    """Return every SSH- or WinRM-capable row from an inventory credentials table.
 
     Deduplicates by host (first row wins). Includes OS-labelled rows
-    (e.g. ``1C Ubuntu``) when ``_access_kind`` maps them to ``ssh``.
+    (e.g. ``1C Ubuntu``) when ``_access_kind`` maps them to ``ssh``, and
+    ``WinRM`` rows as ``transport=winrm``.
     """
     seen: set[str] = set()
     out: list[InventorySshTarget] = []
     for row in _iter_credential_rows(text):
-        if row.get("kind") != "ssh":
+        kind = (row.get("kind") or "").strip()
+        if kind not in {"ssh", "winrm"}:
             continue
         host = (row.get("host") or "").strip()
         if not host or host.lower() in seen:
             continue
         seen.add(host.lower())
         extra = _parse_extra(row.get("extra") or "")
+        default_port = "5985" if kind == "winrm" else "22"
         out.append(
             InventorySshTarget(
                 host=host,
-                port=(row.get("port") or "22").strip() or "22",
+                port=(row.get("port") or default_port).strip() or default_port,
                 user=(row.get("user") or "").strip(),
                 password=(row.get("secret") or "").strip(),
                 private_key_path=extra.get("key") or "",
                 strict_host_key=extra.get("strict_host_key") or "",
                 label=(row.get("access") or "").strip(),
+                transport=kind,
+                winrm_transport=extra.get("transport") or "ntlm",
+                winrm_use_ssl=extra.get("use_ssl") or "",
+                winrm_verify_ssl=extra.get("verify_ssl") or "",
             )
         )
     return out
@@ -519,7 +578,7 @@ def list_client_access_endpoints(
         for row in _iter_credential_rows(text):
             kind = (row.get("kind") or "").strip()
             host = (row.get("host") or "").strip()
-            if kind not in {"ssh", "pg", "mysql", "oracle"} or not host:
+            if kind not in {"ssh", "pg", "mysql", "oracle", "winrm"} or not host:
                 continue
             port = (row.get("port") or "").strip()
             if not port:
@@ -527,6 +586,7 @@ def list_client_access_endpoints(
                     "pg": "5432",
                     "mysql": "3306",
                     "oracle": "1521",
+                    "winrm": "5985",
                     "ssh": "22",
                 }.get(kind, "22")
             key = f"{kind}|{host.lower()}|{port}"
@@ -624,6 +684,83 @@ def bind_ssh_target(
         )
     ):
         yield
+
+
+@contextmanager
+def bind_winrm_target(
+    target: InventorySshTarget,
+    *,
+    environ: dict[str, str] | None = None,
+) -> Iterator[None]:
+    """Bind WinRM credentials for tool calls (ContextVar or test environ)."""
+    if environ is not None:
+        from auditor.config import get_settings
+
+        keys = (
+            "WINRM_HOST",
+            "WINRM_PORT",
+            "WINRM_USER",
+            "WINRM_PASSWORD",
+            "WINRM_TRANSPORT",
+            "WINRM_USE_SSL",
+            "WINRM_VERIFY_SSL",
+        )
+        saved: dict[str, str | None] = {k: environ.get(k) for k in keys}
+        try:
+            environ["WINRM_HOST"] = target.host
+            environ["WINRM_PORT"] = target.port or "5985"
+            if target.user:
+                environ["WINRM_USER"] = target.user
+            if target.password:
+                environ["WINRM_PASSWORD"] = target.password
+            if target.winrm_transport:
+                environ["WINRM_TRANSPORT"] = target.winrm_transport
+            if target.winrm_use_ssl:
+                environ["WINRM_USE_SSL"] = target.winrm_use_ssl
+            elif (target.port or "").strip() == "5986":
+                environ["WINRM_USE_SSL"] = "true"
+            if target.winrm_verify_ssl:
+                environ["WINRM_VERIFY_SSL"] = target.winrm_verify_ssl
+            get_settings.cache_clear()
+            yield
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    environ.pop(key, None)
+                else:
+                    environ[key] = value
+            get_settings.cache_clear()
+        return
+
+    from auditor.runtime_target import bind_runtime_target, runtime_target_from_winrm
+
+    with bind_runtime_target(
+        runtime_target_from_winrm(
+            host=target.host,
+            port=target.port or "5985",
+            user=target.user,
+            password=target.password,
+            transport=target.winrm_transport or "ntlm",
+            use_ssl=target.winrm_use_ssl,
+            verify_ssl=target.winrm_verify_ssl,
+        )
+    ):
+        yield
+
+
+@contextmanager
+def bind_host_target(
+    target: InventorySshTarget,
+    *,
+    environ: dict[str, str] | None = None,
+) -> Iterator[None]:
+    """Bind SSH or WinRM credentials depending on ``target.transport``."""
+    if target.is_winrm:
+        with bind_winrm_target(target, environ=environ):
+            yield
+    else:
+        with bind_ssh_target(target, environ=environ):
+            yield
 
 
 def read_client_credentials(

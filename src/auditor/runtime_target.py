@@ -1,9 +1,9 @@
-"""Run-scoped SSH/PostgreSQL credential overlays (concurrent-audit safe).
+"""Run-scoped SSH / WinRM / PostgreSQL credential overlays (concurrent-audit safe).
 
 Process-global ``os.environ`` / cached :func:`~auditor.config.get_settings` cannot
 isolate two audits aimed at different hosts. This module keeps an optional
 :class:`RuntimeTarget` in a :class:`~contextvars.ContextVar` so each asyncio task
-(and nested tool call) sees its own SSH/PG credentials via
+(and nested tool call) sees its own SSH/WinRM/PG credentials via
 :func:`effective_settings`.
 
 ``bind_ssh_target`` / :func:`bind_runtime_credentials` set the overlay for a
@@ -51,7 +51,7 @@ def _truthy(value: str | bool | None, *, default: bool | None = None) -> bool | 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeTarget:
-    """Optional per-run overlays for SSH and PostgreSQL MCP credentials."""
+    """Optional per-run overlays for SSH, WinRM, and PostgreSQL MCP credentials."""
 
     ssh_host: str | None = None
     ssh_port: int | None = None
@@ -59,6 +59,13 @@ class RuntimeTarget:
     ssh_password: str | None = None
     ssh_private_key_path: str | None = None
     ssh_strict_host_key: bool | None = None
+    winrm_host: str | None = None
+    winrm_port: int | None = None
+    winrm_user: str | None = None
+    winrm_password: str | None = None
+    winrm_transport: str | None = None
+    winrm_use_ssl: bool | None = None
+    winrm_verify_ssl: bool | None = None
     pg_host: str | None = None
     pg_port: int | None = None
     pg_user: str | None = None
@@ -101,7 +108,7 @@ def _set_runtime_target(target: RuntimeTarget | None) -> Token:
 
 
 def runtime_target_from_env_map(creds: Mapping[str, str]) -> RuntimeTarget:
-    """Build a :class:`RuntimeTarget` from ``SSH_*`` / ``PG_*`` / ``DATABASE_URL`` keys.
+    """Build a :class:`RuntimeTarget` from ``SSH_*`` / ``WINRM_*`` / ``PG_*`` keys.
 
     Args:
         creds: Credential mapping (inventory parse or connection.md keys).
@@ -121,8 +128,16 @@ def runtime_target_from_env_map(creds: Mapping[str, str]) -> RuntimeTarget:
             pg_port = int(str(creds["PG_PORT"]).strip())
         except ValueError:
             pg_port = None
+    winrm_port: int | None = None
+    if creds.get("WINRM_PORT"):
+        try:
+            winrm_port = int(str(creds["WINRM_PORT"]).strip())
+        except ValueError:
+            winrm_port = None
 
     strict = _truthy(creds.get("SSH_STRICT_HOST_KEY"))
+    use_ssl = _truthy(creds.get("WINRM_USE_SSL"))
+    verify_ssl = _truthy(creds.get("WINRM_VERIFY_SSL"))
     return RuntimeTarget(
         ssh_host=creds.get("SSH_HOST") or None,
         ssh_port=port,
@@ -130,6 +145,13 @@ def runtime_target_from_env_map(creds: Mapping[str, str]) -> RuntimeTarget:
         ssh_password=creds.get("SSH_PASSWORD") or None,
         ssh_private_key_path=creds.get("SSH_PRIVATE_KEY_PATH") or None,
         ssh_strict_host_key=strict,
+        winrm_host=creds.get("WINRM_HOST") or None,
+        winrm_port=winrm_port,
+        winrm_user=creds.get("WINRM_USER") or None,
+        winrm_password=creds.get("WINRM_PASSWORD") or None,
+        winrm_transport=creds.get("WINRM_TRANSPORT") or None,
+        winrm_use_ssl=use_ssl,
+        winrm_verify_ssl=verify_ssl,
         pg_host=creds.get("PG_HOST") or None,
         pg_port=pg_port,
         pg_user=creds.get("PG_USER") or None,
@@ -148,7 +170,7 @@ def runtime_target_from_ssh(
     private_key_path: str = "",
     strict_host_key: str | bool = "",
 ) -> RuntimeTarget:
-    """Build an SSH-only overlay (PostgreSQL fields left unset)."""
+    """Build an SSH-only overlay (PostgreSQL / WinRM fields left unset)."""
     try:
         ssh_port = int(str(port or "22").strip() or "22")
     except ValueError:
@@ -160,6 +182,32 @@ def runtime_target_from_ssh(
         ssh_password=password or None,
         ssh_private_key_path=private_key_path or None,
         ssh_strict_host_key=_truthy(strict_host_key),
+    )
+
+
+def runtime_target_from_winrm(
+    *,
+    host: str,
+    port: str | int = "5985",
+    user: str = "",
+    password: str = "",
+    transport: str = "ntlm",
+    use_ssl: str | bool = "",
+    verify_ssl: str | bool = "",
+) -> RuntimeTarget:
+    """Build a WinRM-only overlay."""
+    try:
+        winrm_port = int(str(port or "5985").strip() or "5985")
+    except ValueError:
+        winrm_port = 5985
+    return RuntimeTarget(
+        winrm_host=host or None,
+        winrm_port=winrm_port,
+        winrm_user=user or None,
+        winrm_password=password or None,
+        winrm_transport=(transport or "ntlm").strip() or "ntlm",
+        winrm_use_ssl=_truthy(use_ssl, default=winrm_port == 5986),
+        winrm_verify_ssl=_truthy(verify_ssl, default=True),
     )
 
 
@@ -189,6 +237,20 @@ def effective_settings(base: Settings | None = None) -> Settings:
         updates["ssh_private_key_path"] = overlay.ssh_private_key_path
     if overlay.ssh_strict_host_key is not None:
         updates["ssh_strict_host_key"] = overlay.ssh_strict_host_key
+    if overlay.winrm_host is not None:
+        updates["winrm_host"] = overlay.winrm_host
+    if overlay.winrm_port is not None:
+        updates["winrm_port"] = overlay.winrm_port
+    if overlay.winrm_user is not None:
+        updates["winrm_user"] = overlay.winrm_user
+    if overlay.winrm_password is not None:
+        updates["winrm_password"] = overlay.winrm_password
+    if overlay.winrm_transport is not None:
+        updates["winrm_transport"] = overlay.winrm_transport
+    if overlay.winrm_use_ssl is not None:
+        updates["winrm_use_ssl"] = overlay.winrm_use_ssl
+    if overlay.winrm_verify_ssl is not None:
+        updates["winrm_verify_ssl"] = overlay.winrm_verify_ssl
     if overlay.pg_host is not None:
         updates["pg_host"] = overlay.pg_host
     if overlay.pg_port is not None:
@@ -237,6 +299,6 @@ def bind_runtime_target(overlay: RuntimeTarget) -> Iterator[RuntimeTarget]:
 
 @contextmanager
 def bind_runtime_credentials(creds: Mapping[str, str]) -> Iterator[RuntimeTarget]:
-    """Bind SSH/PG overlays from an inventory/env credential mapping."""
+    """Bind SSH/WinRM/PG overlays from an inventory/env credential mapping."""
     with bind_runtime_target(runtime_target_from_env_map(creds)) as bound:
         yield bound

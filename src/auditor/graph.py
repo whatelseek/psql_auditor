@@ -177,7 +177,7 @@ from auditor.prompts import (
 )
 from auditor.secrets_file import (
     InventorySshTarget,
-    bind_ssh_target,
+    bind_host_target,
     list_client_access_endpoints,
     list_client_ssh_targets,
     read_client_credentials,
@@ -189,12 +189,14 @@ from auditor.runtime_target import (
 from auditor.state import AuditorState, Finding, render_report
 from auditor.tools.mcp_client import get_mcp_tools, reconnect_mcp_session
 from auditor.tools.ssh import get_ssh_tools
+from auditor.tools.winrm import get_winrm_tools
 
 # Tight markers only — bare "session" / "timeout" / "eof" caused false reconnects.
 _RECOVERABLE_MARKERS = (
     "mcp error",
     "mcp reconnect failed",
     "ssh error",
+    "winrm error",
     "connection refused",
     "connection reset",
     "broken pipe",
@@ -208,9 +210,14 @@ def _all_tools() -> list:
     """Collect LangChain tools for evidence gathering.
 
     Returns:
-        SSH tools and Postgres MCP tools.
+        SSH, WinRM, and Postgres MCP tools.
     """
-    return [*get_ssh_tools(), *get_mcp_tools()]
+    return [*get_ssh_tools(), *get_winrm_tools(), *get_mcp_tools()]
+
+
+def _host_tools() -> list:
+    """Remote host tools (SSH + WinRM) for discovery / host_facts."""
+    return [*get_ssh_tools(), *get_winrm_tools()]
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
@@ -340,7 +347,7 @@ class AuditorGraph:
         )
         self.evidence_model = build_chat_model(self.settings).bind_tools(self.tools)
         self.evidence_model_ssh = build_chat_model(self.settings).bind_tools(
-            get_ssh_tools()
+            _host_tools()
         )
         self.fill_model = build_chat_model(self.settings)
         self.graph = self._build()
@@ -371,7 +378,7 @@ class AuditorGraph:
                 if creds:
                     stack.enter_context(bind_runtime_credentials(creds))
             if ssh_target is not None:
-                stack.enter_context(bind_ssh_target(ssh_target))
+                stack.enter_context(bind_host_target(ssh_target))
             yield
 
     def _client_slug_from_values(self, values: dict[str, Any] | None) -> str | None:
@@ -3791,6 +3798,10 @@ class AuditorGraph:
             "ssh_key": target.private_key_path if target else "",
             "ssh_strict": target.strict_host_key if target else "",
             "ssh_label": target.label if target else "",
+            "transport": target.transport if target else "ssh",
+            "winrm_transport": target.winrm_transport if target else "",
+            "winrm_use_ssl": target.winrm_use_ssl if target else "",
+            "winrm_verify_ssl": target.winrm_verify_ssl if target else "",
         }
 
     @staticmethod
@@ -3821,6 +3832,10 @@ class AuditorGraph:
             private_key_path=str(job.get("ssh_key") or ""),
             strict_host_key=str(job.get("ssh_strict") or ""),
             label=str(job.get("ssh_label") or ""),
+            transport=str(job.get("transport") or "ssh"),
+            winrm_transport=str(job.get("winrm_transport") or "ntlm"),
+            winrm_use_ssl=str(job.get("winrm_use_ssl") or ""),
+            winrm_verify_ssl=str(job.get("winrm_verify_ssl") or ""),
         )
 
     @staticmethod

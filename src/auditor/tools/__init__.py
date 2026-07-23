@@ -1,20 +1,21 @@
-"""Auditor tools: SSH host inspection and Postgres via LangChain MCP.
+"""Auditor tools: SSH, WinRM, and Postgres via LangChain MCP.
 
 Pipeline role:
     LangChain ``@tool`` callables bound into the evidence-gathering model during
-    ``assess_parallel``. SSH covers host-level checks; MCP subprocesses handle
-    read-only SQL against the audit target.
+    ``assess_parallel``. SSH/WinRM cover host-level checks; MCP subprocesses
+    handle read-only SQL against the audit target.
 
 Submodules:
     * ``ssh`` — Remote shell commands and file reads over asyncssh.
+    * ``winrm`` — PowerShell over WinRM (``pywinrm``) for Windows hosts.
     * ``mcp_client`` — Postgres via ``langchain-mcp-adapters`` and
       https://github.com/antonorlov/mcp-postgres-server (pooled stateful sessions).
     * ``postgres`` — Read-only SQL gate used by MCP wrappers.
     * ``secrets`` — Redact credentials before evidence/playbook persistence.
 
 Re-exported entry points (see ``__all__``):
-    ``get_ssh_tools``, ``get_mcp_tools``, and the individual ``ssh_*`` / ``mcp_*``
-    tool functions.
+    ``get_ssh_tools``, ``get_winrm_tools``, ``get_mcp_tools``, and individual
+    ``ssh_*`` / ``winrm_*`` / ``mcp_*`` tool functions.
 """
 
 from auditor.tools.mcp_client import (
@@ -30,6 +31,7 @@ from auditor.tools.mcp_client import (
     reconnect_mcp_session,
 )
 from auditor.tools.ssh import get_ssh_tools, ssh_read_file, ssh_run
+from auditor.tools.winrm import get_winrm_tools, winrm_read_file, winrm_run
 
 __all__ = [
     "get_mcp_tools",
@@ -45,4 +47,7 @@ __all__ = [
     "get_ssh_tools",
     "ssh_run",
     "ssh_read_file",
+    "get_winrm_tools",
+    "winrm_run",
+    "winrm_read_file",
 ]
