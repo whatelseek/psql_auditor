@@ -2,11 +2,7 @@
 
 from pathlib import Path
 
-from auditor.host_facts import (
-    HostFacts,
-    merge_software_probe_into_facts,
-    parse_audit_software_probe,
-)
+from auditor.host_facts import HostFacts, parse_host_facts_json
 from auditor.intake import (
     apply_scope_exclusions,
     client_slug,
@@ -164,32 +160,25 @@ def test_scope_confirm_and_exclusions():
     assert "Proposed host" in format_proposed_jobs_markdown(proposed)
 
 
-def test_parse_and_merge_software_probe():
-    out = parse_audit_software_probe(
-        "\n".join(
-            [
-                "exit_code=0",
-                "BIN:psql",
-                "BIN:postgres",
-                "PKG:postgresql-16",
-                "PKG:mysql-server",
-                "PKG:bash",
-                "FILE:/etc/postgresql",
-                "OSID:ubuntu",
-                "OSPRETTY:Ubuntu 24.04.2 LTS",
-            ]
-        )
+def test_parse_host_facts_json_llm_payload():
+    facts = parse_host_facts_json(
+        {
+            "hostname": "db1",
+            "ips": ["10.0.0.1"],
+            "os_id": "ubuntu",
+            "os_pretty_name": "Ubuntu 24.04.2 LTS",
+            "binaries": ["psql", "postgres"],
+            "packages": ["postgresql-16", "mysql-server"],
+            "key_files": ["/etc/postgresql"],
+            "listening_ports": [5432],
+        },
+        ssh_host="10.0.0.1",
     )
-    assert out["binaries"] == ["psql", "postgres"]
-    assert "postgresql-16" in out["packages"]
-    assert "mysql-server" in out["packages"]
-    assert "bash" in out["packages"]
-    assert "/etc/postgresql" in out["key_files"]
-    facts = HostFacts()
-    merge_software_probe_into_facts(facts, out)
+    assert facts.hostname == "db1"
     assert "psql" in facts.binaries
     assert "mysql-server" in facts.packages
     assert facts.os_id == "ubuntu"
+    assert 5432 in facts.listening_ports
 
 
 def test_framework_matches_host_via_package_name():

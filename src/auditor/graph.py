@@ -88,20 +88,14 @@ from auditor.frameworks import (
 )
 from auditor.host_facts import (
     HostFacts,
-    audit_software_probe_script,
     compare_to_netbox,
     format_host_facts_markdown,
-    host_facts_probe_script,
     merge_facts_from_raw,
-    merge_software_probe_into_facts,
-    parse_audit_software_probe,
     parse_host_facts_json,
-    parse_host_facts_probe,
     resolve_client_inventory,
     upsert_inventory_md,
     write_host_facts_json,
 )
-from auditor.tools.ssh import ssh_run
 from auditor.hitl import (
     HitlDecision,
     build_hitl_prompt,
@@ -164,6 +158,11 @@ from auditor.prompts import (
     FILL_CELL_PROMPT,
     FILL_SYSTEM_PROMPT,
     FINALIZE_PROMPT,
+    HOST_FACTS_FILL_PROMPT,
+    HOST_FACTS_FILL_SYSTEM_PROMPT,
+    HOST_FACTS_FORCE_PROMPT,
+    HOST_FACTS_PROMPT,
+    HOST_FACTS_SYSTEM_PROMPT,
     SOFTWARE_FRAMEWORK_ROUTE_PROMPT,
     SOFTWARE_FRAMEWORK_ROUTE_SYSTEM,
     INTAKE_INTERPRET_AUDIT_TYPE_PROMPT,
@@ -1174,36 +1173,13 @@ class AuditorGraph:
         user_request: str = "",
         extra_binaries: list[str] | None = None,
     ) -> HostFacts:
-        """One-shot SSH host-facts probe (no LLM tool loop).
-
-        Avoids the UI “stuck on ``df -h``” stall where progress shows the last
-        SSH tool while the model thinks for another round. Uses local-only
-        ``df -hl`` inside :func:`host_facts_probe_script`.
-        """
-        del user_request  # kept for call-site compatibility
-        ssh_host = str(effective_settings(self.settings).ssh_host or "")
-        if store is not None and host_id:
-            store.host_segment = host_id
-
-        script = host_facts_probe_script(extra_binaries=extra_binaries or [])
-        cmd = f"bash -s <<'AUDITOR_EOF'\n{script}\nAUDITOR_EOF"
-        try:
-            raw = str(await ssh_run.ainvoke({"command": cmd}))
-        except Exception as exc:  # noqa: BLE001
-            raw = f"SSH error: {type(exc).__name__}: {exc}"
-        if store is not None:
-            store.write_tool_result(
-                "host_facts",
-                "discover",
-                "ssh_run",
-                {"command": "host_facts_probe_script"},
-                raw,
-            )
-        facts = parse_host_facts_probe(raw, ssh_host=ssh_host)
-        if not facts.hostname and not facts.error and "SSH error" in raw:
-            facts.error = raw.strip().splitlines()[0][:300]
-        facts.raw["host_facts_source"] = "ssh_probe"
-        return facts
+        """LLM SSH tool loop + JSON fill → ``HostFacts`` (parser fallback)."""
+        del extra_binaries  # routing hints stay in framework detect / LLM tools
+        return await self._collect_host_facts_llm(
+            store=store,
+            host_id=host_id,
+            user_request=user_request,
+        )
 
     async def _collect_host_facts_llm(
         self,
@@ -1212,12 +1188,92 @@ class AuditorGraph:
         host_id: str = "",
         user_request: str = "",
     ) -> HostFacts:
-        """Legacy LLM SSH tool loop — prefer :meth:`_collect_host_facts`."""
-        return await self._collect_host_facts(
-            store=store,
-            host_id=host_id,
-            user_request=user_request,
+        """SSH-only tool loop + JSON fill → ``HostFacts`` (parser fallback)."""
+        ssh_host = str(effective_settings(self.settings).ssh_host or "")
+        evidence_fw = "host_facts"
+        evidence_req = "discover"
+        if store is not None and host_id:
+            store.host_segment = host_id
+
+        messages: list = [
+            SystemMessage(content=HOST_FACTS_SYSTEM_PROMPT),
+            HumanMessage(
+                content=HOST_FACTS_PROMPT.format(
+                    user_request=truncate_text(
+                        user_request or "Discover host inventory for audit routing.",
+                        self.settings.max_user_request_chars,
+                        "user_request",
+                    ),
+                    ssh_host=ssh_host or "(unknown)",
+                )
+            ),
+        ]
+        chunks: list[str] = []
+        raw: dict[str, str] = {}
+        max_rounds = self.settings.max_tool_rounds_per_item
+        tool_idx = 0
+
+        for _ in range(max_rounds + 1):
+            rounds = count_tool_rounds(messages)
+            if rounds >= max_rounds:
+                messages.append(HumanMessage(content=HOST_FACTS_FORCE_PROMPT))
+                response = await self.fill_model.ainvoke(messages)
+                chunks.append(str(response.content or ""))
+                break
+
+            response = await self.evidence_model_ssh.ainvoke(messages)
+            messages.append(response)
+            tool_calls = getattr(response, "tool_calls", None) or []
+            if not tool_calls:
+                chunks.append(str(response.content or ""))
+                break
+
+            tool_messages = await self._execute_tool_calls(
+                tool_calls,
+                framework_id=evidence_fw,
+                req_id=evidence_req,
+                store=store,
+                has_cmdb=False,
+            )
+            messages.extend(tool_messages)
+            for tm in tool_messages:
+                tool_idx += 1
+                text = str(tm.content or "")
+                raw[f"tool_{tool_idx}_{tm.name or 'ssh'}"] = text
+                chunks.append(f"[{tm.name}] {text}")
+
+        evidence = "\n---\n".join(c.strip() for c in chunks if c and c.strip())
+        evidence = truncate_text(
+            evidence,
+            self.settings.max_tool_output_chars * 2,
+            "host_facts_evidence",
         )
+
+        fill_messages = [
+            SystemMessage(content=HOST_FACTS_FILL_SYSTEM_PROMPT),
+            HumanMessage(
+                content=HOST_FACTS_FILL_PROMPT.format(
+                    ssh_host=ssh_host or "(unknown)",
+                    evidence=evidence or "(no evidence collected)",
+                )
+            ),
+        ]
+        try:
+            fill_response = await self.fill_model.ainvoke(fill_messages)
+            payload = _extract_json(str(fill_response.content or ""))
+        except Exception as exc:  # noqa: BLE001
+            payload = {"error": f"{type(exc).__name__}: {exc}"}
+
+        facts = parse_host_facts_json(payload, ssh_host=ssh_host, raw=raw)
+        facts = merge_facts_from_raw(facts, raw)
+        if not facts.ssh_host:
+            facts.ssh_host = ssh_host
+        if not facts.collected_at:
+            from datetime import datetime, timezone
+
+            facts.collected_at = datetime.now(timezone.utc).isoformat()
+        facts.raw["host_facts_source"] = "llm"
+        return facts
 
     async def collect_host_facts(self, state: AuditorState) -> dict[str, Any]:
         """Gather hostname/OS/software/disk/RAM/CPU; compare NetBox; refresh INVENTORY.md."""
@@ -3115,75 +3171,14 @@ class AuditorGraph:
             "awaiting_hitl": False,
         }
 
-    async def _collect_software_inventory(
-        self,
-        *,
-        store: EvidenceStore | None = None,
-        host_id: str = "",
-        extra_binaries: list[str] | None = None,
-    ) -> dict[str, list[str] | str]:
-        """One-shot SSH package inventory (deb/rpm; Windows PowerShell fallback).
-
-        Avoids the multi-round LLM tool loop that stalled intake while the model
-        tried to re-emit hundreds of ``PKG:`` lines after ``dpkg-query``.
-        """
-        if store is not None and host_id:
-            store.host_segment = host_id
-
-        script = audit_software_probe_script(extra_binaries=extra_binaries or [])
-        # Run via bash -s so a multi-line script is one remote command.
-        cmd = f"bash -s <<'AUDITOR_EOF'\n{script}\nAUDITOR_EOF"
-        try:
-            raw = str(await ssh_run.ainvoke({"command": cmd}))
-        except Exception as exc:  # noqa: BLE001
-            raw = f"ssh error: {type(exc).__name__}: {exc}"
-        if store is not None:
-            store.write_tool_result(
-                "host_facts",
-                "packages_full",
-                "ssh_run",
-                {"command": "audit_software_probe_script"},
-                raw,
-            )
-        parsed = parse_audit_software_probe(raw)
-
-        # Windows / non-bash hosts: one PowerShell listing if Linux probe empty.
-        if not parsed.get("packages"):
-            win_cmd = (
-                "powershell -NoProfile -Command "
-                "\"Get-Package -ErrorAction SilentlyContinue | "
-                "ForEach-Object { 'PKG:' + $_.Name }; "
-                "Get-ItemProperty HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\"
-                "Uninstall\\*,"
-                "HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\"
-                "Uninstall\\* -ErrorAction SilentlyContinue | "
-                "ForEach-Object { if ($_.DisplayName) { 'PKG:' + $_.DisplayName } }\""
-            )
-            try:
-                win_raw = str(await ssh_run.ainvoke({"command": win_cmd}))
-            except Exception as exc:  # noqa: BLE001
-                win_raw = f"ssh error: {type(exc).__name__}: {exc}"
-            if store is not None:
-                store.write_tool_result(
-                    "host_facts",
-                    "packages_full",
-                    "ssh_run",
-                    {"command": "windows_package_probe"},
-                    win_raw,
-                )
-            win_parsed = parse_audit_software_probe(win_raw)
-            if win_parsed.get("packages"):
-                parsed = win_parsed
-        return parsed
-
     async def _llm_route_frameworks_from_software(
         self,
         facts: HostFacts,
     ) -> dict[str, Any]:
-        """Ask the LLM which agents/ frameworks match the full package inventory.
+        """Ask the LLM which agents/ frameworks match collected software signals.
 
         Args:
-            facts: Host facts including full ``packages`` list from the probe.
+            facts: Host facts including binaries/packages from LLM discovery.
 
         Returns:
             Dict with ``framework_ids``, ``highlight_packages``,
@@ -3272,11 +3267,6 @@ class AuditorGraph:
                     private_key_path=effective.ssh_private_key_path or "",
                 )
             ]
-        # Extra binaries from framework detect rules (grows when agents/ grow).
-        extra_bins: list[str] = []
-        for fw in list_frameworks(self.settings.agents_dir):
-            extra_bins.extend(list(fw.detect.binaries or ()))
-
         discovered: list[tuple[InventorySshTarget, HostFacts]] = []
         for target in targets:
             with self._target_scope(client_slug=slug, ssh_target=target, intake=intake):
@@ -3284,43 +3274,19 @@ class AuditorGraph:
                     store=store,
                     host_id=target.slug,
                     user_request=str(intake.get("client_name") or ""),
-                    extra_binaries=extra_bins,
                 )
-                # Full package inventory via one-shot SSH probe (not LLM).
+                # Optional LLM routing hints from collected software signals.
                 try:
-                    inv = await self._collect_software_inventory(
-                        store=store,
-                        host_id=target.slug,
-                        extra_binaries=extra_bins,
-                    )
-                    merge_software_probe_into_facts(facts, inv)
-                    facts.raw["software_inventory_source"] = "ssh_probe"
-                    host_base = store.host_root(target.slug)
-                    packages_path = host_base / "packages_full.txt"
-                    packages_path.write_text(
-                        "\n".join(facts.packages)
-                        + ("\n" if facts.packages else ""),
-                        encoding="utf-8",
-                    )
-                    if store is not None:
-                        store.write_tool_result(
-                            "host_facts",
-                            "packages_full",
-                            "llm_software_inventory",
-                            {"path": str(packages_path), "count": len(facts.packages)},
-                            "\n".join(facts.packages[:200])
-                            + (
-                                f"\n… ({len(facts.packages)} total)"
-                                if len(facts.packages) > 200
-                                else ""
-                            ),
-                        )
+                    route = await self._llm_route_frameworks_from_software(facts)
                 except Exception as exc:  # noqa: BLE001
-                    facts.raw["software_inventory_error"] = (
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                route = await self._llm_route_frameworks_from_software(facts)
+                    route = {
+                        "framework_ids": [],
+                        "highlight_packages": [],
+                        "highlight_binaries": list(facts.binaries or [])[:20],
+                        "notes": f"route_error: {type(exc).__name__}: {exc}",
+                    }
                 facts.raw["software_route"] = str(route)
+                facts.raw["software_inventory_source"] = "llm"
             facts.ssh_host = target.host
             # Stash LLM routing on facts.raw for proposed_jobs builder.
             facts.raw["_llm_framework_ids"] = ",".join(
@@ -3337,6 +3303,11 @@ class AuditorGraph:
             write_host_facts_json(host_base / "host_facts.json", facts, [])
             md = format_host_facts_markdown(facts, None, language="en")
             (host_base / "host_facts.md").write_text(md, encoding="utf-8")
+            if facts.packages:
+                (host_base / "packages_full.txt").write_text(
+                    "\n".join(facts.packages) + "\n",
+                    encoding="utf-8",
+                )
             discovered.append((target, facts))
         return discovered
 
