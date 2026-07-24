@@ -67,43 +67,22 @@ async def probe_access_endpoints(
         timeout: Per-endpoint TCP connect timeout.
 
     Returns:
-        Rows with ``service``, ``host``, ``port``, ``kind``, ``protocol``,
-        ``status`` (``accessible`` / ``not accessible`` / ``unknown``), and
-        short ``detail`` text.
+        Rows with ``service``, ``host``, ``port``, ``status``
+        (``accessible`` / ``not accessible``).
     """
     rows: list[dict[str, str]] = []
     for ep in endpoints:
         host = str(ep.get("host") or "").strip()
         port = str(ep.get("port") or "").strip()
         service = str(ep.get("service") or ep.get("kind") or "service").strip()
-        kind = str(ep.get("kind") or "").strip().lower()
-        protocol = str(ep.get("protocol") or "").strip().lower()
-        if not protocol:
-            protocol = kind if kind in {"snmp"} else "tcp"
-
-        status = "unknown"
-        detail = ""
-        if not host:
-            status = "unknown"
-            detail = "missing host"
-        elif not port:
-            status = "unknown"
-            detail = "missing port"
-        else:
-            ok = await probe_tcp_endpoint(host, port, timeout=timeout)
-            status = "accessible" if ok else "not accessible"
-            if protocol == "snmp":
-                detail = "tcp probe on SNMP port"
-
+        ok = await probe_tcp_endpoint(host, port, timeout=timeout)
         rows.append(
             {
                 "service": service,
                 "host": host,
                 "port": port,
-                "kind": kind,
-                "protocol": protocol,
-                "status": status,
-                "detail": detail[:240],
+                "kind": str(ep.get("kind") or "").strip(),
+                "status": "accessible" if ok else "not accessible",
             }
         )
     return rows
@@ -213,6 +192,5 @@ async def probe_access_services(settings: Settings | None = None) -> dict[str, A
 
     return {
         "services": services,
-        "execution_channels": services,
         "any_ok": any(s["status"] == "ok" for s in services),
     }
