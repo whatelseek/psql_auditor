@@ -69,11 +69,6 @@ services:
       RESULTS_DATABASE_URL: ${RESULTS_DATABASE_URL:-postgresql://results_admin:results_lab_secret@results-db:5432/postgres}
       RESULTS_DB_PER_CLIENT: ${RESULTS_DB_PER_CLIENT:-true}
       RESULTS_DB_NAME_PREFIX: ${RESULTS_DB_NAME_PREFIX:-results_}
-      # Optional MLflow (standalone under mlflow/; drop with MLFLOW_ENABLED=false)
-      MLFLOW_ENABLED: ${MLFLOW_ENABLED:-false}
-      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://host.docker.internal:5000}
-      MLFLOW_EXPERIMENT_NAME: ${MLFLOW_EXPERIMENT_NAME:-psql-auditor}
-      MLFLOW_AUTOLOG: ${MLFLOW_AUTOLOG:-true}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -102,16 +97,41 @@ services:
       OPENAI_API_KEYS: ${API_KEY:-sk-auditor-local}
       WEBUI_AUTH: ${WEBUI_AUTH:-false}
       ENABLE_API_KEYS: ${ENABLE_API_KEYS:-true}
+      TERMINAL_SERVER_CONNECTIONS: >-
+        [{"id":"local-terminal","name":"MyTerminal","enabled":true,"url":"http://open-terminal:8000","key":"${OPEN_TERMINAL_API_KEY:-sk-open-terminal-local}","auth_type":"bearer"}]
       # Long audits; default Open WebUI client timeout is too short
       AIOHTTP_CLIENT_TIMEOUT: ${AIOHTTP_CLIENT_TIMEOUT:-3600}
       # Lab LiteLLM uses HTTPS with a private CA / self-signed cert
       AIOHTTP_CLIENT_SESSION_SSL: ${AIOHTTP_CLIENT_SESSION_SSL:-false}
     volumes:
       - open-webui-data:/app/backend/data
+      - ${OWUI_AGENTS_PATH:-./agents}:/workspace/agents:ro
+      - ${OWUI_ARTIFACTS_PATH:-./artifacts}:/workspace/artifacts
+      - ${OWUI_INVENTORY_PATH:-./inventory}:/workspace/inventory
     depends_on:
       - agent
+      - open-terminal
+    restart: unless-stopped
+
+  open-terminal:
+    image: ghcr.io/open-webui/open-terminal:main
+    group_add:
+      - "${OPEN_TERMINAL_SUPP_GID:-1001}"
+    working_dir: /home/user
+    entrypoint: ["python", "-m", "uvicorn", "openterminal_compat:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${OPEN_TERMINAL_HOST_PORT:-9900}:8000"
+    environment:
+      OPEN_TERMINAL_API_KEY: ${OPEN_TERMINAL_API_KEY:-sk-open-terminal-local}
+    volumes:
+      - open-terminal-home:/home/user
+      - ./openterminal_compat.py:/home/user/openterminal_compat.py:ro
+      - ${OWUI_AGENTS_PATH:-./agents}:/home/user/workspace/agents:ro
+      - ${OWUI_ARTIFACTS_PATH:-./artifacts}:/home/user/workspace/artifacts
+      - ${OWUI_INVENTORY_PATH:-./inventory}:/home/user/workspace/inventory
     restart: unless-stopped
 
 volumes:
   open-webui-data:
   results-db-data:
+  open-terminal-home:

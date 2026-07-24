@@ -1,18 +1,18 @@
 ---
-id: postgres_cis
-aliases: [postgres, postgresql, psql, database, pg]
-description: PostgreSQL CIS / hardening checklist
+id: postgres_cis_ru
+aliases: [postgres, postgresql, psql, database, pg, постгрес, postgres cis, аудит postgres]
+description: Чеклист hardening PostgreSQL (RU)
 domain: cybersecurity
-language: en
+language: ru
 family_id: postgres_cis
 detect:
   binaries: [postgres, psql]
   ports: [5432]
 ---
-# PostgreSQL Security Audit Checklist
+# Чеклист аудита безопасности PostgreSQL
 
-Scaffold CIS-style hardening checklist. Replace or extend this file as needed.
-Each requirement uses a stable `REQ-NNN` id parsed by the auditor.
+RU-вариант чеклиста для PostgreSQL. Структура требований совместима с парсером
+аудитора (`REQ-NNN`, Category/Severity/How to verify/Pass criteria).
 
 ## REQ-001: Password encryption method
 **Category:** Access Control

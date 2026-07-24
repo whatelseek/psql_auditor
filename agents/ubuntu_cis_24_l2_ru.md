@@ -1,17 +1,17 @@
 ---
-id: ubuntu_cis_24_l2
-aliases: [ubuntu, ubuntu24, ubuntu-cis, ubuntu-cis-24, cis-ubuntu-24, ubuntu l2, ubuntu cis]
-description: CIS Ubuntu Linux 24.04 LTS v1.0.0 Level 2 Server (simplified checklist)
+id: ubuntu_cis_24_l2_ru
+aliases: [ubuntu, ubuntu24, ubuntu-cis, ubuntu-cis-24, cis-ubuntu-24, ubuntu l2, ubuntu cis, ubuntu ru, ubuntu русский]
+description: CIS Ubuntu Linux 24.04 LTS v1.0.0 Level 2 Server (RU variant)
 domain: cybersecurity
-language: en
+language: ru
 family_id: ubuntu_cis_24_l2
 detect:
   os_ids: [ubuntu]
 ---
-# CIS Ubuntu Linux 24.04 LTS v1.0.0 (Level 2 Server)
+# CIS Ubuntu Linux 24.04 LTS v1.0.0 (Level 2 Server, RU)
 
-Concise operational checklist for SSH verification.
-Use focused checks and collect factual evidence only.
+Краткий operational-чеклист для SSH-проверок (RU-вариант фреймворка).
+Используйте сфокусированные проверки и фиксируйте только подтвержденные данные.
 
 ## REQ-001: 1.1.1.6 Ensure overlayfs kernel module is not available
 **Category:** Initial Setup

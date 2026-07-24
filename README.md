@@ -5,6 +5,7 @@ LangGraph security auditor. **You create frameworks** by dropping Markdown files
 **Руководство пользователя (RU):** [`docs/user-manual-ru.md`](docs/user-manual-ru.md) — развёртывание, использование, добавление Markdown-фреймворков.
 
 **Docs index:** [`docs/README.md`](docs/README.md) — intent, intake, MCP, results warehouse, and more.
+**Open Terminal + frameworks:** [`docs/open-terminal-and-agents.md`](docs/open-terminal-and-agents.md) — file browser integration and adding new `agents/*.md`.
 
 ## Create a framework
 

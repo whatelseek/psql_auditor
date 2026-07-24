@@ -26,6 +26,7 @@ from typing import Any
 import yaml
 
 from auditor.checklist import Checklist, parse_checklist_markdown
+from auditor.language import detect_report_language
 
 _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n(.*)\Z", re.DOTALL)
 
@@ -63,6 +64,8 @@ class Framework:
       aliases: Search tokens for :func:`route_framework` scoring.
       domain: ``it`` or ``cybersecurity`` for intake filtering.
       detect: Host auto-detection rules parsed from frontmatter.
+      language: Preferred checklist language (``en`` / ``ru`` / ``any``).
+      family_id: Logical family key used to prefer language variants.
   """
 
     id: str
@@ -72,6 +75,21 @@ class Framework:
     aliases: tuple[str, ...] = ()
     domain: str = "cybersecurity"  # it | cybersecurity
     detect: FrameworkDetect = field(default_factory=FrameworkDetect)
+    language: str = "any"  # any | en | ru
+    family_id: str = ""
+
+
+def _normalize_framework_language(value: Any) -> str:
+    """Normalize frontmatter language to ``any``/``en``/``ru``."""
+    text = str(value or "").strip().lower().replace("_", "-")
+    if not text:
+        return "any"
+    primary = text.split("-", 1)[0]
+    if primary in {"en", "english", "английский"}:
+        return "en"
+    if primary in {"ru", "russian", "русский"}:
+        return "ru"
+    return "any"
 
 
 def _default_aliases(stem: str, title: str) -> tuple[str, ...]:
@@ -173,6 +191,10 @@ def _parse_agent_file(path: Path) -> Framework:
     title = str(meta.get("title") or (title_match.group(1).strip() if title_match else path.stem))
     fw_id = str(meta.get("id") or path.stem)
     description = str(meta.get("description") or title)
+    language = _normalize_framework_language(meta.get("language") or meta.get("lang"))
+    family_id = str(meta.get("family_id") or "").strip()
+    if not family_id:
+        family_id = re.sub(r"_(en|ru)$", "", fw_id.lower())
 
     aliases_raw = meta.get("aliases") or []
     if isinstance(aliases_raw, str):
@@ -208,7 +230,33 @@ def _parse_agent_file(path: Path) -> Framework:
         aliases=aliases,
         domain=domain,
         detect=detect,
+        language=language,
+        family_id=family_id,
     )
+
+
+def _prefer_language_variants(
+    frameworks: list[Framework],
+    preferred_language: str | None,
+) -> list[Framework]:
+    """Prefer requested language variants per framework family when available."""
+    lang = _normalize_framework_language(preferred_language)
+    if lang not in {"en", "ru"}:
+        return frameworks
+
+    by_family: dict[str, list[Framework]] = {}
+    for fw in frameworks:
+        key = fw.family_id or fw.id
+        by_family.setdefault(key, []).append(fw)
+
+    selected: list[Framework] = []
+    for group in by_family.values():
+        matches = [fw for fw in group if fw.language == lang]
+        if matches:
+            selected.extend(matches)
+            continue
+        selected.extend(group)
+    return selected
 
 
 def list_frameworks(agents_dir: Path | str | None = None) -> list[Framework]:
@@ -249,6 +297,8 @@ def get_framework(
 def _score_frameworks(
     user_request: str,
     agents_dir: Path | str | None = None,
+    *,
+    preferred_language: str | None = None,
 ) -> list[tuple[int, Framework]]:
     """Score every discovered framework against the operator request text.
 
@@ -266,6 +316,7 @@ def _score_frameworks(
       FileNotFoundError: When ``agents_dir`` contains no ``*.md`` frameworks.
   """
     frameworks = list_frameworks(agents_dir)
+    frameworks = _prefer_language_variants(frameworks, preferred_language)
     if not frameworks:
         raise FileNotFoundError(
             f"No frameworks found in {Path(agents_dir or 'agents')}. "
@@ -297,6 +348,8 @@ def _score_frameworks(
 def route_framework(
     user_request: str,
     agents_dir: Path | str | None = None,
+    *,
+    preferred_language: str | None = None,
 ) -> Framework:
     """Pick the single best framework for a natural-language audit request.
 
@@ -313,7 +366,10 @@ def route_framework(
   Raises:
       FileNotFoundError: When no frameworks exist in ``agents_dir``.
   """
-    scored = _score_frameworks(user_request, agents_dir)
+    lang = preferred_language or detect_report_language(user_request).code
+    scored = _score_frameworks(
+        user_request, agents_dir, preferred_language=lang
+    )
     best_score, best = scored[0]
     if best_score == 0:
         for _score, fw in scored:
@@ -328,6 +384,7 @@ def route_frameworks(
     agents_dir: Path | str | None = None,
     *,
     min_score: int = 3,
+    preferred_language: str | None = None,
 ) -> list[Framework]:
     """Return all frameworks clearly referenced in the request.
 
@@ -338,10 +395,19 @@ def route_frameworks(
     one solid alias / title hit). If nothing clears the threshold, falls back
     to a single ``route_framework`` result.
     """
-    scored = _score_frameworks(user_request, agents_dir)
+    lang = preferred_language or detect_report_language(user_request).code
+    scored = _score_frameworks(
+        user_request, agents_dir, preferred_language=lang
+    )
     matched = [fw for score, fw in scored if score >= min_score]
     if not matched:
-        return [route_framework(user_request, agents_dir)]
+        return [
+            route_framework(
+                user_request,
+                agents_dir,
+                preferred_language=lang,
+            )
+        ]
     # Preserve score order (already sorted).
     return matched
 
@@ -411,6 +477,7 @@ def select_frameworks_for_host(
     *,
     domains: list[str] | tuple[str, ...] | None = None,
     agents_dir: Path | str | None = None,
+    preferred_language: str | None = None,
 ) -> list[Framework]:
     """Pick frameworks whose domain + detect rules match host facts.
 
@@ -418,8 +485,12 @@ def select_frameworks_for_host(
     When domain includes ``it`` and nothing matches, fall back to ``it_audit``.
     """
     wanted = {d.lower() for d in (domains or ["it", "cybersecurity"])}
+    candidates = _prefer_language_variants(
+        list_frameworks(agents_dir),
+        preferred_language,
+    )
     matched: list[Framework] = []
-    for fw in list_frameworks(agents_dir):
+    for fw in candidates:
         if fw.domain not in wanted:
             continue
         if framework_matches_host(fw, facts):
@@ -432,6 +503,49 @@ def select_frameworks_for_host(
 
     matched.sort(key=lambda f: (0 if f.domain == "it" else 1, f.id))
     return matched
+
+
+def prefer_framework_ids(
+    framework_ids: list[str],
+    *,
+    agents_dir: Path | str | None = None,
+    preferred_language: str | None = None,
+) -> list[str]:
+    """Deduplicate framework ids by family, preferring requested language.
+
+    Keeps first-seen family order while replacing with the preferred-language
+    variant when both RU/EN ids are present.
+    """
+    lang = _normalize_framework_language(preferred_language)
+    order: list[str] = []
+    chosen: dict[str, tuple[int, Framework | None, str]] = {}
+
+    for index, fid in enumerate(framework_ids):
+        fw = get_framework(fid, agents_dir)
+        family = fw.family_id if fw and fw.family_id else (fw.id if fw else fid)
+        if family not in chosen:
+            order.append(family)
+            chosen[family] = (index, fw, fid)
+            continue
+
+        prev_index, prev_fw, prev_fid = chosen[family]
+        if (
+            lang in {"en", "ru"}
+            and fw is not None
+            and fw.language == lang
+            and (prev_fw is None or prev_fw.language != lang)
+        ):
+            chosen[family] = (prev_index, fw, fid)
+            continue
+        # Keep earlier entry otherwise.
+        chosen[family] = (prev_index, prev_fw, prev_fid)
+
+    result: list[str] = []
+    for family in order:
+        _idx, _fw, fid = chosen[family]
+        if fid not in result:
+            result.append(fid)
+    return result
 
 
 def load_framework_checklist(framework: Framework) -> Checklist:

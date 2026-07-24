@@ -82,6 +82,7 @@ from auditor.frameworks import (
     get_framework,
     list_frameworks,
     load_framework_checklist,
+    prefer_framework_ids,
     route_framework,
     route_frameworks,
     select_frameworks_for_host,
@@ -143,11 +144,6 @@ from auditor.language import (
 )
 from auditor.memory.playbook_store import PlaybookMemory
 from auditor.report_archive import package_and_publish_archive
-from auditor.mlflow_store import (
-    end_mlflow_run_safe,
-    ensure_mlflow_run_safe,
-    log_mlflow_finalize_safe,
-)
 from auditor.results_store import (
     record_requirement_result_safe,
     record_results_safe,
@@ -918,6 +914,27 @@ class AuditorGraph:
                     enrich_facts_from_access_rows(
                         facts, target.host, host_access_rows
                     )
+                    inv_service_name = ""
+                    # Prefer explicit service labels from INVENTORY.md (e.g. pg-server, 1c-server)
+                    # when live hostname discovery is empty.
+                    for row in host_access_rows:
+                        if str(row.get("host") or "") != target.host:
+                            continue
+                        svc = str(row.get("service") or "").strip()
+                        if not svc:
+                            continue
+                        if not inv_service_name:
+                            inv_service_name = svc
+                        kind = str(row.get("kind") or "").strip().lower()
+                        if kind not in {"pg", "ssh", "winrm"}:
+                            inv_service_name = svc
+                            break
+                    display_hostname = (
+                        (facts.hostname or "").strip()
+                        or inv_service_name
+                        or target.host
+                        or target.slug
+                    )
                     if facts.error:
                         matched_ids: list[str] = []
                         it_fw = get_framework(
@@ -935,13 +952,19 @@ class AuditorGraph:
                             facts,
                             domains=["it", "cybersecurity"],
                             agents_dir=self.settings.agents_dir,
+                            preferred_language=lang.code,
                         ):
                             if fw.id not in matched_ids:
                                 matched_ids.append(fw.id)
+                        matched_ids = prefer_framework_ids(
+                            matched_ids,
+                            agents_dir=self.settings.agents_dir,
+                            preferred_language=lang.code,
+                        )
                         proposed.append(
                             {
                                 "host_id": target.slug,
-                                "hostname": facts.hostname or "",
+                                "hostname": display_hostname,
                                 "ssh_host": target.host,
                                 "frameworks": matched_ids,
                                 "error": facts.error,
@@ -959,6 +982,7 @@ class AuditorGraph:
                             facts,
                             domains=["it", "cybersecurity"],
                             agents_dir=self.settings.agents_dir,
+                            preferred_language=lang.code,
                         )
                         matched_ids = [fw.id for fw in matched]
                         for fid in llm_ids:
@@ -966,10 +990,15 @@ class AuditorGraph:
                                 fid, self.settings.agents_dir
                             ):
                                 matched_ids.append(fid)
+                        matched_ids = prefer_framework_ids(
+                            matched_ids,
+                            agents_dir=self.settings.agents_dir,
+                            preferred_language=lang.code,
+                        )
                         proposed.append(
                             {
                                 "host_id": target.slug,
-                                "hostname": facts.hostname or "",
+                                "hostname": display_hostname,
                                 "ssh_host": target.host,
                                 "frameworks": matched_ids,
                                 "error": "",
@@ -1717,7 +1746,11 @@ class AuditorGraph:
                         f"Pinned framework `{pinned}` not found in agents/"
                     )
             else:
-                fw = route_framework(user_request, self.settings.agents_dir)
+                fw = route_framework(
+                    user_request,
+                    self.settings.agents_dir,
+                    preferred_language=report_lang.code,
+                )
         except FileNotFoundError as exc:
             return {
                 "user_request": user_request,
@@ -1767,6 +1800,7 @@ class AuditorGraph:
             selected = route_framework(
                 state.get("user_request") or "",
                 self.settings.agents_dir,
+                preferred_language=str(state.get("report_language") or ""),
             )
         checklist = load_framework_checklist(selected)
         req_map = checklist.by_id()
@@ -2855,12 +2889,11 @@ class AuditorGraph:
         retries = int(state.get("retry_count") or 0)
         store = self._store_from_state(state)
         evidence_note = ""
-        report_for_mlflow: Path | None = None
         if store is not None:
             host_id = str(state.get("evidence_host_id") or "").strip()
             if host_id:
                 store.host_segment = host_id
-            report_for_mlflow = store.write_report(
+            store.write_report(
                 fw or "framework", f"{summary}\n\n---\n\n{full_report}"
             )
             evidence_note = f" | evidence: `{store.root}`"
@@ -2907,22 +2940,6 @@ class AuditorGraph:
             )
         else:
             session_number = None
-
-        # Optional MLflow side channel (no-op when MLFLOW_ENABLED=false).
-        mlflow_run_id = str(
-            state.get("evidence_run_id") or (store.run_id if store else "") or ""
-        )
-        log_mlflow_finalize_safe(
-            self.settings,
-            run_id=mlflow_run_id,
-            framework_id=fw or "framework",
-            findings=findings or None,
-            client_name=str(state.get("client_name") or ""),
-            evidence_host_id=str(state.get("evidence_host_id") or ""),
-            retry_count=retries,
-            session_number=session_number,
-            report_path=report_for_mlflow,
-        )
 
         header = (
             f"Framework: `{fw}` | session reconnects: {retries}{evidence_note}\n\n"
@@ -2975,14 +2992,6 @@ class AuditorGraph:
                 )
         elif store is not None and not in_multi:
             store.write_root_report(disk_report)
-
-        if not in_multi and mlflow_run_id:
-            end_mlflow_run_safe(
-                self.settings,
-                run_id=mlflow_run_id,
-                client_name=str(state.get("client_name") or ""),
-                archive_path=archive_path or None,
-            )
 
         chat_text = f"{chat_text.rstrip()}{followup_footer()}"
 
@@ -3108,21 +3117,6 @@ class AuditorGraph:
                     "results_session_number"
                 ]
         store.write_run_meta(**meta)
-        ensure_mlflow_run_safe(
-            self.settings,
-            run_id=store.run_id,
-            client_name=str((intake_state or {}).get("client_name") or ""),
-            params={
-                "model": self.settings.litellm_model,
-                "framework_id": framework_id or "",
-                "client_name": str((intake_state or {}).get("client_name") or ""),
-                "hitl_enabled": self.settings.hitl_enabled,
-            },
-            tags={
-                "auditor.thread_id": tid,
-                "auditor.framework_id": framework_id or "",
-            },
-        )
         initial: AuditorState = {
             "messages": [HumanMessage(content=user_text)],
             "user_request": truncate_text(
@@ -3826,6 +3820,7 @@ class AuditorGraph:
 
         # Jobs: (ssh_target, facts, framework)
         jobs: list[tuple[InventorySshTarget, HostFacts, Any]] = []
+        preferred_lang = detect_report_language(user_text).code
         selected_rows = list(intake.get("selected_jobs") or [])
         if has_access and selected_rows:
             jobs = self._jobs_from_selected_intake(
@@ -3848,6 +3843,7 @@ class AuditorGraph:
                         facts,
                         domains=domains,
                         agents_dir=self.settings.agents_dir,
+                        preferred_language=preferred_lang,
                     )
                 for fw in matched:
                     jobs.append((target, facts, fw))
@@ -3865,7 +3861,11 @@ class AuditorGraph:
                 if fw is not None:
                     selected.append(fw)
             if not selected:
-                selected = route_frameworks(user_text, self.settings.agents_dir)
+                selected = route_frameworks(
+                    user_text,
+                    self.settings.agents_dir,
+                    preferred_language=preferred_lang,
+                )
             store.write_run_meta(
                 frameworks=[fw.id for fw in selected],
                 intake_complete=True,
@@ -4533,15 +4533,6 @@ class AuditorGraph:
                         f"(Archive packaging failed: {type(exc).__name__}: {exc})\n"
                     )
         chat_text = f"{chat_text.rstrip()}{followup_footer()}"
-        client_name = ""
-        if store is not None:
-            client_name = str(store.read_run_meta().get("client_name") or "")
-        end_mlflow_run_safe(
-            self.settings,
-            run_id=run_id,
-            client_name=client_name,
-            archive_path=archive_path or None,
-        )
         return {
             "report": chat_text,
             "messages": [AIMessage(content=chat_text)],
@@ -4631,16 +4622,6 @@ class AuditorGraph:
                 "user_request",
             ),
             thread_id=base_thread,
-        )
-        ensure_mlflow_run_safe(
-            self.settings,
-            run_id=run_id,
-            params={
-                "model": self.settings.litellm_model,
-                "hitl_enabled": self.settings.hitl_enabled,
-                "thread_id": base_thread,
-            },
-            tags={"auditor.thread_id": base_thread},
         )
 
         if self.settings.intake_enabled:

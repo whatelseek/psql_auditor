@@ -18,10 +18,4 @@ id_ed25519
 dist/
 build/
 .DS_Store
-mlflow/.env
-mlflow/data/*
-!mlflow/data/.gitkeep
-!mlflow/data/artifacts/
-mlflow/data/artifacts/*
-!mlflow/data/artifacts/.gitkeep
 

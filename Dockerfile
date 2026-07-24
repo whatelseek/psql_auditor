@@ -17,7 +17,7 @@ COPY src ./src
 COPY agents ./agents
 COPY mcps ./mcps
 
-RUN pip install --no-cache-dir ".[mlflow]"
+RUN pip install --no-cache-dir .
 
 # Pre-warm Postgres MCP (npm).
 RUN npx -y mcp-postgres-server --help >/dev/null 2>&1 || true
