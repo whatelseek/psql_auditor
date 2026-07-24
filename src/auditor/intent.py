@@ -23,6 +23,7 @@ IntentKind = Literal[
     "revise_req",
     "refill_finding",
     "update_report",
+    "anonymize_report",
     "list_sessions",
     "list_results",
     "list_status",
@@ -84,6 +85,14 @@ _UPDATE_REPORT = (
     re.compile(r"\bобнов(и|ить)\s+отч[её]т\b", re.I),
     re.compile(r"\bпересобер(и|ить)\s+отч[её]т\b", re.I),
     re.compile(r"\bобнов(и|ить)\s+отч[её]т\s+по\s+новым\s+данным\b", re.I),
+)
+
+_ANONYMIZE_REPORT = (
+    re.compile(r"\banonymi[sz]e\s+(the\s+)?report\b", re.I),
+    re.compile(r"\banonymi[sz]ation\s+for\s+(the\s+)?report\b", re.I),
+    re.compile(r"\bmake\s+(the\s+)?report\s+anonymi[sz]ed\b", re.I),
+    re.compile(r"\bанонимизир(уй|овать)\s+отч[её]т\b", re.I),
+    re.compile(r"\bсделай\s+аноним(ный|изацию)\s+отч[её]та\b", re.I),
 )
 
 # Warehouse REQ cells for a finished/running session (must win over list_sessions).
@@ -261,6 +270,9 @@ def classify_intent(text: str, *, agents_dir: Path | None = None) -> IntentKind:
     # Prefer cell refill over report rebuild when both phrases appear.
     if any(pat.search(raw) for pat in _REFILL_FINDING):
         return "refill_finding"
+
+    if any(pat.search(raw) for pat in _ANONYMIZE_REPORT):
+        return "anonymize_report"
 
     if any(pat.search(raw) for pat in _UPDATE_REPORT):
         return "update_report"

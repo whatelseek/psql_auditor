@@ -41,6 +41,11 @@ def test_refill_beats_update_report():
     )
 
 
+def test_anonymize_report_intent():
+    assert classify_intent("Anonymize the report") == "anonymize_report"
+    assert classify_intent("Анонимизируй отчёт") == "anonymize_report"
+
+
 def test_broad_verbs_alone_do_not_force_adhoc():
     assert classify_intent("Please try to explain the checklist") == "audit"
 

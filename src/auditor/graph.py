@@ -57,7 +57,7 @@ from auditor.access_probe import (
 )
 from auditor.adhoc import run_adhoc_commands
 from auditor.checklist import Requirement
-from auditor.compliance import format_compliance_markdown
+from auditor.compliance import format_compliance_markdown, parse_report_findings
 from auditor.config import Settings, get_settings
 from auditor.context import (
     compact_findings_for_summary,
@@ -65,6 +65,7 @@ from auditor.context import (
     truncate_text,
 )
 from auditor.followup import (
+    run_anonymize_report,
     followup_footer,
     run_refill_finding,
     run_revise_req,
@@ -93,7 +94,6 @@ from auditor.host_facts import (
     merge_facts_from_raw,
     parse_host_facts_json,
     resolve_client_inventory,
-    upsert_inventory_md,
     write_host_facts_json,
 )
 from auditor.hitl import (
@@ -121,9 +121,10 @@ from auditor.intake import (
     client_slug,
     domains_for_audit_type,
     enrich_facts_from_access_rows,
-    extract_management_summary,
+    filter_scope_framework_ids,
     format_host_access_list_markdown,
     format_intake_assistant_message,
+    normalize_scope_jobs,
     format_proposed_jobs_markdown,
     frameworks_for_audit_type,
     intake_clarification_from_payload,
@@ -961,6 +962,7 @@ class AuditorGraph:
                             agents_dir=self.settings.agents_dir,
                             preferred_language=lang.code,
                         )
+                        matched_ids = filter_scope_framework_ids(matched_ids)
                         proposed.append(
                             {
                                 "host_id": target.slug,
@@ -995,6 +997,7 @@ class AuditorGraph:
                             agents_dir=self.settings.agents_dir,
                             preferred_language=lang.code,
                         )
+                        matched_ids = filter_scope_framework_ids(matched_ids)
                         proposed.append(
                             {
                                 "host_id": target.slug,
@@ -1018,7 +1021,7 @@ class AuditorGraph:
                         if facts.hostname and str(row.get("kind") or "") != "pg":
                             row["service"] = facts.hostname
                         row["frameworks"] = list(matched_ids)
-                intake["proposed_jobs"] = proposed
+                intake["proposed_jobs"] = normalize_scope_jobs(proposed)
                 intake["host_access_rows"] = host_access_rows
             else:
                 intake["proposed_jobs"] = []
@@ -1052,20 +1055,22 @@ class AuditorGraph:
             if plan_path is not None:
                 intake["plan_file_path"] = str(plan_path)
             if plan_jobs:
-                intake["proposed_jobs"] = plan_jobs
-                proposed_jobs = plan_jobs
-                intake["plan_source"] = "markdown"
-                rel = str(plan_path) if plan_path else "PLAN.md"
-                plan_note = (
-                    f"\n\n_Loaded audit plan from `{rel}` "
-                    "(overrides auto-detected frameworks)._\n"
-                    if lang.code == "en"
-                    else f"\n\n_Загружен план аудита из `{rel}` "
-                    "(перекрывает автоопределение фреймворков)._\n"
-                )
-                self._persist_intake_progress(
-                    state, intake, thread_id=thread_hint
-                )
+                cleaned_plan = normalize_scope_jobs(plan_jobs)
+                if cleaned_plan:
+                    intake["proposed_jobs"] = cleaned_plan
+                    proposed_jobs = cleaned_plan
+                    intake["plan_source"] = "markdown"
+                    rel = str(plan_path) if plan_path else "PLAN.md"
+                    plan_note = (
+                        f"\n\n_Loaded audit plan from `{rel}` "
+                        "(overrides auto-detected frameworks)._\n"
+                        if lang.code == "en"
+                        else f"\n\n_Загружен план аудита из `{rel}` "
+                        "(перекрывает автоопределение фреймворков)._\n"
+                    )
+                    self._persist_intake_progress(
+                        state, intake, thread_id=thread_hint
+                    )
 
         has_plan = bool(
             proposed_jobs
@@ -1076,33 +1081,6 @@ class AuditorGraph:
             language=lang.code,
             proposed_jobs=proposed_jobs,
         )
-
-        # 2c) Reachability + applicable frameworks (no full package dump).
-        if intake.get("has_access") and "access_list_acked" not in intake:
-            if lang.code.startswith("ru"):
-                access_list_prompt = (
-                    "## План предаудита — доступность и фреймворки\n\n"
-                    f"{host_access_md}\n"
-                    "Ответьте **продолжить** / **ok**, чтобы подтвердить или "
-                    "исключить фреймворки на следующем шаге."
-                )
-            else:
-                access_list_prompt = (
-                    "## Pre-audit plan — reachability & frameworks\n\n"
-                    f"{host_access_md}\n"
-                    "Reply **continue** / **ok** to confirm or exclude frameworks "
-                    "in the next step."
-                )
-            while "access_list_acked" not in intake:
-                interrupt(
-                    intake_interrupt_payload(
-                        step="access_list", prompt=access_list_prompt
-                    )
-                )
-                intake["access_list_acked"] = True
-                self._persist_intake_progress(
-                    state, intake, thread_id=thread_hint
-                )
 
         # 3) Scope: confirm / exclude / include / paste PLAN.md table; after trim, re-confirm.
         if has_plan:
@@ -1612,7 +1590,7 @@ class AuditorGraph:
         return facts
 
     async def collect_host_facts(self, state: AuditorState) -> dict[str, Any]:
-        """Gather hostname/OS/software/disk/RAM/CPU and refresh INVENTORY.md."""
+        """Gather host facts and copy existing INVENTORY.md without rewriting it."""
         if state.get("error") and not (state.get("requirements") or {}):
             return {}
 
@@ -1679,31 +1657,19 @@ class AuditorGraph:
                     / client_slug(client_name)
                     / "INVENTORY.md"
                 )
-                upsert_inventory_md(
-                    inv_path,
-                    client_name=client_name,
-                    facts=facts,
-                    scope_text=str(intake.get("inventory_scope") or ""),
-                    reachable_services=(intake.get("access_probe") or {}).get(
-                        "services"
-                    ),
-                )
                 if store is not None:
                     dest = store.root / "INVENTORY.md"
-                    dest.write_text(inv_path.read_text(encoding="utf-8"), encoding="utf-8")
+                    if inv_path.is_file():
+                        dest.write_text(
+                            inv_path.read_text(encoding="utf-8"),
+                            encoding="utf-8",
+                        )
         else:
-            # Still materialize inventory from scope when no live access
+            # No live access: reuse existing inventory only; do not auto-fill.
             inv_path = (
                 Path(self.settings.inventory_dir)
                 / client_slug(client_name)
                 / "INVENTORY.md"
-            )
-            upsert_inventory_md(
-                inv_path,
-                client_name=client_name,
-                facts=None,
-                scope_text=str(intake.get("inventory_scope") or ""),
-                reachable_services=(intake.get("access_probe") or {}).get("services"),
             )
             store = self._store_from_state(state)
             if store is not None and inv_path.is_file():
@@ -3718,7 +3684,9 @@ class AuditorGraph:
                     )
                 except Exception:  # noqa: BLE001
                     facts = HostFacts(ssh_host=target.host)
-            for fw_id in row.get("frameworks") or []:
+            for fw_id in filter_scope_framework_ids(
+                [str(x) for x in (row.get("frameworks") or [])]
+            ):
                 fw = get_framework(str(fw_id), self.settings.agents_dir)
                 if fw is not None:
                     jobs.append((target, facts, fw))
@@ -4008,10 +3976,6 @@ class AuditorGraph:
                 completed=[],
                 plan_md=plan_md,
             )
-            if plan_md and result.get("report"):
-                report = str(result.get("report") or "")
-                if not report.startswith(plan_md):
-                    result["report"] = f"{plan_md}\n{report}"
             return result
 
         return await self._schedule_framework_jobs(
@@ -4048,8 +4012,6 @@ class AuditorGraph:
                 run_id=run_id,
                 base_thread=base_thread,
             )
-            if plan_md:
-                merged["report"] = f"{plan_md}\n{merged.get('report') or ''}"
             return merged
 
         limit = max(1, int(self.settings.max_parallel_host_jobs))
@@ -4385,8 +4347,6 @@ class AuditorGraph:
             run_id=str(run_id or ""),
             base_thread=base_thread,
         )
-        if plan_md:
-            merged["report"] = f"{plan_md}\n{merged.get('report') or ''}"
         return merged
 
     def _multi_progress_preamble(
@@ -4469,30 +4429,20 @@ class AuditorGraph:
             "Sections: " + ", ".join(f"`{c[0]}`" for c in completed),
             "",
         ]
-        summary_sections = [
-            "# Management summary",
-            "",
-            "Sections: " + ", ".join(f"`{c[0]}`" for c in completed),
-            "",
-        ]
+        ordered_reports: list[tuple[str, str, str]] = []
         if store is not None:
             full_sections.extend([f"Evidence directory: `{store.root}`", ""])
-            summary_sections.extend([f"Evidence directory: `{store.root}`", ""])
         for fw_id, title, report in completed:
             body = (disk_reports.get(fw_id) or report or "(empty report)").strip()
             if "## Audit archive" in body:
                 body = body.split("## Audit archive", 1)[0].rstrip()
+            ordered_reports.append((fw_id, title, body))
             full_sections.append(f"## `{fw_id}` — {title}")
             full_sections.append("")
             full_sections.append(body)
             full_sections.append("")
             full_sections.append("---")
             full_sections.append("")
-            mgmt = extract_management_summary(body) or "(no summary)"
-            summary_sections.append(f"## `{fw_id}` — {title}")
-            summary_sections.append("")
-            summary_sections.append(mgmt)
-            summary_sections.append("")
         # Include any extra on-disk framework reports not listed in completed.
         known = {c[0] for c in completed}
         for fw_id, body in disk_reports.items():
@@ -4500,17 +4450,85 @@ class AuditorGraph:
                 continue
             if "## Audit archive" in body:
                 body = body.split("## Audit archive", 1)[0].rstrip()
+            ordered_reports.append((fw_id, fw_id, body.strip()))
             full_sections.append(f"## `{fw_id}`")
             full_sections.append("")
             full_sections.append(body.strip())
             full_sections.append("")
             full_sections.append("---")
             full_sections.append("")
-            mgmt = extract_management_summary(body) or "(no summary)"
-            summary_sections.append(f"## `{fw_id}`")
-            summary_sections.append("")
-            summary_sections.append(mgmt)
-            summary_sections.append("")
+        status_counts: dict[str, int] = {
+            "pass": 0,
+            "fail": 0,
+            "partial": 0,
+            "error": 0,
+            "skipped": 0,
+            "other": 0,
+        }
+        ranked_rows: list[tuple[str, str, str, str, str]] = []
+        for fw_id, _title, body in ordered_reports:
+            for row in parse_report_findings(body):
+                status = str(row.status or "").strip().lower()
+                severity = str(row.severity or "Unknown").strip() or "Unknown"
+                req_id = str(row.req_id or "").strip() or "REQ-???"
+                title = str(row.title or "").strip() or "(untitled requirement)"
+                if status in status_counts:
+                    status_counts[status] += 1
+                elif status:
+                    status_counts["other"] += 1
+                else:
+                    status_counts["error"] += 1
+                ranked_rows.append((fw_id, req_id, title, severity, status or "error"))
+
+        total = sum(status_counts.values())
+        assessed = max(0, total - status_counts["skipped"])
+        passed = status_counts["pass"]
+        compliance_pct = (100.0 * passed / assessed) if assessed else 0.0
+
+        sev_rank = {
+            "critical": 0,
+            "high": 1,
+            "medium": 2,
+            "low": 3,
+            "info": 4,
+            "unknown": 5,
+        }
+        status_rank = {"fail": 0, "error": 1, "partial": 2}
+        top_findings = [
+            row for row in ranked_rows if row[4] in {"fail", "error", "partial"}
+        ]
+        top_findings.sort(
+            key=lambda item: (
+                sev_rank.get(item[3].lower(), 99),
+                status_rank.get(item[4], 9),
+                item[1],
+                item[0],
+            )
+        )
+
+        summary_sections = [
+            "# Management summary",
+            "",
+            f"- Audited sections: {len(ordered_reports)}",
+            f"- Requirements total: {total}",
+            (
+                "- Pass/Fail statistics: "
+                f"pass={status_counts['pass']}, fail={status_counts['fail']}, "
+                f"partial={status_counts['partial']}, error={status_counts['error']}, "
+                f"skipped={status_counts['skipped']}, compliance={compliance_pct:.1f}%"
+            ),
+            "",
+            "## Top 10 critical general findings",
+            "",
+        ]
+        if store is not None:
+            summary_sections.extend([f"Evidence directory: `{store.root}`", ""])
+        for fw_id, req_id, title, severity, status in top_findings[:10]:
+            summary_sections.append(
+                f"- [{severity}/{status}] `{req_id}` {title} (`{fw_id}`)"
+            )
+        if not top_findings:
+            summary_sections.append("- No critical/high non-pass findings detected.")
         combined_full = "\n".join(full_sections).strip() + "\n"
         chat_text = "\n".join(summary_sections).strip() + "\n"
         archive_path = ""
@@ -4578,6 +4596,17 @@ class AuditorGraph:
         """Rebuild report.md / ZIP from on-disk findings after follow-up checks."""
         del thread_id
         return await run_update_report(self, user_text, messages=messages)
+
+    async def arun_anonymize_report(
+        self,
+        user_text: str,
+        *,
+        messages: list | None = None,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create reversible anonymized evidence/report copy in `<run>_anon`."""
+        del thread_id
+        return await run_anonymize_report(self, user_text, messages=messages)
 
     async def arun_adhoc(
         self,

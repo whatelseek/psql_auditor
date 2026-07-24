@@ -52,7 +52,8 @@ def create_run_archive(run_dir: Path | str, *, zip_path: Path | None = None) -> 
     if not root.is_dir():
         raise FileNotFoundError(f"Evidence run directory not found: {root}")
 
-    dest = zip_path or (root.parent / archive_filename(root.name))
+    # Keep archive inside the client/run folder by default.
+    dest = zip_path or (root / archive_filename(root.name))
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         dest.unlink()

@@ -3,7 +3,7 @@
 Модуль ведёт **трёхшаговый опросник** перед checklist-аудитом (если intake
 включён). Собирает название клиента, доступ к серверам, затем предложение
 host→framework, которое оператор может урезать. Inventory — единственный
-источник хостов (без CMDB/NetBox).
+источник хостов (без CMDB-интеграций).
 
 Роль в пайплайне:
     Граф прерывается маркерами ``[AUDIT_INTAKE:<thread>]`` между шагами.
@@ -33,6 +33,7 @@ from typing import Any, Literal
 # ``cis`` оставлен как алиас ``cybersecurity`` для обратной совместимости.
 AuditType = Literal["cis", "cybersecurity", "it", "both"]
 YesNo = Literal["yes", "no", "unknown"]
+_ENUMERATION_FRAMEWORK_PREFIXES = ("host_facts",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +42,7 @@ class IntakePrompts:
 
     Attributes:
         client: Шаг 1 — название клиента / организации.
-        cmdb: Устарело (CMDB/NetBox удалён); пустая строка для совместимости.
+        cmdb: Устарело (CMDB удалён); пустая строка для совместимости.
         access: Шаг 2 — доступ SSH/сервисов для пробы.
         scope: Шаг 3 — подтвердить / исключить / оставить только host→framework.
         audit_type: Fallback шага 3 без плана хостов — выбор домена.
@@ -243,7 +244,7 @@ def resolve_scope_decision(
         return None
     action = str(llm_payload.get("action") or "").strip().lower()
     if action in {"confirm", "all", "run_all", "accept"}:
-        return [dict(r) for r in proposed_jobs]
+        return normalize_scope_jobs([dict(r) for r in proposed_jobs])
     if action in {"exclude", "trim"}:
         excl_fw = {
             str(x).strip()
@@ -257,7 +258,9 @@ def resolve_scope_decision(
             elif isinstance(pair, str) and "/" in pair:
                 h, f = pair.split("/", 1)
                 excl_pairs.add((h.strip().lower(), f.strip().lower()))
-        return apply_scope_exclusions(proposed_jobs, excl_fw, excl_pairs)
+        return normalize_scope_jobs(
+            apply_scope_exclusions(proposed_jobs, excl_fw, excl_pairs)
+        )
     if action in {"include", "only", "keep"}:
         incl_fw = {
             str(x).strip().lower()
@@ -288,8 +291,48 @@ def resolve_scope_decision(
                     kept.append(fw_s)
             if kept:
                 out.append({**row, "frameworks": kept})
-        return out
+        return normalize_scope_jobs(out)
     return None
+
+
+def is_enumeration_framework_id(framework_id: str) -> bool:
+    """Return True when framework id is discovery-only and not auditable scope."""
+    low = str(framework_id or "").strip().lower()
+    if not low:
+        return False
+    return any(
+        low == prefix or low.startswith(prefix + "_")
+        for prefix in _ENUMERATION_FRAMEWORK_PREFIXES
+    )
+
+
+def filter_scope_framework_ids(framework_ids: list[str]) -> list[str]:
+    """Drop discovery-only frameworks and deduplicate while preserving order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for fw in framework_ids or []:
+        fw_s = str(fw).strip()
+        if not fw_s or is_enumeration_framework_id(fw_s):
+            continue
+        key = fw_s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(fw_s)
+    return out
+
+
+def normalize_scope_jobs(proposed_jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize scope rows by removing discovery-only frameworks and empty rows."""
+    out: list[dict[str, Any]] = []
+    for row in proposed_jobs or []:
+        kept = filter_scope_framework_ids(
+            [str(x) for x in (row.get("frameworks") or [])]
+        )
+        if not kept:
+            continue
+        out.append({**row, "frameworks": kept})
+    return out
 
 
 _PLAN_FILE_NAMES = ("PLAN.md", "AUDIT_PLAN.md", "SCOPE.md", "plan.md")
@@ -410,6 +453,8 @@ def parse_audit_plan_markdown(
             return
         kept: list[str] = []
         for fw in fws:
+            if is_enumeration_framework_id(fw):
+                continue
             if known is not None and fw.lower() not in known:
                 continue
             if fw.lower() not in {x.lower() for x in kept}:
@@ -946,25 +991,21 @@ def apply_scope_exclusions(
         if not kept:
             continue
         out.append({**row, "frameworks": kept})
-    return out
+    return normalize_scope_jobs(out)
 
 
 def format_intake_assistant_message(prompt: str, thread_id: str) -> str:
-    """Обернуть промпт шага intake маркером ``[AUDIT_INTAKE:<thread>]``.
+    """Обернуть промпт шага intake скрытым маркером resume-потока.
 
     Args:
         prompt: Markdown вопроса из :func:`prompts_for_language`.
         thread_id: Id потока LangGraph для resume.
 
     Returns:
-        Сообщение ассистента с маркером и подсказкой продолжения.
+        Сообщение ассистента без служебного текста для оператора.
     """
-    return (
-        f"{prompt.strip()}\n\n"
-        f"---\n"
-        f"[AUDIT_INTAKE:{thread_id}]\n"
-        f"_Paused for intake. Your next message continues this questionnaire._\n"
-    )
+    # Keep intake resume marker machine-readable but hidden from chat UI.
+    return f"{prompt.strip()}\n\n<!-- AUDIT_INTAKE:{thread_id} -->\n"
 
 
 
@@ -1040,10 +1081,12 @@ def frameworks_for_audit_type(
         return ["it_audit"]
     if domains == ["cybersecurity"]:
         ids = [fw.id for fw in route_frameworks(user_request, agents_dir)]
+        ids = filter_scope_framework_ids(ids)
         ids = [i for i in ids if i != "it_audit"]
         if not ids:
             all_fw = list_frameworks(agents_dir)
             ids = [f.id for f in all_fw if f.id.endswith("_cis") or "cis" in f.id]
+            ids = filter_scope_framework_ids(ids)
         return ids or ["postgres_cis"]
     # both: сначала IT, затем cybersecurity-фреймворки
     cis_ids = frameworks_for_audit_type(

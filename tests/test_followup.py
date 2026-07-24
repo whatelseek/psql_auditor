@@ -7,7 +7,12 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from auditor.evidence_store import EvidenceStore
-from auditor.followup import run_refill_finding, run_revise_req, run_update_report
+from auditor.followup import (
+    run_anonymize_report,
+    run_refill_finding,
+    run_revise_req,
+    run_update_report,
+)
 from auditor.intent import classify_intent
 from auditor.run_resolve import extract_run_id, latest_run_id
 from auditor.state import Finding
@@ -396,3 +401,126 @@ async def test_revise_req_multi_host_path(tmp_path: Path):
     assert result["mode"] == "gather_evidence"
     assert result["framework_id"] == fw_key
     assert (store.root / fw_key / "REQ-010" / "001_ssh_run.txt").is_file()
+
+
+@pytest.mark.asyncio
+async def test_anonymize_report_creates_anon_copy(tmp_path: Path):
+    from auditor.config import Settings
+    from auditor.graph import AuditorGraph
+
+    run_id = "TestCompany"
+    store = EvidenceStore(tmp_path, run_id=run_id)
+    store.write_run_meta(
+        frameworks=["ubuntu_cis_24_l2"],
+        client_name="Test Company",
+        results_session_number=3,
+    )
+    report_text = (
+        "Owner: admin@testcompany.local\n"
+        "Host: 10.200.29.78\n"
+        "Contact email: Security@TestCompany.Local\n"
+    )
+    store.write_root_report(report_text)
+    store.write_report("ubuntu_cis_24_l2", report_text)
+
+    settings = Settings(
+        agents_dir=Path("agents"),
+        playbooks_dir=Path("agents/playbooks"),
+        memory_dir=tmp_path / "memory",
+        evidence_dir=tmp_path,
+        inventory_dir=tmp_path / "inventory",
+        archive_enabled=False,
+        memory_enabled=False,
+        memory_learn=False,
+        litellm_base_url="http://localhost:9",
+    )
+    graph = AuditorGraph(settings=settings)
+
+    result = await run_anonymize_report(
+        graph,
+        "Anonymize the report domain=testcompany.local",
+        messages=[AIMessage(content=f"evidence: `{store.root}`")],
+    )
+    assert result["mode"] == "anonymize_report"
+    anon_root = tmp_path / f"{run_id}_anon"
+    assert anon_root.is_dir()
+    mapping = (anon_root / "anonymization_mapping.json").read_text(encoding="utf-8")
+    assert "IP_001" in mapping
+    assert "EMAIL_001" in mapping
+    anon_report = (anon_root / "report.md").read_text(encoding="utf-8")
+    assert "10.200.29.78" not in anon_report
+    assert "admin@testcompany.local" not in anon_report.lower()
+    assert "IP_001" in anon_report
+    assert "EMAIL_" in anon_report
+    anon_meta = (anon_root / "meta.json").read_text(encoding="utf-8")
+    assert "results_session_number" not in anon_meta
+    assert '"anonymized": true' in anon_meta
+
+
+@pytest.mark.asyncio
+async def test_anonymize_report_does_not_write_results_db(tmp_path: Path):
+    from auditor.config import Settings
+    from auditor.graph import AuditorGraph
+
+    run_id = "NoDbClient"
+    store = EvidenceStore(tmp_path, run_id=run_id)
+    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"], client_name="No DB")
+    store.write_root_report("Host 10.0.0.1 owner admin@example.com")
+
+    settings = Settings(
+        agents_dir=Path("agents"),
+        playbooks_dir=Path("agents/playbooks"),
+        memory_dir=tmp_path / "memory",
+        evidence_dir=tmp_path,
+        archive_enabled=False,
+        memory_enabled=False,
+        memory_learn=False,
+        litellm_base_url="http://localhost:9",
+    )
+    graph = AuditorGraph(settings=settings)
+
+    with (
+        patch("auditor.followup.record_results_safe", new_callable=AsyncMock) as rec_results,
+        patch(
+            "auditor.followup.record_requirement_result_safe",
+            new_callable=AsyncMock,
+        ) as rec_req,
+    ):
+        result = await run_anonymize_report(
+            graph,
+            "Anonymize the report domain=testcompany.local",
+            messages=[AIMessage(content=f"evidence: `{store.root}`")],
+        )
+        assert result["mode"] == "anonymize_report"
+        rec_results.assert_not_awaited()
+        rec_req.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_anonymize_report_requires_domain(tmp_path: Path):
+    from auditor.config import Settings
+    from auditor.graph import AuditorGraph
+
+    run_id = "NeedDomain"
+    store = EvidenceStore(tmp_path, run_id=run_id)
+    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"], client_name="Need Domain")
+    store.write_root_report("host db01.needdomain.local ip 10.0.0.1")
+
+    settings = Settings(
+        agents_dir=Path("agents"),
+        playbooks_dir=Path("agents/playbooks"),
+        memory_dir=tmp_path / "memory",
+        evidence_dir=tmp_path,
+        archive_enabled=False,
+        memory_enabled=False,
+        memory_learn=False,
+        litellm_base_url="http://localhost:9",
+    )
+    graph = AuditorGraph(settings=settings)
+    result = await run_anonymize_report(
+        graph,
+        "Anonymize the report",
+        messages=[AIMessage(content=f"evidence: `{store.root}`")],
+    )
+    assert result.get("error") == "missing_anonymization_domain"
+    assert "domain" in str(result.get("report", "")).lower()

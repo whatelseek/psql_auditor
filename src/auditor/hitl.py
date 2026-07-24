@@ -39,8 +39,15 @@ HITL_MARKER_RE = re.compile(
 )
 
 # Most recent pause marker wins — CONTINUE / HITL / INTAKE.
+# Supports both visible markers:
+#   [AUDIT_INTAKE:thread]
+# and hidden HTML-comment markers:
+#   <!-- AUDIT_INTAKE:thread -->
 PAUSE_MARKER_RE = re.compile(
-    r"\[AUDIT_(?P<kind>HITL|INTAKE|CONTINUE):(?P<thread>[A-Za-z0-9._:-]+)\]",
+    r"(?:"
+    r"\[AUDIT_(?P<kind>HITL|INTAKE|CONTINUE):(?P<thread>[A-Za-z0-9._:-]+)\]"
+    r"|<!--\s*AUDIT_(?P<h_kind>HITL|INTAKE|CONTINUE):(?P<h_thread>[A-Za-z0-9._:-]+)\s*-->"
+    r")",
     re.IGNORECASE,
 )
 
@@ -92,9 +99,10 @@ def resolve_pause_resume(messages: list[Any]) -> tuple[PauseKind, str] | None:
         if not matches:
             continue
         m = matches[-1]
-        kind = m.group("kind").lower()
+        kind = str(m.group("kind") or m.group("h_kind") or "").lower()
+        thread = str(m.group("thread") or m.group("h_thread") or "")
         if kind in ("hitl", "intake", "continue"):
-            return kind, m.group("thread")  # type: ignore[return-value]
+            return kind, thread  # type: ignore[return-value]
     return None
 
 

@@ -21,11 +21,18 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import json
 from pathlib import Path
+import re
 from typing import TYPE_CHECKING, Any, Iterator, Sequence
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from auditor.anonymization import (
+    ReversibleAnonymizer,
+    anonymize_directory_tree,
+    write_mapping_file,
+)
 from auditor.compliance import format_compliance_markdown
 from auditor.context import compact_findings_for_summary, truncate_text
 from auditor.frameworks import get_framework, load_framework_checklist
@@ -47,6 +54,7 @@ from auditor.run_resolve import (
 from auditor.secrets_file import (
     InventorySshTarget,
     bind_ssh_target,
+    list_client_access_endpoints,
     list_client_ssh_targets,
     read_client_credentials,
 )
@@ -73,6 +81,10 @@ _FOLLOWUP_FOOTER = (
     "3. Rebuild report + ZIP once ready — `Update the report` / `Обнови отчёт`.\n"
     "   One-shot: `Revise REQ-001 on ubuntu_cis for host …` "
     "(gather + refill; still ask to update the report).\n"
+    "4. Need anonymized copy? Reply "
+    "`Anonymize the report domain=example.com` / "
+    "`Анонимизируй отчёт домен example.com` "
+    "to create `<client>_anon` with reversible mapping.\n"
 )
 
 
@@ -875,4 +887,233 @@ async def run_update_report(
         "awaiting_hitl": False,
         "followup": True,
         "mode": "update_report",
+    }
+
+
+def _literal_groups_for_anonymization(
+    *,
+    settings: Any,
+    run_id: str,
+    meta: dict[str, Any],
+    domain_name: str,
+) -> dict[str, set[str]]:
+    """Collect known identifiers for deterministic literal masking."""
+    groups: dict[str, set[str]] = {
+        "CLIENT": set(),
+        "HOST": set(),
+        "USER": set(),
+        "EMAIL": set(),
+        "DOMAIN": set(),
+    }
+    for key, kind in (
+        ("client_name", "CLIENT"),
+        ("client_slug", "CLIENT"),
+        ("run_id", "CLIENT"),
+        ("ssh_user", "USER"),
+        ("ssh_host", "HOST"),
+        ("hostname", "HOST"),
+    ):
+        value = str(meta.get(key) or "").strip()
+        if value:
+            groups[kind].add(value)
+    groups["CLIENT"].add(run_id)
+    groups["DOMAIN"].add(domain_name.strip().lower())
+    # Inventory has the best source for host/user/email values.
+    try:
+        for target in list_client_ssh_targets(settings.inventory_dir, run_id):
+            if target.host:
+                groups["HOST"].add(target.host)
+            if target.user:
+                groups["USER"].add(target.user)
+    except (OSError, ValueError, FileNotFoundError):
+        pass
+    try:
+        for endpoint in list_client_access_endpoints(settings.inventory_dir, run_id):
+            host = str(endpoint.get("host") or "").strip()
+            if host:
+                groups["HOST"].add(host)
+    except (OSError, ValueError, FileNotFoundError):
+        pass
+    try:
+        creds = read_client_credentials(settings.inventory_dir, run_id)
+    except (OSError, ValueError, FileNotFoundError):
+        creds = {}
+    for key, value in creds.items():
+        text = str(value or "").strip()
+        if not text:
+            continue
+        low = key.lower()
+        if "mail" in low or "email" in low:
+            groups["EMAIL"].add(text)
+        elif "user" in low or "login" in low:
+            groups["USER"].add(text)
+        elif "host" in low or "addr" in low:
+            groups["HOST"].add(text)
+        elif "client" in low or "company" in low or "name" in low:
+            groups["CLIENT"].add(text)
+    return groups
+
+
+def _extract_domain_name(user_text: str, meta: dict[str, Any]) -> str | None:
+    """Parse anonymization domain from operator request or run metadata."""
+    patterns = (
+        re.compile(
+            r"\b(?:domain|домен)\s*(?:name)?\s*[:=]\s*([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b",
+            re.I,
+        ),
+        re.compile(
+            r"\b(?:domain|домен)\s+([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b",
+            re.I,
+        ),
+    )
+    for pattern in patterns:
+        match = pattern.search(user_text or "")
+        if match:
+            return match.group(1).lower()
+    for key in ("anonymization_domain", "domain_name", "domain"):
+        value = str(meta.get(key) or "").strip().lower()
+        if value and "." in value:
+            return value
+    return None
+
+
+async def run_anonymize_report(
+    graph: AuditorGraph,
+    user_text: str,
+    *,
+    messages: Sequence[Any] | None = None,
+) -> dict[str, Any]:
+    """Create `<run_id>_anon` copy with reversible anonymized artifacts."""
+    settings = graph.settings
+    user_request = truncate_text(
+        user_text,
+        settings.max_user_request_chars,
+        "user_request",
+    )
+    del user_request
+    try:
+        from auditor.run_resolve import (
+            extract_run_id,
+            extract_run_id_from_messages,
+            latest_run_id,
+        )
+        from auditor.evidence_store import EvidenceStore
+
+        run_id = extract_run_id(user_text, evidence_dir=settings.evidence_dir)
+        if not run_id and messages:
+            run_id = extract_run_id_from_messages(
+                messages, evidence_dir=settings.evidence_dir
+            )
+        if not run_id:
+            run_id = latest_run_id(settings.evidence_dir)
+        if not run_id:
+            raise FileNotFoundError(
+                "No prior audit evidence found. Run an audit first."
+            )
+        source = EvidenceStore.open_existing(settings.evidence_dir, run_id)
+    except FileNotFoundError as exc:
+        return {
+            "report": str(exc),
+            "messages": [AIMessage(content=str(exc))],
+            "error": str(exc),
+            "followup": True,
+        }
+
+    anon_run_id = f"{source.run_id}_anon"
+    anon_root = Path(settings.evidence_dir) / anon_run_id
+    anonymizer = ReversibleAnonymizer()
+    meta = source.read_run_meta()
+    domain_name = _extract_domain_name(user_text, meta)
+    if not domain_name:
+        msg = (
+            "Set a domain name for anonymization and retry, for example:\n\n"
+            "- `Anonymize the report domain=example.com`\n"
+            "- `Анонимизируй отчёт домен example.com`\n\n"
+            "Domain is required to anonymize hostnames/FQDNs consistently."
+        )
+        return {
+            "report": msg,
+            "messages": [AIMessage(content=msg)],
+            "error": "missing_anonymization_domain",
+            "followup": True,
+        }
+    literals = _literal_groups_for_anonymization(
+        settings=settings,
+        run_id=source.run_id,
+        meta=meta,
+        domain_name=domain_name,
+    )
+    anonymize_directory_tree(
+        source.root,
+        anon_root,
+        anonymizer=anonymizer,
+        literal_groups=literals,
+    )
+    mapping_path = write_mapping_file(anon_root, anonymizer)
+
+    # Keep anonymized run detached from warehouse tracking.
+    anon_meta_path = anon_root / "meta.json"
+    if anon_meta_path.is_file():
+        try:
+            anon_meta = json.loads(anon_meta_path.read_text(encoding="utf-8"))
+            if isinstance(anon_meta, dict):
+                anon_meta.pop("results_session_number", None)
+                anon_meta["run_id"] = anon_run_id
+                anon_meta["anonymized"] = True
+                anon_meta["anonymized_from"] = source.run_id
+                anon_meta["anonymization_domain"] = domain_name
+                anon_meta["anonymization_mapping_file"] = mapping_path.name
+                anon_meta_path.write_text(
+                    json.dumps(anon_meta, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    root_report = anon_root / "report.md"
+    if root_report.is_file():
+        try:
+            from auditor.report_exports import write_report_exports
+
+            write_report_exports(
+                anon_root,
+                root_report.read_text(encoding="utf-8"),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    archive_path = ""
+    archive_url = ""
+    report = (
+        "## Anonymized copy created\n\n"
+        f"- Source run: `{source.run_id}`\n"
+        f"- Anonymized run: `{anon_run_id}`\n"
+        f"- Folder: `{anon_root}`\n"
+        f"- Mapping file: `{mapping_path}`\n\n"
+        "Regex anonymization applied for IPs/emails plus deterministic "
+        "literal replacements for known client/host/user identifiers.\n"
+    )
+    if settings.archive_enabled:
+        try:
+            packaged = await package_and_publish_archive(anon_root, settings)
+            archive_path = str(packaged.get("zip_path") or "")
+            archive_url = str(packaged.get("download_url") or "")
+            report = f"{report.rstrip()}\n{packaged.get('chat_section') or ''}"
+        except Exception as exc:  # noqa: BLE001
+            report = (
+                f"{report.rstrip()}\n\n---\n\n"
+                f"(Archive packaging failed: {type(exc).__name__}: {exc})\n"
+            )
+
+    return {
+        "report": report,
+        "messages": [AIMessage(content=report)],
+        "framework_id": "",
+        "evidence_run_id": anon_run_id,
+        "evidence_run_dir": str(anon_root),
+        "archive_path": archive_path,
+        "archive_url": archive_url,
+        "awaiting_hitl": False,
+        "followup": True,
+        "mode": "anonymize_report",
     }

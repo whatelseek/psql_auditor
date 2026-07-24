@@ -359,12 +359,7 @@ async def _stream_responses_audit(
         await pump
         result = await shielded
         content = result.get("report") or _last_ai_text(result.get("messages") or [])
-        if result.get("awaiting_intake"):
-            content = (
-                "Paused for intake — reply to continue the questionnaire.\n\n"
-                + (content or "")
-            )
-        elif result.get("awaiting_hitl"):
+        if result.get("awaiting_hitl"):
             content = (
                 "Paused for your decision (skip / retry).\n\n" + (content or "")
             )
@@ -713,6 +708,10 @@ async def _run_or_resume_once(auditor, body: ChatCompletionRequest) -> dict[str,
         return await auditor.arun_update_report(
             user_text, messages=body.messages, thread_id=thread_id
         )
+    if intent == "anonymize_report":
+        return await auditor.arun_anonymize_report(
+            user_text, messages=body.messages, thread_id=thread_id
+        )
     if settings.adhoc_commands_enabled and intent == "adhoc":
         return await auditor.arun_adhoc(user_text, thread_id=thread_id)
 
@@ -816,12 +815,7 @@ async def responses_api(
 
     result = await _run_or_resume(auditor, chat_body)
     content = result.get("report") or _last_ai_text(result.get("messages") or [])
-    if result.get("awaiting_intake"):
-        content = (
-            "Paused for intake — reply to continue the questionnaire.\n\n"
-            f"{content}"
-        )
-    elif result.get("awaiting_hitl"):
+    if result.get("awaiting_hitl"):
         content = f"Paused for your decision (skip / retry).\n\n{content}"
     if not content:
         content = "Audit finished (no report captured)."
@@ -923,6 +917,12 @@ async def _stream_audit(
     elif intent == "update_report":
         yield _sse_chunk(
             "Updating report from collected evidence…\n\n",
+            model,
+            completion_id,
+        )
+    elif intent == "anonymize_report":
+        yield _sse_chunk(
+            "Creating reversible anonymized report copy…\n\n",
             model,
             completion_id,
         )
@@ -1028,16 +1028,7 @@ async def _stream_audit(
         await pump
         result = await shielded
         final_report = result.get("report") or ""
-        if result.get("awaiting_intake") or (
-            result.get("awaiting_hitl")
-            and "[AUDIT_INTAKE:" in (final_report or "")
-        ):
-            yield _sse_chunk(
-                "Paused for intake — reply to continue the questionnaire.\n\n",
-                model,
-                completion_id,
-            )
-        elif result.get("awaiting_hitl"):
+        if result.get("awaiting_hitl"):
             yield _sse_chunk(
                 "Paused for your decision (skip / retry).\n\n",
                 model,
