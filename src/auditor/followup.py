@@ -31,6 +31,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from auditor.anonymization import (
     ReversibleAnonymizer,
     anonymize_directory_tree,
+    is_generic_db_name,
     write_mapping_file,
 )
 from auditor.compliance import format_compliance_markdown
@@ -892,6 +893,7 @@ def _literal_groups_for_anonymization(
         "USER": set(),
         "EMAIL": set(),
         "DOMAIN": set(),
+        "DB": set(),
     }
     for key, kind in (
         ("client_name", "CLIENT"),
@@ -931,8 +933,22 @@ def _literal_groups_for_anonymization(
         if not text:
             continue
         low = key.lower()
+        if "password" in low or "secret" in low or "token" in low or "key" in low:
+            continue
         if "mail" in low or "email" in low:
             groups["EMAIL"].add(text)
+        elif low.endswith("_database") or low.endswith("_db") or low in {
+            "pg_database",
+            "mysql_database",
+            "oracle_service",
+            "database",
+            "dbname",
+        }:
+            if not is_generic_db_name(text):
+                groups["DB"].add(text)
+        elif "service" in low and "host" not in low:
+            if not is_generic_db_name(text):
+                groups["DB"].add(text)
         elif "user" in low or "login" in low:
             groups["USER"].add(text)
         elif "host" in low or "addr" in low:

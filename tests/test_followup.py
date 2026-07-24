@@ -1,7 +1,7 @@
 """Tests for post-audit REQ revise + report update follow-up."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage

@@ -52,6 +52,77 @@ def test_local_and_unspecified_ips_not_masked():
     assert "IP_001" in masked
 
 
+def test_mac_address_anonymization():
+    anonymizer = ReversibleAnonymizer()
+    text = "nic 00:1A:2B:3C:4D:5E and cisco 001a.2b3c.4d5e again 00:1A:2B:3C:4D:5E"
+    masked = anonymizer.anonymize_text(text)
+    assert "00:1A:2B:3C:4D:5E" not in masked
+    assert "001a.2b3c.4d5e" not in masked
+    assert masked.count("MAC_001") == 2
+    assert "MAC_002" in masked
+    assert anonymizer.deanonymize_text(masked) == text
+
+
+def test_url_authority_anonymization_keeps_path():
+    anonymizer = ReversibleAnonymizer()
+    text = (
+        "see https://db.acme.local:5432/app/health "
+        "and jdbc:postgresql://10.1.2.3:5432/appdb "
+        "and https://user:secret@db.acme.local/x"
+    )
+    masked = anonymizer.anonymize_text(text)
+    assert "db.acme.local" not in masked
+    assert "10.1.2.3" not in masked
+    assert "secret" not in masked
+    assert "/app/health" in masked
+    assert "/appdb" in masked
+    assert "USER_001@" in masked
+    # Password must not appear in reversible mapping.
+    assert "secret" not in anonymizer.mapping()["forward"]
+    assert "secret" not in anonymizer.mapping()["reverse"].values()
+
+
+def test_windows_account_and_upn():
+    anonymizer = ReversibleAnonymizer()
+    text = r"login CORP\jsmith and upn jsmith@corp.local; path C:\Windows\System32"
+    masked = anonymizer.anonymize_text(text)
+    assert r"CORP\jsmith" not in masked
+    assert "jsmith@corp.local" not in masked
+    assert "WINUSER_001" in masked
+    assert "EMAIL_001" in masked
+    assert r"C:\Windows\System32" in masked
+
+
+def test_ldap_dn_anonymization():
+    anonymizer = ReversibleAnonymizer()
+    text = "bind CN=John Doe,OU=Users,DC=corp,DC=local for ldap"
+    masked = anonymizer.anonymize_text(text)
+    assert "John Doe" not in masked
+    assert "DC=corp" not in masked
+    assert "DN_001" in masked
+    assert anonymizer.deanonymize_text(masked) == text
+
+
+def test_user_home_paths_and_db_literals():
+    anonymizer = ReversibleAnonymizer()
+    text = (
+        "files in /home/jsmith/.ssh and C:\\Users\\jsmith\\Documents; "
+        "db=acme_prod also postgres template1"
+    )
+    masked = anonymizer.anonymize_text(
+        text,
+        literal_groups={"USER": {"jsmith"}, "DB": {"acme_prod", "postgres", "template1"}},
+    )
+    assert "/home/jsmith" not in masked
+    assert r"C:\Users\jsmith" not in masked
+    assert "PATH_001" in masked
+    assert "acme_prod" not in masked
+    assert "DB_001" in masked
+    # Generic DB names are not masked.
+    assert "postgres" in masked
+    assert "template1" in masked
+
+
 def test_directory_anonymization_writes_mapping(tmp_path: Path):
     src = tmp_path / "src"
     dst = tmp_path / "dst"
