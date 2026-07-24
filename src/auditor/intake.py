@@ -848,7 +848,7 @@ def format_host_access_list_markdown(
 
     Args:
         rows: Dict с ``service`` (hostname или Access), ``host``,
-            ``port``, ``status``, опционально ``frameworks``.
+            ``port``, ``status``, опционально ``detail`` и ``frameworks``.
         language: ``en`` или русский при префиксе ``ru``.
         proposed_jobs: Опциональные host→framework; сопоставление по IP.
 
@@ -889,6 +889,8 @@ def format_host_access_list_markdown(
         ip = str(row.get("host") or row.get("ip") or "—").strip() or "—"
         port = str(row.get("port") or "—").strip() or "—"
         status = str(row.get("status") or "—").strip() or "—"
+        detail = str(row.get("detail") or "").strip()
+        status_txt = f"{status} ({detail[:80]})" if detail else status
         row_fws = [str(x).strip() for x in (row.get("frameworks") or []) if str(x).strip()]
         fws = row_fws or fw_by_host.get(ip) or []
         # PG endpoint: предпочитать DB-фреймворки, если они есть на хосте.
@@ -897,7 +899,7 @@ def format_host_access_list_markdown(
             if dbish:
                 fws = dbish
         fw_txt = ", ".join(f"`{x}`" for x in fws) if fws else "—"
-        lines.append(f"| {service} | `{ip}` | `{port}` | {status} | {fw_txt} |")
+        lines.append(f"| {service} | `{ip}` | `{port}` | {status_txt} | {fw_txt} |")
     lines.append("")
     return "\n".join(lines)
 

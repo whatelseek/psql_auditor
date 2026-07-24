@@ -106,3 +106,49 @@ def test_existing_env_wins(tmp_path: Path):
     env = {"SSH_HOST": "from-shell"}
     load_connection_secrets(secrets, environ=env)
     assert env["SSH_HOST"] == "from-shell"
+
+
+def test_list_client_access_endpoints_keeps_unknown_service_rows(tmp_path: Path):
+    from auditor.secrets_file import list_client_access_endpoints
+
+    client = tmp_path / "acme"
+    client.mkdir()
+    (client / "INVENTORY.md").write_text(
+        """
+| Access | Host / URL | Port | Username | Password / Token | Extra |
+|--------|------------|------|----------|------------------|-------|
+| Router API | 10.1.2.3 | 8443 | | | |
+| Legacy service | 10.1.2.4 | 9000 | | | |
+| Weird label without port | 10.1.2.5 | | | | |
+""",
+        encoding="utf-8",
+    )
+    rows = list_client_access_endpoints(tmp_path, "acme")
+    by_host = {row["host"]: row for row in rows}
+    assert by_host["10.1.2.3"]["kind"] == "tcp"
+    assert by_host["10.1.2.3"]["port"] == "8443"
+    assert by_host["10.1.2.4"]["kind"] == "tcp"
+    assert by_host["10.1.2.4"]["port"] == "9000"
+    # Generic/unknown access label without explicit port is still retained.
+    assert by_host["10.1.2.5"]["kind"] == "tcp"
+    assert by_host["10.1.2.5"]["port"] == ""
+
+
+def test_list_client_access_endpoints_snmp_default_port(tmp_path: Path):
+    from auditor.secrets_file import list_client_access_endpoints
+
+    client = tmp_path / "acme"
+    client.mkdir()
+    (client / "INVENTORY.md").write_text(
+        """
+| Access | Host / URL | Port | Username | Password / Token | Extra |
+|--------|------------|------|----------|------------------|-------|
+| SNMP | switch.local | | | | |
+""",
+        encoding="utf-8",
+    )
+    rows = list_client_access_endpoints(tmp_path, "acme")
+    by_host = {row["host"]: row for row in rows}
+    assert by_host["switch.local"]["kind"] == "snmp"
+    assert by_host["switch.local"]["protocol"] == "snmp"
+    assert by_host["switch.local"]["port"] == "161"

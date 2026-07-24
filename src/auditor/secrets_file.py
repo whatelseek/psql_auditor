@@ -143,7 +143,8 @@ def _access_kind(label: str) -> str | None:
         label: Access/service type cell (e.g. ``SSH``, ``PostgreSQL``, ``MySQL``).
 
     Returns:
-        ``ssh`` / ``winrm`` / ``pg`` / ``mysql`` / ``oracle``, or ``None``.
+        ``ssh`` / ``winrm`` / ``pg`` / ``mysql`` / ``oracle`` /
+        ``snmp`` / ``tcp``. Empty labels return ``None``.
     """
     low = (label or "").strip().lower()
     if not low:
@@ -172,7 +173,22 @@ def _access_kind(label: str) -> str | None:
         return "mysql"
     if low.startswith("oracle") or low in {"ora", "oracledb"}:
         return "oracle"
-    return None
+    if "snmp" in low:
+        return "snmp"
+    # Unknown Access labels are still valid reachability targets.
+    return "tcp"
+
+
+def _default_port_for_kind(kind: str) -> str:
+    """Return conventional default TCP port for a known endpoint kind."""
+    return {
+        "pg": "5432",
+        "mysql": "3306",
+        "oracle": "1521",
+        "winrm": "5985",
+        "ssh": "22",
+        "snmp": "161",
+    }.get((kind or "").strip().lower(), "")
 
 
 def _parse_credentials_table(text: str) -> dict[str, str]:
@@ -559,7 +575,7 @@ def list_client_access_endpoints(
         client_slug_name: Client folder slug.
 
     Returns:
-        Rows with ``service``, ``host``, ``port``, ``kind`` (``ssh`` / ``pg`` / …).
+        Rows with ``service``, ``host``, ``port``, ``kind`` and ``protocol``.
         Deduplicated by ``kind|host|port``.
     """
     from auditor.host_facts import resolve_client_dir
@@ -578,28 +594,26 @@ def list_client_access_endpoints(
         for row in _iter_credential_rows(text):
             kind = (row.get("kind") or "").strip()
             host = (row.get("host") or "").strip()
-            if kind not in {"ssh", "pg", "mysql", "oracle", "winrm"} or not host:
+            if not kind or not host:
                 continue
             port = (row.get("port") or "").strip()
             if not port:
-                port = {
-                    "pg": "5432",
-                    "mysql": "3306",
-                    "oracle": "1521",
-                    "winrm": "5985",
-                    "ssh": "22",
-                }.get(kind, "22")
-            key = f"{kind}|{host.lower()}|{port}"
+                port = _default_port_for_kind(kind)
+            key = f"{kind}|{host.lower()}|{port or '-'}"
             if key in seen:
                 continue
             seen.add(key)
             service = (row.get("access") or kind).strip() or kind
+            protocol = (row.get("protocol") or "").strip().lower()
+            if not protocol:
+                protocol = kind if kind in {"snmp"} else "tcp"
             out.append(
                 {
                     "service": service,
                     "host": host,
                     "port": port,
                     "kind": kind,
+                    "protocol": protocol,
                 }
             )
     return out
