@@ -3,6 +3,8 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Node.js for antonorlov/mcp-postgres-server; curl for healthchecks/tools.
+# TruffleHog discovers leaked secrets during report anonymization.
+ARG TRUFFLEHOG_VERSION=3.96.0
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
@@ -10,6 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
+    && curl -fsSL \
+      "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" \
+      | tar -xz -C /usr/local/bin trufflehog \
+    && chmod +x /usr/local/bin/trufflehog \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./

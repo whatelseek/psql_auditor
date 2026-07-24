@@ -139,6 +139,11 @@ class Settings(BaseSettings):
     hitl_enabled: bool = True
     # Zip report+evidence and link it in Open WebUI chat
     archive_enabled: bool = True
+    # During report anonymization: discover leaked secrets with TruffleHog
+    # (optional CLI) and wipe them irreversibly before reversible mapping.
+    anonymize_trufflehog_enabled: bool = True
+    anonymize_trufflehog_bin: str = "trufflehog"
+    anonymize_trufflehog_timeout_sec: float = 120.0
     public_base_url: str = "http://localhost:8000"
     open_webui_url: str | None = None
     open_webui_public_url: str | None = None

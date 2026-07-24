@@ -14,6 +14,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
+from auditor.secret_redact import redact_secrets_in_text
+
 _EMAIL_RE = re.compile(
     r"(?<![A-Za-z0-9._%+-])"
     r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"
@@ -292,9 +294,16 @@ class ReversibleAnonymizer:
         text: str,
         *,
         literal_groups: dict[str, Iterable[str]] | None = None,
+        secrets_to_redact: Iterable[str] | None = None,
     ) -> str:
-        """Anonymize text with regex-first passes, then explicit literals."""
+        """Anonymize text with regex-first passes, then explicit literals.
+
+        ``secrets_to_redact`` are wiped to ``***REDACTED***`` first and never
+        enter the reversible mapping.
+        """
         masked = text
+        if secrets_to_redact:
+            masked = redact_secrets_in_text(masked, secrets_to_redact)
         domains: list[str] = []
         users: list[str] = []
         if literal_groups:
@@ -362,6 +371,7 @@ def _anonymize_relpath(
     src_is_dir: bool,
     anonymizer: ReversibleAnonymizer,
     literal_groups: dict[str, Iterable[str]] | None = None,
+    secrets_to_redact: Iterable[str] | None = None,
 ) -> Path:
     """Anonymize each relative path segment while preserving file suffixes."""
     if not rel.parts:
@@ -376,6 +386,7 @@ def _anonymize_relpath(
             masked_stem = anonymizer.anonymize_text(
                 stem,
                 literal_groups=literal_groups,
+                secrets_to_redact=secrets_to_redact,
             )
             out.append(f"{masked_stem}{suffix}")
             continue
@@ -383,6 +394,7 @@ def _anonymize_relpath(
             anonymizer.anonymize_text(
                 part,
                 literal_groups=literal_groups,
+                secrets_to_redact=secrets_to_redact,
             )
         )
     return Path(*out)
@@ -394,6 +406,7 @@ def anonymize_directory_tree(
     *,
     anonymizer: ReversibleAnonymizer,
     literal_groups: dict[str, Iterable[str]] | None = None,
+    secrets_to_redact: Iterable[str] | None = None,
 ) -> None:
     """Copy source tree and anonymize text files in destination."""
     if destination_root.exists():
@@ -406,6 +419,7 @@ def anonymize_directory_tree(
             src_is_dir=src.is_dir(),
             anonymizer=anonymizer,
             literal_groups=literal_groups,
+            secrets_to_redact=secrets_to_redact,
         )
         dst = destination_root / masked_rel
         if src.is_dir():
@@ -420,7 +434,11 @@ def anonymize_directory_tree(
         except OSError:
             shutil.copy2(src, dst)
             continue
-        masked = anonymizer.anonymize_text(text, literal_groups=literal_groups)
+        masked = anonymizer.anonymize_text(
+            text,
+            literal_groups=literal_groups,
+            secrets_to_redact=secrets_to_redact,
+        )
         dst.write_text(masked, encoding="utf-8")
 
 

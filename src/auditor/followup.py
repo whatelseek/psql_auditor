@@ -34,6 +34,7 @@ from auditor.anonymization import (
     is_generic_db_name,
     write_mapping_file,
 )
+from auditor.secret_redact import collect_secrets_for_redaction
 from auditor.compliance import format_compliance_markdown
 from auditor.context import compact_findings_for_summary, truncate_text
 from auditor.frameworks import get_framework, load_framework_checklist
@@ -1047,11 +1048,25 @@ async def run_anonymize_report(
         meta=meta,
         domain_name=domain_name,
     )
+    try:
+        inventory_creds = read_client_credentials(
+            settings.inventory_dir, source.run_id
+        )
+    except (OSError, ValueError, FileNotFoundError):
+        inventory_creds = {}
+    secrets = collect_secrets_for_redaction(
+        evidence_root=source.root,
+        inventory_creds=inventory_creds,
+        trufflehog_enabled=settings.anonymize_trufflehog_enabled,
+        trufflehog_bin=settings.anonymize_trufflehog_bin,
+        trufflehog_timeout_sec=settings.anonymize_trufflehog_timeout_sec,
+    )
     anonymize_directory_tree(
         source.root,
         anon_root,
         anonymizer=anonymizer,
         literal_groups=literals,
+        secrets_to_redact=secrets,
     )
     mapping_path = write_mapping_file(anon_root, anonymizer)
 
@@ -1067,6 +1082,7 @@ async def run_anonymize_report(
                 anon_meta["anonymized_from"] = source.run_id
                 anon_meta["anonymization_domain"] = domain_name
                 anon_meta["anonymization_mapping_file"] = mapping_path.name
+                anon_meta["anonymization_secrets_redacted"] = len(secrets)
                 anon_meta_path.write_text(
                     json.dumps(anon_meta, indent=2, ensure_ascii=False) + "\n",
                     encoding="utf-8",
