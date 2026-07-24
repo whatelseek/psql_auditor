@@ -70,18 +70,7 @@ if TYPE_CHECKING:
 
 _FOLLOWUP_FOOTER = (
     "\n\n---\n\n"
-    "**Next steps (post-audit):**\n"
-    "1. Gather more evidence — name **REQ + framework + host** when multi-host, "
-    "and say what to check / which commands to run, e.g. "
-    "`Evaluate REQ-001 on ubuntu_cis for host 10.200.29.78. "
-    "Try read /etc/ssh/sshd_config`.\n"
-    "2. Rewrite that REQ’s cells — "
-    "`Prepare new observation and recommendation for REQ-001`.\n"
-    "   You may repeat steps 1–2 for **other REQs** before rebuilding.\n"
-    "3. Rebuild report + ZIP once ready — `Update the report` / `Обнови отчёт`.\n"
-    "   One-shot: `Revise REQ-001 on ubuntu_cis for host …` "
-    "(gather + refill; still ask to update the report).\n"
-    "4. Need anonymized copy? Reply "
+    "Need anonymized copy? Reply "
     "`Anonymize the report domain=example.com` / "
     "`Анонимизируй отчёт домен example.com` "
     "to create `<client>_anon` with reversible mapping.\n"
@@ -89,13 +78,12 @@ _FOLLOWUP_FOOTER = (
 
 
 def followup_footer() -> str:
-    """Return the standard post-audit operator hint block.
+    """Return the short post-audit hint (anonymization only).
 
-    Appended to completed checklist audit reports to explain the three-step
-    follow-up workflow: gather evidence, refill cells, rebuild report.
+    Appended to completed checklist audit reports.
 
     Returns:
-        Markdown footer with numbered next-step instructions (EN/RU examples).
+        Markdown footer with anonymize instruction (EN/RU examples).
     """
     return _FOLLOWUP_FOOTER
 

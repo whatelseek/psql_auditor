@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "auditor"
 version = "0.1.0"
-description = "LangGraph IT infrastructure security auditor with LiteLLM and Open WebUI"
+description = "LangGraph IT infrastructure security auditor with Open WebUI"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

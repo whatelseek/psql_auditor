@@ -57,7 +57,11 @@ from auditor.access_probe import (
 )
 from auditor.adhoc import run_adhoc_commands
 from auditor.checklist import Requirement
-from auditor.compliance import format_compliance_markdown, parse_report_findings
+from auditor.compliance import (
+    format_chat_summary_visuals,
+    format_compliance_markdown,
+    parse_report_findings,
+)
 from auditor.config import Settings, get_settings
 from auditor.context import (
     compact_findings_for_summary,
@@ -167,6 +171,8 @@ from auditor.prompts import (
     HOST_FACTS_SYSTEM_PROMPT,
     SOFTWARE_FRAMEWORK_ROUTE_PROMPT,
     SOFTWARE_FRAMEWORK_ROUTE_SYSTEM,
+    INTAKE_INTERPRET_CLIENT_PROMPT,
+    INTAKE_INTERPRET_CLIENT_SYSTEM,
     INTAKE_INTERPRET_AUDIT_TYPE_PROMPT,
     INTAKE_INTERPRET_AUDIT_TYPE_SYSTEM,
     INTAKE_INTERPRET_SCOPE_PROMPT,
@@ -586,16 +592,35 @@ class AuditorGraph:
             clarification = intake_clarification_from_payload(payload)
         return answer, clarification
 
-    def _intake_resolve_client_name(self, raw: str) -> str:
-        """Extract client name deterministically (intake step 1 — no LLM).
+    async def _intake_resolve_client_name(self, raw: str) -> tuple[str, str]:
+        """Resolve client name with LLM check + deterministic convention guard.
 
         Args:
             raw: Operator reply naming the audit client.
 
         Returns:
-            Resolved client display name, or empty when unparseable.
+            ``(name, error_code)`` where ``error_code`` is:
+            ``empty`` / ``invalid_chars`` / ``llm_invalid``.
         """
-        return parse_client_name(str(raw or ""))
+        text = str(raw or "").strip()
+        payload = await self._intake_llm_json(
+            INTAKE_INTERPRET_CLIENT_SYSTEM,
+            INTAKE_INTERPRET_CLIENT_PROMPT.format(reply=text or "(empty)"),
+        )
+        llm_name = ""
+        llm_invalid = False
+        if isinstance(payload, dict):
+            llm_name = parse_client_name(str(payload.get("client_name") or ""))
+            llm_invalid = payload.get("is_compliant") is False
+
+        name = llm_name or parse_client_name(text)
+        if not name:
+            return "", "empty"
+        if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+            return "", "invalid_chars"
+        if llm_invalid:
+            return "", "llm_invalid"
+        return name, ""
 
     async def _intake_resolve_audit_type(self, raw: str) -> str | None:
         """Сопоставить ответ intake с типом аудита только через JSON LLM (шаг 4).
@@ -695,18 +720,19 @@ class AuditorGraph:
             return {"intake_complete": True}
 
         lang = self._report_language(state)
-        prompts = prompts_for_language(lang.code)
+        base_prompts = prompts_for_language(lang.code)
+        prompts = base_prompts
         thread_hint = str(state.get("thread_id") or "")
         intake: dict[str, Any] = self._load_intake_progress(
             state, thread_id=thread_hint
         )
 
-        # 1) Название клиента (детерминированно — без LLM)
+        # 1) Название клиента (LLM check + convention guard)
         while not intake.get("client_name"):
             raw = interrupt(
                 intake_interrupt_payload(step="client_name", prompt=prompts.client)
             )
-            name = self._intake_resolve_client_name(str(raw or ""))
+            name, err = await self._intake_resolve_client_name(str(raw or ""))
             if name:
                 intake["client_name"] = name
                 intake["client_slug"] = client_slug(name)
@@ -751,18 +777,32 @@ class AuditorGraph:
                     state, intake, thread_id=thread_hint
                 )
                 break
-            prompts = prompts_for_language(lang.code)
-            prompts = type(prompts)(
-                client=prompts.client
-                + (
-                    "\n\n_Please reply with a non-empty client name._"
-                    if lang.code == "en"
-                    else "\n\n_Укажите непустое название клиента._"
-                ),
+            if lang.code.startswith("ru"):
+                if err == "invalid_chars":
+                    hint = (
+                        "\n\n_Неверный формат: используйте только латинские буквы, "
+                        "цифры и `_`, без пробелов и спецсимволов._"
+                    )
+                elif err == "empty":
+                    hint = "\n\n_Укажите непустое название клиента._"
+                else:
+                    hint = "\n\n_Название клиента не соответствует правилам._"
+            else:
+                if err == "invalid_chars":
+                    hint = (
+                        "\n\n_Invalid format: use only Latin letters, digits, and `_`, "
+                        "with no spaces or special symbols._"
+                    )
+                elif err == "empty":
+                    hint = "\n\n_Please provide a non-empty client name._"
+                else:
+                    hint = "\n\n_Client name is not compliant with naming convention._"
+            prompts = type(base_prompts)(
+                client=base_prompts.client + hint,
                 cmdb="",
-                access=prompts.access,
-                scope=prompts.scope,
-                audit_type=prompts.audit_type,
+                access=base_prompts.access,
+                scope=base_prompts.scope,
+                audit_type=base_prompts.audit_type,
             )
 
         # 2) Доступ — спросить да/нет, затем список достижимости хостов/сервисов (один раз).
@@ -777,24 +817,13 @@ class AuditorGraph:
         intake["inventory_path"] = str(inv_path) if inv_path else ""
         self._persist_intake_progress(state, intake, thread_id=thread_hint)
 
-        cred_keys = intake.get("credentials_loaded") or []
-        if lang.code.startswith("ru"):
-            cred_line = (
-                f"**Учётные данные загружены из inventory** ({len(cred_keys)} ключей): "
-                + (", ".join(cred_keys) if cred_keys else "нет — добавьте таблицу Credentials в INVENTORY.md")
-            )
-        else:
-            cred_line = (
-                f"**Credentials loaded from inventory** ({len(cred_keys)} keys): "
-                + (", ".join(cred_keys) if cred_keys else "none — add a Credentials table to INVENTORY.md")
-            )
         inv_found = bool(intake.get("inventory_found"))
         inv_display_path = intake.get("inventory_path") or ""
         if lang.code.startswith("ru"):
             status = (
-                f"**Инвентарь найден:** `{inv_display_path}`"
+                f"**Инвентарник найден:** `{inv_display_path}`"
                 if inv_found
-                else f"**Инвентарь не найден** по пути `{inv_display_path}`"
+                else f"**Инвентарник не найден** по пути `{inv_display_path}`"
             )
         else:
             status = (
@@ -803,7 +832,7 @@ class AuditorGraph:
                 else f"**Inventory not found** at `{inv_display_path}`"
             )
         # Keep this short — a full inventory dump in the prompt confused yes/no.
-        scope_block = f"\n\n### Client inventory check\n\n{status}\n\n{cred_line}\n"
+        scope_block = f"\n\n### Client inventory check\n\n{status}\n"
         access_prompt = f"{prompts.access}{scope_block}"
         while "has_access" not in intake:
             raw = interrupt(
@@ -1088,7 +1117,7 @@ class AuditorGraph:
             original_jobs = [dict(r) for r in proposed_jobs]
             plan_md = format_proposed_jobs_markdown(working_jobs)
             scope_prompt = (
-                f"{prompts.scope}{plan_note}\n\n{host_access_md}\n\n{plan_md}"
+                f"{prompts.scope}{plan_note}\n\n{plan_md}"
             )
             while "selected_jobs" not in intake:
                 raw = interrupt(
@@ -1119,7 +1148,7 @@ class AuditorGraph:
                             "paste another table.\n"
                         )
                     scope_prompt = (
-                        f"{prompts.scope}{confirm_block}\n{host_access_md}\n\n{plan_md}"
+                        f"{prompts.scope}{confirm_block}\n\n{plan_md}"
                     )
                     self._persist_intake_progress(
                         state, intake, thread_id=thread_hint
@@ -1148,7 +1177,7 @@ class AuditorGraph:
                         "или вставьте таблицу Host | Frameworks._"
                     )
                     scope_prompt = (
-                        f"{prompts.scope}{hint}\n\n{host_access_md}\n\n{plan_md}"
+                        f"{prompts.scope}{hint}\n\n{plan_md}"
                     )
                     continue
                 if not selected:
@@ -1160,7 +1189,7 @@ class AuditorGraph:
                         "Подтвердите предыдущий план или измените меньше._"
                     )
                     scope_prompt = (
-                        f"{prompts.scope}{hint}\n\n{host_access_md}\n\n{plan_md}"
+                        f"{prompts.scope}{hint}\n\n{plan_md}"
                     )
                     continue
 
@@ -1203,89 +1232,16 @@ class AuditorGraph:
                         "or describe more exclusions/inclusions.\n"
                     )
                 scope_prompt = (
-                    f"{prompts.scope}{confirm_block}\n{host_access_md}\n\n{plan_md}"
+                    f"{prompts.scope}{confirm_block}\n\n{plan_md}"
                 )
                 self._persist_intake_progress(
                     state, intake, thread_id=thread_hint
                 )
                 continue
         else:
-            audit_prompt = f"{prompts.audit_type}\n\n{host_access_md}"
-            while not intake.get("audit_types") and "selected_jobs" not in intake:
-                raw = interrupt(
-                    intake_interrupt_payload(
-                        step="audit_type", prompt=audit_prompt
-                    )
-                )
-                reply = str(raw or "").strip()
-                pasted = parse_audit_plan_markdown(reply)
-                if pasted and (
-                    "|" in reply or reply.lstrip().startswith(("-", "*", "•"))
-                ):
-                    plan_md = format_proposed_jobs_markdown(pasted)
-                    if lang.code.startswith("ru"):
-                        confirm_block = (
-                            "\n\n### План из Markdown\n\n"
-                            "Принят список хостов/проверок. Ответьте **подтвердить** "
-                            "или вставьте другую таблицу.\n"
-                        )
-                    else:
-                        confirm_block = (
-                            "\n\n### Plan from Markdown\n\n"
-                            "Accepted host/checks list. Reply **confirm** "
-                            "or paste another table.\n"
-                        )
-                    # Mini confirm loop for pasted plan without prior discovery
-                    confirm_prompt = (
-                        f"{prompts.scope}{confirm_block}\n\n{plan_md}"
-                    )
-                    while "selected_jobs" not in intake:
-                        creply = interrupt(
-                            intake_interrupt_payload(
-                                step="scope", prompt=confirm_prompt
-                            )
-                        )
-                        ctext = str(creply or "").strip()
-                        again = parse_audit_plan_markdown(ctext)
-                        if again and (
-                            "|" in ctext
-                            or ctext.lstrip().startswith(("-", "*", "•"))
-                        ):
-                            pasted = again
-                            plan_md = format_proposed_jobs_markdown(pasted)
-                            confirm_prompt = (
-                                f"{prompts.scope}{confirm_block}\n\n{plan_md}"
-                            )
-                            continue
-                        payload = await self._intake_llm_json(
-                            INTAKE_INTERPRET_SCOPE_SYSTEM,
-                            INTAKE_INTERPRET_SCOPE_PROMPT.format(
-                                reply=ctext or "(empty)",
-                                plan=plan_md,
-                            ),
-                        )
-                        action = str(
-                            (payload or {}).get("action") or ""
-                        ).strip().lower()
-                        if action in {"confirm", "all", "run_all", "accept"}:
-                            intake["selected_jobs"] = pasted
-                            intake["proposed_jobs"] = pasted
-                            intake["plan_source"] = "markdown_paste"
-                            intake["audit_types"] = "both"
-                            break
-                        hint = (
-                            "\n\n_Reply **confirm** to run this plan._"
-                            if lang.code == "en"
-                            else "\n\n_Ответьте **подтвердить**, чтобы запустить план._"
-                        )
-                        confirm_prompt = (
-                            f"{prompts.scope}{confirm_block}{hint}\n\n{plan_md}"
-                        )
-                    break
-                atype = await self._intake_resolve_audit_type(reply)
-                if atype:
-                    intake["audit_types"] = atype
-                    break
+            # No host/framework plan to confirm: skip domain-selection question.
+            # Use the broad default and continue automatically.
+            intake["audit_types"] = "both"
 
         store = self._store_from_state(state)
         if store is not None:
@@ -4466,8 +4422,13 @@ class AuditorGraph:
             "other": 0,
         }
         ranked_rows: list[tuple[str, str, str, str, str]] = []
+        all_finding_rows = []
+        host_ids: set[str] = set()
         for fw_id, _title, body in ordered_reports:
+            if "/" in fw_id:
+                host_ids.add(fw_id.split("/", 1)[0].strip())
             for row in parse_report_findings(body):
+                all_finding_rows.append(row)
                 status = str(row.status or "").strip().lower()
                 severity = str(row.severity or "Unknown").strip() or "Unknown"
                 req_id = str(row.req_id or "").strip() or "REQ-???"
@@ -4484,6 +4445,9 @@ class AuditorGraph:
         assessed = max(0, total - status_counts["skipped"])
         passed = status_counts["pass"]
         compliance_pct = (100.0 * passed / assessed) if assessed else 0.0
+        audited_hosts = len(host_ids) if host_ids else (
+            1 if ordered_reports else 0
+        )
 
         sev_rank = {
             "critical": 0,
@@ -4509,7 +4473,7 @@ class AuditorGraph:
         summary_sections = [
             "# Management summary",
             "",
-            f"- Audited sections: {len(ordered_reports)}",
+            f"- Audited hosts: {audited_hosts}",
             f"- Requirements total: {total}",
             (
                 "- Pass/Fail statistics: "
@@ -4517,10 +4481,26 @@ class AuditorGraph:
                 f"partial={status_counts['partial']}, error={status_counts['error']}, "
                 f"skipped={status_counts['skipped']}, compliance={compliance_pct:.1f}%"
             ),
-            "",
-            "## Top 10 critical general findings",
-            "",
         ]
+        try:
+            summary_sections.append(
+                format_chat_summary_visuals(
+                    all_finding_rows,
+                    status_counts=status_counts,
+                    compliance_pct=compliance_pct,
+                    hosts=audited_hosts,
+                    total=total,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        summary_sections.extend(
+            [
+                "",
+                "## Top 10 critical general findings",
+                "",
+            ]
+        )
         if store is not None:
             summary_sections.extend([f"Evidence directory: `{store.root}`", ""])
         for fw_id, req_id, title, severity, status in top_findings[:10]:

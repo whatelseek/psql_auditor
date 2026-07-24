@@ -30,7 +30,7 @@ from auditor.evidence_store import EvidenceStore, new_run_id
 from auditor.frameworks import route_framework
 from auditor.intent import extract_req_ids
 from auditor.language import detect_report_language, language_instruction
-from auditor.prompts import ADHOC_FORCE_PROMPT, ADHOC_SYSTEM_PROMPT, ADHOC_USER_PROMPT
+from auditor.prompts import ADHOC_FORCE_PROMPT, ADHOC_USER_PROMPT
 from auditor.run_resolve import latest_run_id
 
 if TYPE_CHECKING:
@@ -260,9 +260,6 @@ async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, A
 
     # Freeform path: LLM chooses tools from the operator request.
     messages: list = [
-        SystemMessage(
-            content=ADHOC_SYSTEM_PROMPT.format(language_instruction=lang_instr)
-        ),
         HumanMessage(
             content=ADHOC_USER_PROMPT.format(
                 report_language=report_lang.name,

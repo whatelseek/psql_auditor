@@ -43,10 +43,13 @@ HITL_MARKER_RE = re.compile(
 #   [AUDIT_INTAKE:thread]
 # and hidden HTML-comment markers:
 #   <!-- AUDIT_INTAKE:thread -->
+# and markdown comment markers:
+#   [//]: # (AUDIT_INTAKE:thread)
 PAUSE_MARKER_RE = re.compile(
     r"(?:"
     r"\[AUDIT_(?P<kind>HITL|INTAKE|CONTINUE):(?P<thread>[A-Za-z0-9._:-]+)\]"
     r"|<!--\s*AUDIT_(?P<h_kind>HITL|INTAKE|CONTINUE):(?P<h_thread>[A-Za-z0-9._:-]+)\s*-->"
+    r"|\[//\]:\s*#\s*\(\s*AUDIT_(?P<m_kind>HITL|INTAKE|CONTINUE):(?P<m_thread>[A-Za-z0-9._:-]+)\s*\)"
     r")",
     re.IGNORECASE,
 )
@@ -99,8 +102,12 @@ def resolve_pause_resume(messages: list[Any]) -> tuple[PauseKind, str] | None:
         if not matches:
             continue
         m = matches[-1]
-        kind = str(m.group("kind") or m.group("h_kind") or "").lower()
-        thread = str(m.group("thread") or m.group("h_thread") or "")
+        kind = str(
+            m.group("kind") or m.group("h_kind") or m.group("m_kind") or ""
+        ).lower()
+        thread = str(
+            m.group("thread") or m.group("h_thread") or m.group("m_thread") or ""
+        )
         if kind in ("hitl", "intake", "continue"):
             return kind, thread  # type: ignore[return-value]
     return None

@@ -1,9 +1,12 @@
 from auditor.compliance import (
     compliance_by_severity,
+    format_chat_summary_visuals,
     format_compliance_markdown,
+    format_severity_line,
     overall_compliance,
     parse_report_findings,
     render_compliance_bar_chart_svg,
+    severity_issue_counts,
 )
 
 
@@ -61,3 +64,29 @@ def test_compliance_markdown_russian():
     md = format_compliance_markdown(SAMPLE, language="ru")
     assert "Визуализация соответствия CIS" in md
     assert "Общий уровень соответствия" in md
+
+
+def test_severity_line_and_chat_visuals():
+    rows = parse_report_findings(SAMPLE)
+    counts = severity_issue_counts(rows)
+    assert counts["Critical"] == 1
+    assert counts["High"] == 1  # partial on High
+    assert "High: 1" in format_severity_line(counts)
+    assert "Critical: 1" in format_severity_line(counts)
+    visuals = format_chat_summary_visuals(
+        rows,
+        status_counts={
+            "pass": 2,
+            "fail": 1,
+            "partial": 1,
+            "error": 0,
+            "skipped": 1,
+        },
+        compliance_pct=62.5,
+        hosts=2,
+        total=5,
+    )
+    assert "```mermaid" in visuals
+    assert "@@@VIZ-START" in visuals
+    assert "@@@VIZ-END" in visuals
+    assert "data:image/svg+xml;base64," in visuals

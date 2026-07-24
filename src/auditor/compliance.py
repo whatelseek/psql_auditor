@@ -464,6 +464,223 @@ def svg_as_markdown_image(svg: str, *, alt: str = "CIS compliance chart") -> str
     return f"![{alt}](data:image/svg+xml;base64,{b64})"
 
 
+def severity_issue_counts(
+    rows: Iterable[FindingRow],
+) -> dict[str, int]:
+    """Count non-pass findings (fail/error/partial) by severity bucket.
+
+    Args:
+        rows: Parsed report finding rows.
+
+    Returns:
+        Mapping of canonical severity label → issue count.
+    """
+    counts: dict[str, int] = {sev: 0 for sev in ("Critical", "High", "Medium", "Low")}
+    for row in rows:
+        status = normalize_status(row.status)
+        if status not in {"fail", "error", "partial"}:
+            continue
+        sev = normalize_severity(row.severity)
+        if sev not in counts:
+            counts[sev] = 0
+        counts[sev] += 1
+    return counts
+
+
+def format_severity_line(counts: Mapping[str, int]) -> str:
+    """Format ``High: X; Medium: Y; Low: Z`` (include Critical when present).
+
+    Args:
+        counts: Severity → issue count mapping.
+
+    Returns:
+        Single-line Markdown-ready severity summary.
+    """
+    parts: list[str] = []
+    for sev in ("Critical", "High", "Medium", "Low"):
+        value = int(counts.get(sev) or 0)
+        if sev == "Critical" and value <= 0:
+            continue
+        parts.append(f"{sev}: {value}")
+    return "; ".join(parts) if parts else "High: 0; Medium: 0; Low: 0"
+
+
+def format_status_mermaid_pie(status_counts: Mapping[str, int]) -> str:
+    """Build a Mermaid pie chart for Open WebUI native rendering.
+
+    Args:
+        status_counts: Mapping with keys like pass/fail/partial/error/skipped.
+
+    Returns:
+        Fenced ``mermaid`` code block, or empty string when no data.
+    """
+    slices = [
+        ("Pass", int(status_counts.get("pass") or 0)),
+        ("Fail", int(status_counts.get("fail") or 0)),
+        ("Partial", int(status_counts.get("partial") or 0)),
+        ("Error", int(status_counts.get("error") or 0)),
+        ("Skipped", int(status_counts.get("skipped") or 0)),
+    ]
+    active = [(label, n) for label, n in slices if n > 0]
+    if not active:
+        return ""
+    lines = ["```mermaid", "pie showData", '    title Pass / Fail statistics']
+    for label, n in active:
+        lines.append(f'    "{label}" : {n}')
+    lines.extend(["```", ""])
+    return "\n".join(lines)
+
+
+def format_owui_viz_dashboard(
+    *,
+    status_counts: Mapping[str, int],
+    severity_counts: Mapping[str, int],
+    compliance_pct: float,
+    hosts: int,
+    total: int,
+) -> str:
+    """Build Inline Visualizer HTML/SVG block for Open WebUI Functions.
+
+    Emits ``@@@VIZ-START`` / ``@@@VIZ-END`` markers used by the Inline
+    Visualizer tool/filter so the summary renders as a rich UI card in chat.
+
+    Args:
+        status_counts: Pass/fail/partial/error/skipped counts.
+        severity_counts: Non-pass counts by severity.
+        compliance_pct: Overall compliance percentage.
+        hosts: Number of audited hosts.
+        total: Total requirements.
+
+    Returns:
+        Markdown-safe visualizer fragment (markers + HTML).
+    """
+    passed = int(status_counts.get("pass") or 0)
+    failed = int(status_counts.get("fail") or 0)
+    partial = int(status_counts.get("partial") or 0)
+    errors = int(status_counts.get("error") or 0)
+    high = int(severity_counts.get("High") or 0)
+    medium = int(severity_counts.get("Medium") or 0)
+    low = int(severity_counts.get("Low") or 0)
+    critical = int(severity_counts.get("Critical") or 0)
+    max_bar = max(failed, partial, errors, passed, 1)
+    bar_w = 220
+
+    def _bar(value: int, color: str) -> str:
+        width = max(4, int(bar_w * (value / max_bar))) if value else 0
+        return (
+            f'<rect x="70" y="0" width="{bar_w}" height="14" rx="4" fill="#1e293b"/>'
+            f'<rect x="70" y="0" width="{width}" height="14" rx="4" fill="{color}"/>'
+            f'<text x="300" y="11" fill="#e2e8f0" font-size="11">{value}</text>'
+        )
+
+    svg = f"""
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="150" viewBox="0 0 360 150">
+  <text x="0" y="14" fill="#e2e8f0" font-size="13" font-family="system-ui,sans-serif">Status distribution</text>
+  <g transform="translate(0,28)">
+    <text x="0" y="11" fill="#94a3b8" font-size="11">Pass</text>{_bar(passed, "#16a34a")}
+  </g>
+  <g transform="translate(0,52)">
+    <text x="0" y="11" fill="#94a3b8" font-size="11">Fail</text>{_bar(failed, "#dc2626")}
+  </g>
+  <g transform="translate(0,76)">
+    <text x="0" y="11" fill="#94a3b8" font-size="11">Partial</text>{_bar(partial, "#ca8a04")}
+  </g>
+  <g transform="translate(0,100)">
+    <text x="0" y="11" fill="#94a3b8" font-size="11">Error</text>{_bar(errors, "#7c3aed")}
+  </g>
+</svg>
+""".strip()
+
+    html = f"""
+<div style="font-family:system-ui,sans-serif;color:#e2e8f0;background:#0b1220;padding:16px;border-radius:12px;">
+  <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+    <div style="background:#111827;padding:10px 14px;border-radius:10px;min-width:110px;">
+      <div style="color:#94a3b8;font-size:12px;">Hosts</div>
+      <div style="font-size:22px;font-weight:700;">{hosts}</div>
+    </div>
+    <div style="background:#111827;padding:10px 14px;border-radius:10px;min-width:110px;">
+      <div style="color:#94a3b8;font-size:12px;">Requirements</div>
+      <div style="font-size:22px;font-weight:700;">{total}</div>
+    </div>
+    <div style="background:#111827;padding:10px 14px;border-radius:10px;min-width:110px;">
+      <div style="color:#94a3b8;font-size:12px;">Compliance</div>
+      <div style="font-size:22px;font-weight:700;">{compliance_pct:.1f}%</div>
+    </div>
+  </div>
+  <div style="color:#cbd5e1;margin-bottom:8px;font-size:13px;">
+    Critical: {critical}; High: {high}; Medium: {medium}; Low: {low}
+  </div>
+  {svg}
+</div>
+""".strip()
+    return f"\n@@@VIZ-START\n{html}\n@@@VIZ-END\n"
+
+
+def format_chat_summary_visuals(
+    rows: Iterable[FindingRow],
+    *,
+    status_counts: Mapping[str, int],
+    compliance_pct: float,
+    hosts: int,
+    total: int,
+    language: str | ReportLanguage | None = "en",
+) -> str:
+    """Chat-ready visualization block (Mermaid + SVG + OWUI Inline Visualizer).
+
+    Args:
+        rows: Parsed finding rows for severity/compliance charts.
+        status_counts: Aggregate pass/fail statistics.
+        compliance_pct: Overall compliance percentage.
+        hosts: Audited host count.
+        total: Total requirements.
+        language: Report language for SVG chart labels.
+
+    Returns:
+        Markdown fragment for the management summary chat reply.
+    """
+    row_list = list(rows)
+    sev_counts = severity_issue_counts(row_list)
+    by_sev = compliance_by_severity(row_list)
+    overall = overall_compliance(row_list)
+    ui = report_ui(language)
+    chart_stats = [
+        SeverityCompliance(
+            ui["chart_overall_label"],
+            overall.total,
+            overall.passed,
+            overall.partial,
+            overall.failed,
+            overall.errors,
+            overall.skipped,
+            overall.percent,
+        ),
+        *by_sev,
+    ]
+    svg = render_compliance_bar_chart_svg(
+        chart_stats, title=ui.get("chart_title") or "Compliance by severity (%)"
+    )
+    image = svg_as_markdown_image(svg, alt=ui.get("chart_title") or "Compliance chart")
+    mermaid = format_status_mermaid_pie(status_counts)
+    viz = format_owui_viz_dashboard(
+        status_counts=status_counts,
+        severity_counts=sev_counts,
+        compliance_pct=compliance_pct,
+        hosts=hosts,
+        total=total,
+    )
+    parts = [
+        "",
+        f"**Severity issues:** {format_severity_line(sev_counts)}",
+        "",
+        "## Visualization",
+        "",
+    ]
+    if mermaid:
+        parts.append(mermaid)
+    parts.extend([image, "", viz])
+    return "\n".join(parts)
+
+
 def _xml(text: str) -> str:
     """Escape a string for safe inclusion in SVG/XML text nodes.
 

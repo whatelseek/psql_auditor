@@ -620,17 +620,35 @@ def prompts_for_language(code: str) -> IntakePrompts:
         return IntakePrompts(
             client=(
                 "## Предварительный опрос (1/3)\n\n"
-                "Укажите **название клиента** (организация / проект)."
+                "**Укажите идентификатор клиента на английском языке.** "
+                "Допускаются только латинские буквы, цифры и символ "
+                "подчеркивания (`_`). Использование пробелов и специальных "
+                "символов не допускается.\n\n"
+                "Указанный идентификатор будет использоваться при создании "
+                "базы данных и проектной директории.\n\n"
+                "После создания проекта необходимо добавить "
+                "аутентификационные данные в файл:\n\n"
+                "```\n"
+                "~/workspace/inventory/<client_identifier>/INVENTORY.md\n"
+                "```\n\n"
+                "В разделе **Credentials & Access** заполните таблицу "
+                "следующего формата:\n\n"
+                "```\n"
+                "## Credentials & Access\n\n"
+                "| Access     | Host / URL   | Port | Username  | Password / Token | Database |\n"
+                "|------------|--------------|------|-----------|------------------|----------|\n"
+                "| SSH        | 10.200.29.79 | 22   | user      | <pass>           |          |\n"
+                "| PostgreSQL | 10.200.29.79 | 5432 | user      | <pass>           | test_1c  |\n"
+                "| 1C Ubuntu  | 10.200.29.78 | 22   | user      | <pass>           |          |\n"
+                "```\n\n"
             ),
             cmdb="",
             access=(
                 "## Предварительный опрос (2/3)\n\n"
-                "Есть ли у меня **доступ к серверам и сервисам** для проверки?\n\n"
-                "Опишите ситуацию своими словами "
-                "(например: «SSH на .79», «ты можешь туда попасть», "
-                "«пока только документы»).\n\n"
-                "Если доступ есть, будет показана таблица досягаемости "
-                "(сервис / IP / порт / статус / применимые фреймворки)."
+                "Есть ли у меня **доступ к серверам и сервисам** "
+                "в области аудита? (**да/нет**)\n\n"
+                "Если доступ есть, будет проведена предварительная проверка "
+                "на основе фреймворка `host_facts`."
             ),
             scope=(
                 "## Предварительный опрос (3/3)\n\n"
@@ -656,16 +674,33 @@ def prompts_for_language(code: str) -> IntakePrompts:
     return IntakePrompts(
         client=(
             "## Pre-audit intake (1/3)\n\n"
-            "What is the **client name** (organization / engagement)?"
+            "**Provide the client identifier in English.** "
+            "Only Latin letters, digits, and underscore (`_`) are allowed. "
+            "Spaces and special characters are not allowed.\n\n"
+            "This identifier will be used to create the database and project "
+            "directory.\n\n"
+            "After project creation, add authentication credentials to:\n\n"
+            "```\n"
+            "~/workspace/inventory/<client_identifier>/INVENTORY.md\n"
+            "```\n\n"
+            "In the **Credentials & Access** section, fill in the table using "
+            "this format:\n\n"
+            "```\n"
+            "## Credentials & Access\n\n"
+            "| Access     | Host / URL   | Port | Username  | Password / Token | Database |\n"
+            "|------------|--------------|------|-----------|------------------|----------|\n"
+            "| SSH        | 10.200.29.79 | 22   | user      | <pass>           |          |\n"
+            "| PostgreSQL | 10.200.29.79 | 5432 | user      | <pass>           | test_1c  |\n"
+            "| 1C Ubuntu  | 10.200.29.78 | 22   | user      | <pass>           |          |\n"
+            "```\n\n"
         ),
         cmdb="",
         access=(
             "## Pre-audit intake (2/3)\n\n"
-            "Do I have **access to servers and services** to probe?\n\n"
-            "Describe the situation in your own words "
-            "(e.g. \"SSH on .79\", \"you can get in\", \"docs only for now\").\n\n"
-            "If access is available, I will list host/service reachability "
-            "(service / IP / port / status / applicable frameworks)."
+            "Do I have **access to servers and services** "
+            "within audit scope? (**yes/no**)\n\n"
+            "If access is available, I will run a preliminary check "
+            "using the `host_facts` framework."
         ),
         scope=(
             "## Pre-audit intake (3/3)\n\n"
@@ -941,7 +976,11 @@ def extract_management_summary(report_text: str) -> str:
     if not text:
         return ""
     # Убрать приложения archive / follow-up, если есть.
-    for marker in ("\n## Audit archive", "\n---\n\n**Next steps"):
+    for marker in (
+        "\n## Audit archive",
+        "\n---\n\n**Next steps",
+        "\n---\n\nNeed anonymized copy?",
+    ):
         if marker in text:
             text = text.split(marker, 1)[0].rstrip()
     # Основной layout finalize: summary до первого горизонтального правила.
@@ -1004,8 +1043,8 @@ def format_intake_assistant_message(prompt: str, thread_id: str) -> str:
     Returns:
         Сообщение ассистента без служебного текста для оператора.
     """
-    # Keep intake resume marker machine-readable but hidden from chat UI.
-    return f"{prompt.strip()}\n\n<!-- AUDIT_INTAKE:{thread_id} -->\n"
+    # Use markdown comment style that OWUI typically does not render.
+    return f"{prompt.strip()}\n\n[//]: # (AUDIT_INTAKE:{thread_id})\n"
 
 
 

@@ -118,24 +118,6 @@ Digest:
 
 # --- Ad-hoc command execution (operator-requested tools; no checklist) ---
 
-ADHOC_SYSTEM_PROMPT = """You execute audit commands the operator asked for on the target.
-
-Available tools:
-- ssh_run / ssh_read_file — Linux/Ubuntu host checks (OpenSSH)
-- winrm_run / winrm_read_file — Windows PowerShell over WinRM
-- mcp_query — read-only PostgreSQL (SELECT / SHOW only)
-- mcp_list_servers — which MCPs are registered in ``mcps/registry.json``
-
-Rules:
-- Run ONLY what the operator requested. Do not invent a full CIS checklist audit.
-- Prefer 1–3 focused tool calls. Avoid huge dumps.
-- Do not invent command output.
-- After tools finish, reply with a clear Markdown summary:
-  1) what you ran, 2) key results, 3) brief interpretation (optional).
-- If SSH/MCP fails, include the error text (words like "SSH error" / "MCP error").
-- {language_instruction}
-"""
-
 ADHOC_USER_PROMPT = """Execute the requested audit command(s).
 
 Language: {report_language}
@@ -366,18 +348,28 @@ Return JSON with answer = yes|no|unknown (optional clarification).
 INTAKE_INTERPRET_CLIENT_SYSTEM = """You extract the client / organization name from an operator reply.
 
 Output ONLY JSON:
-{{"client_name":"..."}} or {{"client_name":""}}
+{{"client_name":"...","is_compliant":true,"reason":""}}
+or
+{{"client_name":"...","is_compliant":false,"reason":"short reason"}}
+or
+{{"client_name":"","is_compliant":false,"reason":"short reason"}}
 
 Rules:
 - Strip prefixes like "Client:", "клиент:", etc.
 - Return the organization/engagement name only.
+- Naming convention for compliance:
+  - allowed chars: A-Z a-z 0-9 underscore (_)
+  - no spaces
+  - no other special symbols
 - Empty string if the reply has no usable name.
+- Set ``is_compliant`` based on the naming convention above.
+- Keep ``reason`` short and practical.
 """
 
 INTAKE_INTERPRET_CLIENT_PROMPT = """Operator reply:
 {reply}
 
-Return JSON with key client_name.
+Return JSON with keys: client_name, is_compliant, reason.
 """
 
 INTAKE_INTERPRET_AUDIT_TYPE_SYSTEM = """You map an operator reply to an audit domain.

@@ -359,7 +359,9 @@ async def _stream_responses_audit(
         await pump
         result = await shielded
         content = result.get("report") or _last_ai_text(result.get("messages") or [])
-        if result.get("awaiting_hitl"):
+        if result.get("awaiting_intake"):
+            content = content or ""
+        elif result.get("awaiting_hitl"):
             content = (
                 "Paused for your decision (skip / retry).\n\n" + (content or "")
             )
@@ -815,7 +817,9 @@ async def responses_api(
 
     result = await _run_or_resume(auditor, chat_body)
     content = result.get("report") or _last_ai_text(result.get("messages") or [])
-    if result.get("awaiting_hitl"):
+    if result.get("awaiting_intake"):
+        content = content
+    elif result.get("awaiting_hitl"):
         content = f"Paused for your decision (skip / retry).\n\n{content}"
     if not content:
         content = "Audit finished (no report captured)."
@@ -1028,7 +1032,9 @@ async def _stream_audit(
         await pump
         result = await shielded
         final_report = result.get("report") or ""
-        if result.get("awaiting_hitl"):
+        if result.get("awaiting_intake"):
+            pass
+        elif result.get("awaiting_hitl"):
             yield _sse_chunk(
                 "Paused for your decision (skip / retry).\n\n",
                 model,
