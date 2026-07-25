@@ -6,24 +6,34 @@ import pytest
 
 from auditor.config import Settings
 from auditor.mcp_registry import (
+    build_http_connection,
     build_stdio_connection,
     credentials_ready,
     format_registry_markdown,
     load_mcp_registry,
 )
 from auditor.tools.mcp_client import get_mcp_tools, postgres_mcp_connection
+from auditor.tools.mslearn_mcp import get_microsoft_learn_tools
 
 
 def test_load_bundled_registry():
     registry = load_mcp_registry(Path("mcps"))
     assert registry.version == 1
-    assert list(registry.servers) == ["postgres"]
+    assert set(registry.servers) == {"postgres", "microsoft-learn"}
     pg = registry.servers["postgres"]
     assert pg.enabled
     assert pg.env_from == "inventory:pg"
     assert pg.curated_tools
     assert "postgres_cis" in pg.frameworks
-    assert registry.enabled_servers() == [pg]
+    learn = registry.servers["microsoft-learn"]
+    assert learn.enabled
+    assert learn.transport == "streamable_http"
+    assert "learn.microsoft.com" in learn.url
+    assert credentials_ready(learn, Settings(_env_file=None, mcps_dir=Path("mcps")))
+    assert {s.name for s in registry.enabled_servers()} == {
+        "postgres",
+        "microsoft-learn",
+    }
 
 
 def test_build_postgres_connection_injects_pg_env(tmp_path: Path, monkeypatch):
@@ -131,10 +141,18 @@ def test_format_registry_markdown_and_tools():
     registry = load_mcp_registry(Path("mcps"))
     md = format_registry_markdown(registry, settings)
     assert "`postgres`" in md
+    assert "`microsoft-learn`" in md
     assert "inventory" in md.lower() or "Credentials" in md
     names = [t.name for t in get_mcp_tools()]
     assert "mcp_list_servers" in names
     assert "mcp_query" in names
+    assert "microsoft_docs_search" in names
+    assert "microsoft_docs_fetch" in names
+    assert "microsoft_code_sample_search" in names
+    learn_conn = build_http_connection(registry.servers["microsoft-learn"], settings)
+    assert learn_conn["transport"] == "streamable_http"
+    assert learn_conn["url"].startswith("https://learn.microsoft.com/")
+    assert len(get_microsoft_learn_tools()) == 3
 
 
 def test_inventory_parses_mysql_oracle_kinds():

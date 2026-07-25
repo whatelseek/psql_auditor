@@ -648,11 +648,14 @@ async def mcp_list_servers() -> str:
 
 
 def get_mcp_tools() -> list:
-    """Return curated LangChain tools that query Postgres via MCP adapters.
+    """Return curated LangChain tools for bound MCP servers.
 
     Returns:
-        Curated ``mcp_*`` tools plus ``mcp_list_servers`` for ``bind_tools``.
+        Postgres ``mcp_*`` tools, optional Microsoft Learn docs tools, and
+        ``mcp_list_servers`` for ``bind_tools``.
     """
+    from auditor.tools.mslearn_mcp import get_microsoft_learn_tools
+
     return [
         mcp_connect_db,
         mcp_query,
@@ -661,4 +664,5 @@ def get_mcp_tools() -> list:
         mcp_describe_table,
         mcp_list_tools,
         mcp_list_servers,
+        *get_microsoft_learn_tools(),
     ]

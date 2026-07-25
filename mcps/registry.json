@@ -11,6 +11,14 @@
       "curatedTools": true,
       "blockedTools": ["execute"],
       "description": "PostgreSQL read-only evidence via antonorlov/mcp-postgres-server"
+    },
+    "microsoft-learn": {
+      "enabled": true,
+      "transport": "streamable_http",
+      "url": "https://learn.microsoft.com/api/mcp",
+      "frameworks": [],
+      "curatedTools": true,
+      "description": "Official Microsoft Learn docs/code search (no auth) for how-to guidance"
     }
   }
 }

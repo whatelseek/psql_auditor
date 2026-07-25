@@ -30,13 +30,14 @@ class McpServerSpec:
     Attributes:
         name: Registry key (e.g. ``postgres``).
         enabled: When false, ignored by the runtime.
-        transport: Currently ``stdio`` (HTTP reserved for later).
+        transport: ``stdio`` or ``streamable_http`` (alias ``http``).
         command: Executable for stdio transport.
         args: CLI args for ``command``.
+        url: Remote MCP endpoint for HTTP transports.
         env_from: Preset that fills connection env from inventory/settings.
         env_map: Optional ``MCP_ENV_VAR → process/settings key`` overlays.
-        frameworks: Framework ids this MCP typically serves.
-        curated_tools: When true, use hand-written ``mcp_*`` wrappers.
+        frameworks: Framework ids this MCP typically serves (empty = general).
+        curated_tools: When true, use hand-written tool wrappers.
         blocked_tools: Remote tool names the client must not call.
         description: Short operator-facing blurb.
         extra_env: Static non-secret env from the registry (rarely needed).
@@ -47,6 +48,7 @@ class McpServerSpec:
     transport: str = "stdio"
     command: str = "npx"
     args: tuple[str, ...] = ()
+    url: str = ""
     env_from: str = ""
     env_map: dict[str, str] = field(default_factory=dict)
     frameworks: tuple[str, ...] = ()
@@ -147,12 +149,17 @@ def load_mcp_registry(
                     f"mcpServers.{name}.env must not contain secret key {key!r}; "
                     "use envFrom / inventory instead"
                 )
+        transport = str(entry.get("transport") or entry.get("type") or "stdio")
+        transport = transport.strip().lower()
+        if transport in {"http", "streamablehttp", "streamable-http"}:
+            transport = "streamable_http"
         servers[str(name)] = McpServerSpec(
             name=str(name),
             enabled=bool(entry.get("enabled", True)),
-            transport=str(entry.get("transport") or "stdio").strip().lower(),
+            transport=transport,
             command=str(entry.get("command") or "npx"),
             args=tuple(str(a) for a in args),
+            url=str(entry.get("url") or entry.get("serverUrl") or "").strip(),
             env_from=str(entry.get("envFrom") or entry.get("env_from") or "").strip(),
             env_map={str(k): str(v) for k, v in env_map.items()},
             frameworks=tuple(str(x) for x in frameworks),
@@ -241,7 +248,16 @@ def base_passthrough_env() -> dict[str, str]:
 
 
 def credentials_ready(spec: McpServerSpec, settings: Settings) -> bool:
-    """Heuristic: enough host + secret-like fields to launch usefully."""
+    """Heuristic: enough host + secret-like fields to launch usefully.
+
+    Remote HTTP docs servers with no ``envFrom`` are always ready (no auth).
+    """
+    if not (spec.env_from or "").strip() and not spec.env_map:
+        # Public / no-credential MCP (e.g. Microsoft Learn).
+        if spec.transport in {"streamable_http", "sse", "websocket"}:
+            return bool(spec.url)
+        if not spec.extra_env:
+            return True
     env = resolve_server_env(spec, settings)
     host_keys = [k for k in env if k.endswith("_HOST") or k == "PG_HOST"]
     secret_keys = [
@@ -291,7 +307,7 @@ def build_stdio_connection(
     if spec.transport != "stdio":
         raise ValueError(
             f"MCP server {spec.name!r}: transport {spec.transport!r} "
-            "is not supported yet (use stdio)"
+            "is not stdio (use build_http_connection)"
         )
     command = (command_override or spec.command or "npx").strip()
     if args_override is not None:
@@ -306,6 +322,35 @@ def build_stdio_connection(
         "args": args,
         "env": env,
     }
+
+
+def build_http_connection(
+    spec: McpServerSpec,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Build a ``MultiServerMCPClient`` streamable HTTP connection dict.
+
+    Args:
+        spec: Registry server with ``transport=streamable_http`` and ``url``.
+        settings: Unused today; reserved for future auth headers from inventory.
+
+    Returns:
+        Dict with ``transport`` and ``url``.
+
+    Raises:
+        ValueError: Wrong transport or missing URL.
+    """
+    del settings
+    if spec.transport not in {"streamable_http", "sse"}:
+        raise ValueError(
+            f"MCP server {spec.name!r}: transport {spec.transport!r} "
+            "is not an HTTP transport"
+        )
+    url = (spec.url or "").strip()
+    if not url:
+        raise ValueError(f"MCP server {spec.name!r}: url is required for HTTP transport")
+    transport = "streamable_http" if spec.transport == "streamable_http" else "sse"
+    return {"transport": transport, "url": url}
 
 
 def format_registry_markdown(
@@ -328,18 +373,24 @@ def format_registry_markdown(
 
     for name in sorted(registry.servers):
         spec = registry.servers[name]
-        ready = "yes" if credentials_ready(spec, settings) else "missing"
-        fws = ", ".join(f"`{x}`" for x in spec.frameworks) or "—"
+        if not (spec.env_from or "").strip() and not spec.env_map:
+            ready = "n/a" if credentials_ready(spec, settings) else "missing"
+        else:
+            ready = "yes" if credentials_ready(spec, settings) else "missing"
+        fws = ", ".join(f"`{x}`" for x in spec.frameworks) or "any"
         curated = "yes" if spec.curated_tools else "no"
         enabled = "yes" if spec.enabled else "no"
         desc = (spec.description or "—").replace("|", "/")
+        if spec.url:
+            desc = f"{desc} ({spec.url})"
         lines.append(
             f"| `{name}` | {enabled} | {ready} | {fws} | {curated} | {desc} |"
         )
     lines.append("")
     lines.append(
         "Credentials and IPs come from **inventory / secrets** "
-        "(`envFrom`), not from `registry.json`."
+        "(`envFrom`) when required — not from `registry.json`. "
+        "Public HTTP MCPs (e.g. Microsoft Learn) need no inventory secrets."
     )
     lines.append("")
     return "\n".join(lines)
