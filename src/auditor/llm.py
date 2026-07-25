@@ -46,7 +46,7 @@ def build_chat_model(settings: Settings | None = None) -> BaseChatModel:
         "model": settings.litellm_model,
         "api_key": settings.litellm_api_key,
         "base_url": base,
-        "temperature": 0,  # deterministic audit judgments
+        "temperature": 0.2,
         "streaming": True,
     }
     if not settings.litellm_ssl_verify:
