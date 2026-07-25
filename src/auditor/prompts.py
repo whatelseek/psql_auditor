@@ -36,6 +36,10 @@ Rules:
     or ssh_run when the host has OpenSSH
   - PostgreSQL / DB checks → mcp_query and related MCP tools
     (LangChain MCP adapters → antonorlov/mcp-postgres-server).
+  - Official Microsoft how-to / PowerShell / WinRM / Azure / .NET guidance →
+    microsoft_docs_search, microsoft_docs_fetch, microsoft_code_sample_search
+    (Microsoft Learn MCP). Call these when you are unsure which command or
+    flag to run; do not invent undocumented Microsoft procedures.
 - When a **long-term playbook memory** block is provided, run those preferred
   tool calls FIRST before inventing new ones.
 - Prefer 1–2 focused tool calls. Avoid huge dumps.
@@ -129,6 +133,9 @@ Operator request:
 {playbook_hint}
 
 Use tools now if needed, then summarize results in Markdown.
+If you need official Microsoft how-to steps (WinRM, PowerShell, Azure, .NET),
+call microsoft_docs_search / microsoft_docs_fetch / microsoft_code_sample_search
+before inventing commands.
 """
 
 ADHOC_FORCE_PROMPT = """Tool budget exhausted. Summarize results already gathered.

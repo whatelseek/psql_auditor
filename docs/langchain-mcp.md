@@ -18,10 +18,14 @@ and builds `MultiServerMCPClient` stdio connection dicts.
 | Host / user / password / DB | Inventory Access table or `secrets/` |
 | Framework checklist | `agents/*.md` |
 
-Only the **postgres** server is registered today. To add another MCP later,
-append an entry in the registry and wire inventory credentials — see
-[`mcps/README.md`](../mcps/README.md). The agent can call `mcp_list_servers`
-to see readiness; it must **not** write passwords into the registry.
+Registered today: **postgres** (stdio) and **microsoft-learn** (remote
+Streamable HTTP at `https://learn.microsoft.com/api/mcp`, no auth). Learn tools
+(`microsoft_docs_search`, `microsoft_docs_fetch`, `microsoft_code_sample_search`)
+are bound into assess so the model can look up official how-to steps. To add
+another MCP, append an entry in the registry, wire credentials if needed, and
+expose tools via `get_mcp_tools()` — see [`mcps/README.md`](../mcps/README.md).
+The agent can call `mcp_list_servers` to see readiness; it must **not** write
+passwords into the registry.
 
 Setting: `MCPS_DIR` (default `mcps`).
 
