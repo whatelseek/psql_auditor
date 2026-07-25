@@ -133,6 +133,9 @@ Operator request:
 {playbook_hint}
 
 Use tools now if needed, then summarize results in Markdown.
+If you need official Microsoft how-to steps (WinRM, PowerShell, Azure, .NET),
+call microsoft_docs_search / microsoft_docs_fetch / microsoft_code_sample_search
+before inventing commands.
 """
 
 ADHOC_FORCE_PROMPT = """Tool budget exhausted. Summarize results already gathered.
