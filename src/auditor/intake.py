@@ -525,6 +525,31 @@ def parse_audit_plan_markdown(
     return [_job_row(host_labels[k], fws) for k, fws in by_host.items()]
 
 
+def looks_like_plan_file_notice(text: str) -> bool:
+    """True when the operator says they placed/updated ``PLAN.md`` on disk.
+
+    Used at the scope step so a short reply like «положил» or
+    «put PLAN.md» reloads the inventory plan file instead of being treated
+    as an unparseable confirm/exclude answer.
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if any(name.lower() in t for name in _PLAN_FILE_NAMES):
+        return True
+    if re.fullmatch(r"полож\w*", t):
+        return True
+    if re.search(r"полож\w*.*\b(план|plan)\b", t) or re.search(
+        r"\b(план|plan)\b.*полож\w*", t
+    ):
+        return True
+    if re.search(
+        r"\b(put|placed|added|uploaded|dropped)\b.*\b(plan|план)\b", t
+    ) or re.search(r"\b(plan|план)\b.*\b(put|placed|added|uploaded|dropped)\b", t):
+        return True
+    return False
+
+
 def load_client_audit_plan(
     inventory_dir: Path | str,
     client_slug_name: str,
@@ -532,6 +557,9 @@ def load_client_audit_plan(
     agents_dir: Path | str | None = None,
 ) -> tuple[list[dict[str, Any]], Path | None]:
     """Load ``PLAN.md`` / ``AUDIT_PLAN.md`` / ``SCOPE.md`` from client inventory.
+
+    Looks in ``inventory/<Client>/`` first, then falls back to the inventory
+    root (so a top-level ``inventory/PLAN.md`` still works).
 
     Args:
         inventory_dir: Inventory root.
@@ -544,7 +572,8 @@ def load_client_audit_plan(
     """
     from auditor.host_facts import resolve_client_dir
 
-    client_dir = resolve_client_dir(Path(inventory_dir), client_slug_name)
+    root = Path(inventory_dir)
+    client_dir = resolve_client_dir(root, client_slug_name)
     known: set[str] | None = None
     if agents_dir is not None:
         from auditor.frameworks import list_frameworks
@@ -552,20 +581,27 @@ def load_client_audit_plan(
         known = {fw.id.lower() for fw in list_frameworks(agents_dir)}
         # Also accept common aliases from frontmatter via list — ids only is fine
 
-    for name in _PLAN_FILE_NAMES:
-        path = client_dir / name
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        jobs = parse_audit_plan_markdown(text, known_framework_ids=known)
-        if jobs:
-            return jobs, path
-        # File exists but empty/unparsed — still report path for operator hint
-        return [], path
-    return [], None
+    search_dirs = [client_dir]
+    if root.resolve() != client_dir.resolve():
+        search_dirs.append(root)
+
+    empty_path: Path | None = None
+    for directory in search_dirs:
+        for name in _PLAN_FILE_NAMES:
+            path = directory / name
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            jobs = parse_audit_plan_markdown(text, known_framework_ids=known)
+            if jobs:
+                return jobs, path
+            # File exists but empty/unparsed — keep looking; remember first hit
+            if empty_path is None:
+                empty_path = path
+    return [], empty_path
 
 
 def parse_client_name(text: str) -> str:
@@ -668,7 +704,8 @@ def prompts_for_language(code: str) -> IntakePrompts:
                 "Опишите своими словами "
                 "(например: «только IT», «кибербезопасность / CIS», «и то и другое»), "
                 "или вставьте Markdown-таблицу Host | Frameworks / положите "
-                "``PLAN.md`` в каталог клиента."
+                "``PLAN.md`` в ``inventory/<клиент>/`` (или ``inventory/``) "
+                "и напишите «положил»."
             ),
         )
     return IntakePrompts(
@@ -720,7 +757,7 @@ def prompts_for_language(code: str) -> IntakePrompts:
             "Describe it in your own words "
             "(e.g. \"IT only\", \"cybersecurity / CIS\", \"both\"), "
             "or paste a Markdown Host | Frameworks table / put ``PLAN.md`` "
-            "in the client inventory folder."
+            "under ``inventory/<client>/`` (or ``inventory/``) and say you placed it."
         ),
     )
 

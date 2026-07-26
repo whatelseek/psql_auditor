@@ -50,6 +50,7 @@ class ProgressEvent:
       arguments: Tool input payload (dict or wrapped scalar).
       result: Truncated tool output or error text.
       requirement_id: Associated checklist id (``REQ-NNN``) when applicable.
+      requirement_title: Human checklist title for ``requirement_id`` (UI labels).
       framework_id: Framework slug when running multi-framework audits.
       status: Sub-status for tool results (``ok`` / ``error``) or REQ status.
       extra: Optional extension fields for forward-compatible metadata.
@@ -62,9 +63,22 @@ class ProgressEvent:
     arguments: dict[str, Any] | str | None = None
     result: str = ""
     requirement_id: str = ""
+    requirement_title: str = ""
     framework_id: str = ""
     status: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+def format_requirement_label(
+    requirement_id: str = "",
+    requirement_title: str = "",
+) -> str:
+    """Build a short UI label ``REQ-NNN: Title`` (or whichever part is set)."""
+    rid = (requirement_id or "").strip()
+    title = (requirement_title or "").strip()
+    if rid and title:
+        return f"{rid}: {title}"
+    return rid or title
 
 
 class ProgressSink:
@@ -173,6 +187,7 @@ def emit_req_status(
     *,
     framework_id: str = "",
     text: str = "",
+    requirement_title: str = "",
 ) -> None:
     """Emit a per-requirement status change for the live checklist view.
 
@@ -180,15 +195,18 @@ def emit_req_status(
         req_id: Checklist requirement id (``REQ-NNN``).
         status: Assessment status (``pass``, ``fail``, etc.).
         framework_id: Optional framework slug.
-        text: Override display text; defaults to ``REQ-NNN → status``.
+        text: Override display text; defaults to ``REQ-NNN: Title → status``.
+        requirement_title: Human checklist title for UI labels.
     """
+    label = format_requirement_label(req_id, requirement_title)
     emit_progress(
         ProgressEvent(
             kind="req_status",
             requirement_id=req_id,
+            requirement_title=requirement_title,
             framework_id=framework_id,
             status=status,
-            text=text or f"`{req_id}` → {status}",
+            text=text or f"`{label}` → {status}",
         )
     )
 
@@ -199,6 +217,7 @@ def emit_tool_call(
     *,
     call_id: str = "",
     requirement_id: str = "",
+    requirement_title: str = "",
     framework_id: str = "",
 ) -> str:
     """Emit a tool invocation event and return its correlation id.
@@ -208,6 +227,7 @@ def emit_tool_call(
         args: Tool arguments; non-dicts are wrapped as ``{"value": args}``.
         call_id: Optional existing id; a random id is generated when empty.
         requirement_id: Optional ``REQ-NNN`` context.
+        requirement_title: Human checklist title for UI labels.
         framework_id: Optional framework slug.
 
     Returns:
@@ -221,6 +241,7 @@ def emit_tool_call(
             tool_call_id=tid,
             arguments=args if isinstance(args, dict) else {"value": args},
             requirement_id=requirement_id,
+            requirement_title=requirement_title,
             framework_id=framework_id,
         )
     )
@@ -233,6 +254,7 @@ def emit_tool_result(
     *,
     call_id: str,
     requirement_id: str = "",
+    requirement_title: str = "",
     framework_id: str = "",
     error: str | None = None,
 ) -> None:
@@ -245,6 +267,7 @@ def emit_tool_result(
         result: Raw tool stdout/return value.
         call_id: Id returned by :func:`emit_tool_call`.
         requirement_id: Optional ``REQ-NNN`` context.
+        requirement_title: Human checklist title for UI labels.
         framework_id: Optional framework slug.
         error: When set, displayed instead of ``result`` and status is ``error``.
     """
@@ -255,6 +278,7 @@ def emit_tool_result(
             tool_call_id=call_id,
             result=truncate_for_stream(error or result),
             requirement_id=requirement_id,
+            requirement_title=requirement_title,
             framework_id=framework_id,
             status="error" if error else "ok",
         )

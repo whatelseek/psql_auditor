@@ -23,6 +23,7 @@ from typing import Any
 from auditor.progress import (
     ProgressEvent,
     args_for_stream,
+    format_requirement_label,
 )
 
 
@@ -86,7 +87,10 @@ def chat_progress_chunks(
     if event.kind in ("reasoning", "phase", "req_status"):
         text = event.text or ""
         if event.kind == "req_status" and event.requirement_id:
-            text = text or f"`{event.requirement_id}` → {event.status}"
+            req_label = format_requirement_label(
+                event.requirement_id, event.requirement_title
+            )
+            text = text or f"`{req_label}` → {event.status}"
         if text:
             # Prefer reasoning_content when clients support it; also send content.
             out.append(
@@ -132,6 +136,9 @@ def chat_progress_chunks(
         # Assistant-visible note + synthetic tool role content via content delta
         preview = event.result or ""
         label = event.tool_name or "tool"
+        req_label = format_requirement_label(
+            event.requirement_id, event.requirement_title
+        )
         out.append(
             _chat_chunk(
                 model,
@@ -139,7 +146,7 @@ def chat_progress_chunks(
                 delta={
                     "content": (
                         f"\n**{label}**"
-                        + (f" (`{event.requirement_id}`)" if event.requirement_id else "")
+                        + (f" (`{req_label}`)" if req_label else "")
                         + f" →\n```\n{preview}\n```\n"
                     )
                 },
@@ -176,7 +183,10 @@ def responses_progress_events(
     if event.kind in ("reasoning", "phase", "req_status"):
         text = event.text or ""
         if event.kind == "req_status" and event.requirement_id:
-            text = text or f"`{event.requirement_id}` → {event.status}"
+            req_label = format_requirement_label(
+                event.requirement_id, event.requirement_title
+            )
+            text = text or f"`{req_label}` → {event.status}"
         if not text:
             return events
         # reasoning summary + visible text
@@ -242,6 +252,9 @@ def responses_progress_events(
     if event.kind == "tool_result":
         preview = event.result or ""
         label = event.tool_name or "tool"
+        req_label = format_requirement_label(
+            event.requirement_id, event.requirement_title
+        )
         events.append(
             {
                 "type": "response.output_text.delta",
@@ -250,7 +263,7 @@ def responses_progress_events(
                 "content_index": 0,
                 "delta": (
                     f"\n**{label}**"
-                    + (f" (`{event.requirement_id}`)" if event.requirement_id else "")
+                    + (f" (`{req_label}`)" if req_label else "")
                     + f" →\n```\n{preview}\n```\n"
                 ),
                 "sequence_number": seq_fn(),

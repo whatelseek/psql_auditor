@@ -18,7 +18,7 @@ from auditor.hitl import (
     is_continue_reply,
     resolve_pause_resume,
 )
-from auditor.progress import ProgressEvent
+from auditor.progress import ProgressEvent, format_requirement_label
 from auditor.session_store import (
     find_interrupted_run,
     load_all_multi_sessions,
@@ -43,6 +43,29 @@ def test_chat_progress_emits_tool_calls():
     tc = payload["choices"][0]["delta"]["tool_calls"][0]
     assert tc["function"]["name"] == "ssh_run"
     assert "id" in tc
+
+
+def test_format_requirement_label():
+    assert format_requirement_label("REQ-002", "OS release") == "REQ-002: OS release"
+    assert format_requirement_label("REQ-002", "") == "REQ-002"
+    assert format_requirement_label("", "Only title") == "Only title"
+
+
+def test_chat_progress_tool_result_includes_requirement_title():
+    ev = ProgressEvent(
+        kind="tool_result",
+        tool_name="ssh_read_file",
+        tool_call_id="call_1",
+        result="exit_code=0\nstdout:\nPRETTY_NAME=Ubuntu",
+        requirement_id="REQ-002",
+        requirement_title="OS release",
+    )
+    chunks = chat_progress_chunks(
+        ev, model="auditor", completion_id="cmpl_1", tool_index=0
+    )
+    joined = "".join(chunks)
+    assert "REQ-002: OS release" in joined
+    assert "ssh_read_file" in joined
 
 
 def test_chat_progress_emits_reasoning():

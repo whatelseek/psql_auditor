@@ -134,6 +134,7 @@ from auditor.intake import (
     intake_clarification_from_payload,
     intake_interrupt_payload,
     load_client_audit_plan,
+    looks_like_plan_file_notice,
     parse_audit_plan_markdown,
     parse_client_name,
     prompts_for_language,
@@ -1155,6 +1156,55 @@ class AuditorGraph:
                     )
                     continue
 
+                # «положил PLAN.md» / put plan → re-read inventory file & re-confirm.
+                if looks_like_plan_file_notice(reply) and slug:
+                    plan_jobs, plan_path = load_client_audit_plan(
+                        self.settings.inventory_dir,
+                        slug,
+                        agents_dir=self.settings.agents_dir,
+                    )
+                    cleaned_plan = normalize_scope_jobs(plan_jobs)
+                    if cleaned_plan:
+                        working_jobs = cleaned_plan
+                        intake["proposed_jobs"] = working_jobs
+                        intake["plan_source"] = "markdown"
+                        if plan_path is not None:
+                            intake["plan_file_path"] = str(plan_path)
+                        plan_md = format_proposed_jobs_markdown(working_jobs)
+                        rel = str(plan_path) if plan_path else "PLAN.md"
+                        if lang.code.startswith("ru"):
+                            confirm_block = (
+                                f"\n\n### План из `{rel}`\n\n"
+                                "Файл прочитан заново. Ответьте **подтвердить**, "
+                                "чтобы запустить **этот** план, или снова измените "
+                                "его / вставьте таблицу.\n"
+                            )
+                        else:
+                            confirm_block = (
+                                f"\n\n### Plan from `{rel}`\n\n"
+                                "Reloaded the plan file. Reply **confirm** to run "
+                                "**this** plan, or exclude / paste another table.\n"
+                            )
+                        scope_prompt = (
+                            f"{prompts.scope}{confirm_block}\n\n{plan_md}"
+                        )
+                        self._persist_intake_progress(
+                            state, intake, thread_id=thread_hint
+                        )
+                        continue
+                    hint = (
+                        "\n\n_No parseable `PLAN.md` found under "
+                        f"`inventory/{slug}/` or `inventory/`. Put the file there "
+                        "(Host | Frameworks table), then say you placed it again._"
+                        if lang.code == "en"
+                        else "\n\n_Не найден читаемый `PLAN.md` в "
+                        f"`inventory/{slug}/` или `inventory/`. Положите файл "
+                        "туда (таблица Host | Frameworks) и снова напишите "
+                        "«положил»._"
+                    )
+                    scope_prompt = f"{prompts.scope}{hint}\n\n{plan_md}"
+                    continue
+
                 payload = await self._intake_llm_json(
                     INTAKE_INTERPRET_SCOPE_SYSTEM,
                     INTAKE_INTERPRET_SCOPE_PROMPT.format(
@@ -1465,11 +1515,13 @@ class AuditorGraph:
 
         async def _worker(req_id: str) -> Finding:
             async with sem:
+                req_title = req_map[req_id].title
                 emit_req_status(
                     req_id,
                     "started",
                     framework_id="host_facts",
-                    text=f"Discovery `{req_id}`…",
+                    requirement_title=req_title,
+                    text=f"Discovery `{req_id}: {req_title}`…",
                 )
                 try:
                     finding = await self._fill_requirement_cells(
@@ -1499,6 +1551,7 @@ class AuditorGraph:
                     req_id,
                     finding.status,
                     framework_id="host_facts",
+                    requirement_title=req_map[req_id].title,
                 )
                 return finding
 
@@ -1836,8 +1889,13 @@ class AuditorGraph:
         async def _worker(req_id: str) -> Finding:
             """Assess one requirement under the concurrency semaphore."""
             async with sem:
+                req_title = requirements[req_id].title
                 emit_req_status(
-                    req_id, "started", framework_id=framework_id, text=f"Assessing `{req_id}`…"
+                    req_id,
+                    "started",
+                    framework_id=framework_id,
+                    requirement_title=req_title,
+                    text=f"Assessing `{req_id}: {req_title}`…",
                 )
                 try:
                     special = self._deterministic_it_audit_finding(
@@ -1875,6 +1933,7 @@ class AuditorGraph:
                             req_id,
                             special.status,
                             framework_id=framework_id,
+                            requirement_title=req_title,
                         )
                         return special
                     finding = await self._fill_requirement_cells(
@@ -1896,6 +1955,7 @@ class AuditorGraph:
                         req_id,
                         finding.status,
                         framework_id=framework_id,
+                        requirement_title=req_title,
                     )
                     return finding
                 except asyncio.CancelledError:
@@ -1948,7 +2008,11 @@ class AuditorGraph:
                         store=store,
                     )
                     emit_req_status(
-                        req_id, "error", framework_id=framework_id, text=str(exc)[:200]
+                        req_id,
+                        "error",
+                        framework_id=framework_id,
+                        requirement_title=req.title if req else "",
+                        text=str(exc)[:200],
                     )
                     return finding
 
@@ -2566,6 +2630,7 @@ class AuditorGraph:
                 tool_calls,
                 framework_id=framework_id,
                 req_id=req_id,
+                requirement_title=requirement.title,
                 store=store,
             )
             messages.extend(tool_messages)
@@ -2580,6 +2645,7 @@ class AuditorGraph:
         *,
         framework_id: str = "",
         req_id: str = "",
+        requirement_title: str = "",
         store: EvidenceStore | None = None,
     ) -> list[ToolMessage]:
         """Execute parallel tool calls from the evidence model response.
@@ -2591,6 +2657,7 @@ class AuditorGraph:
             tool_calls: LangChain tool call dicts from the model.
             framework_id: Framework id for logging and memory.
             req_id: Requirement id for logging and memory.
+            requirement_title: Human checklist title for live UI labels.
             store: Optional evidence store.
 
         Returns:
@@ -2606,6 +2673,7 @@ class AuditorGraph:
                 args,
                 call_id=str(call_id),
                 requirement_id=req_id,
+                requirement_title=requirement_title,
                 framework_id=framework_id,
             )
             error: str | None = None
@@ -2633,6 +2701,7 @@ class AuditorGraph:
                 full_result,
                 call_id=str(call_id),
                 requirement_id=req_id,
+                requirement_title=requirement_title,
                 framework_id=framework_id,
                 error=error,
             )

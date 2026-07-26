@@ -192,6 +192,28 @@ def test_load_client_audit_plan(tmp_path: Path):
     assert jobs[0]["frameworks"] == ["it_audit"]
 
 
+def test_load_client_audit_plan_falls_back_to_inventory_root(tmp_path: Path):
+    (tmp_path / "Acme").mkdir()
+    (tmp_path / "PLAN.md").write_text(
+        "| Host | Frameworks |\n|------|------------|\n| 10.2.2.2 | postgres_cis |\n",
+        encoding="utf-8",
+    )
+    jobs, path = load_client_audit_plan(tmp_path, "Acme")
+    assert path == tmp_path / "PLAN.md"
+    assert jobs[0]["ssh_host"] == "10.2.2.2"
+    assert jobs[0]["frameworks"] == ["postgres_cis"]
+
+
+def test_looks_like_plan_file_notice():
+    from auditor.intake import looks_like_plan_file_notice
+
+    assert looks_like_plan_file_notice("положил")
+    assert looks_like_plan_file_notice("положил PLAN.md")
+    assert looks_like_plan_file_notice("I put PLAN.md")
+    assert not looks_like_plan_file_notice("подтвердить")
+    assert not looks_like_plan_file_notice("exclude ubuntu")
+
+
 def test_domains_for_audit_type():
     assert domains_for_audit_type("it") == ["it"]
     assert domains_for_audit_type("cis") == ["cybersecurity"]
