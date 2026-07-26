@@ -38,7 +38,7 @@
 | Type check | Passed, 85 files |
 | Unit tests | 414 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Prior Clean CI | [Run 30208213773](https://github.com/whatelseek/psql_auditor/actions/runs/30208213773) |
+| Clean CI | [Run 30208965512](https://github.com/whatelseek/psql_auditor/actions/runs/30208965512), все jobs зелёные |
 
 ## Реестр задач
 
