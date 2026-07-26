@@ -211,7 +211,6 @@ async def test_model_responses_deterministic(scenario) -> None:
     assert len(fake_a.calls) == 1
 
     ru = scenario.build_fake_llm("valid_structured_ru")
-    assert "Включён" in (ru._default_response or "") or True
     prev = use_chat_model_factory(lambda _s: ru)
     try:
         msg = await build_chat_model().ainvoke([{"role": "user", "content": "оцени"}])
