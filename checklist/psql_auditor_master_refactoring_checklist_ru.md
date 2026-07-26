@@ -37,12 +37,12 @@ backlog. Статусы приёмки не меняются автоматич�
 
 | Проверка | Результат |
 | --- | --- |
-| Format / Lint | Ожидает локальной перепроверки |
-| Type check | Ожидает локальной перепроверки |
-| Unit tests | Ожидает локальной перепроверки |
-| Integration tests | Ожидает локальной перепроверки |
-| Full suite | Ожидает локальной перепроверки |
-| Defect map | Цель `validate-defect-map: OK` (77/77) |
+| Format / Lint | Passed |
+| Type check | Passed, 89 files |
+| Unit tests | 460 passed |
+| Integration tests | 8 passed |
+| Full suite | 468 passed |
+| Defect map | `validate-defect-map: OK` (77/77) |
 | Prior clean CI (база review PR #35) | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), все jobs зелёные |
 | Prior clean CI (async start + inventory identity) | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), все jobs зелёные |
 

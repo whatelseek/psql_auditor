@@ -33,13 +33,13 @@ green CI.
 
 | Check | Verified result |
 | --- | --- |
-| Format | Pending local re-verification |
-| Lint | Pending local re-verification |
-| Type check | Pending local re-verification |
-| Unit tests | Pending local re-verification |
-| Integration tests | Pending local re-verification |
-| Full suite | Pending local re-verification |
-| Defect map | Target `validate-defect-map: OK` (77/77) |
+| Format | Passed |
+| Lint | Passed |
+| Type check | Passed, 89 files |
+| Unit tests | 460 passed |
+| Integration tests | 8 passed |
+| Full suite | 468 passed |
+| Defect map | `validate-defect-map: OK` (77/77) |
 | Prior clean CI (PR #36 merge base) | See Actions after PR #36 merge |
 | Prior clean CI (PR #35 review base) | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), all jobs passed |
 
