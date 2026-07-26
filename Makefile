@@ -8,7 +8,7 @@ RUFF ?= $(PYTHON) -m ruff
 MYPY ?= $(PYTHON) -m mypy
 
 .PHONY: help install install-locked lock format format-check lint typecheck \
-	test-unit test-integration test check baseline-compare
+	test-unit test-integration test validate-defect-map check baseline-compare
 
 help:
 	@echo "Targets:"
@@ -21,7 +21,8 @@ help:
 	@echo "  test-unit        Unit tests (-m unit); fails if zero collected"
 	@echo "  test-integration Integration tests (-m integration); fails if zero collected"
 	@echo "  test             Full pytest suite; fails if zero collected"
-	@echo "  check            format-check + lint + typecheck + test-unit + test-integration + test"
+	@echo "  validate-defect-map  AUD-001 checklist↔defect-map completeness"
+	@echo "  check            format-check + lint + typecheck + validate-defect-map + tests"
 	@echo "  baseline-compare Optional: full suite vs docs/baseline-failures.txt"
 
 install:
@@ -63,8 +64,11 @@ test-integration:
 test:
 	$(PYTEST_GROUP) -- -q
 
+validate-defect-map:
+	$(PYTHON) scripts/validate_defect_map.py
+
 # Mandatory non-destructive gates (identical locally and in CI).
-check: format-check lint typecheck test-unit test-integration test
+check: format-check lint typecheck validate-defect-map test-unit test-integration test
 
 baseline-compare:
 	$(PYTHON) scripts/baseline_compare.py

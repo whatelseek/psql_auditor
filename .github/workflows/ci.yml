@@ -46,6 +46,20 @@ jobs:
       - name: typecheck
         run: make typecheck
 
+
+  validate-defect-map:
+    name: validate-defect-map
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (locked)
+        run: make install-locked
+      - name: validate-defect-map
+        run: make validate-defect-map
+
   unit:
     name: unit tests
     runs-on: ubuntu-latest

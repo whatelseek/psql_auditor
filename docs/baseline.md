@@ -4,6 +4,10 @@
 > identically locally and in CI. The measurement tables below preserve the
 > CORE-000 historical baseline; see [`docs/quality-gates.md`](quality-gates.md)
 > for the current canonical command interface.
+>
+> **AUD-001 update:** The complete checklist defect→module map lives in
+> [`docs/defect-module-map.md`](defect-module-map.md) and is validated by
+> `make validate-defect-map` (included in `make check` and CI).
 
 ## Revisions
 
@@ -174,18 +178,20 @@ Production does **not** run a separate migrate CLI today; opening the registry/w
 
 ## Defect → module map
 
-| Defect ID | Current module(s) | Implementation status | Notes |
-|-----------|-------------------|-----------------------|-------|
-| CORE-000 | `docs/baseline.md`, `Makefile`, `constraints.txt`, `.github/workflows/ci.yml` | implemented (this task) | Baseline process |
-| CORE-001 | `client_registry.py`, `legacy_compat.py`, `evidence_store.py`, `workflows/intake.py`, `workflows/runner.py`, `workflows/multi_runner.py`, `results_store.py`, `run_resolve.py` | implemented | client_id ≠ audit_run_id |
-| CORE-002 | `domain/audit_models.py`, `audit_registry.py`, `workflows/multi_runner.py`, `workflows/runner.py` | implemented | AuditRun vs AuditJob |
-| CORE-003 | `domain/result_identity.py`, `result_identity_bind.py`, `evidence_store.py`, `results_store.py` | implemented | canonical result identity |
-| BASE-ANON-001 | `anonymization.py` | present / failing test | email double-replace bug |
-| BASE-FW-001…004 | `frameworks.py`, `agents/*.md` | present / tests stale vs catalog | `it_audit` expectations vs `host_facts` |
-| BASE-HITL-001 | `workflows/finalize.py`, `hitl.py` | present / failing assert | summary omits “skipped” |
-| BASE-FMT-001 | whole tree | tooling red | ruff format not yet applied project-wide |
-| BASE-LINT-001 | whole tree | tooling red | 199 ruff issues |
-| BASE-MYPY-001 | `workflows/protocols.py` + façade modules | tooling red | Protocol incomplete vs runtime |
+The canonical map of **every** checklist defect/task ID (AUD-001…E2E-001) is:
+
+[`docs/defect-module-map.md`](defect-module-map.md)
+
+Validate completeness (reads the checklist under `checklist/` directly):
+
+```bash
+make validate-defect-map
+```
+
+Historical CORE-000 BASE-* rows below document baseline-era test/tooling failures;
+they are **not** the checklist register and are superseded for ownership tracking by
+the AUD-001 map.
+
 
 ## CI
 
@@ -205,4 +211,4 @@ Workflow: `.github/workflows/ci.yml`
 * Quality gates (format/lint/mypy) are intentionally red and visible, not silenced.  
 * `make check` is not green end-to-end until quality debt is paid.  
 * Warehouse migrations are apply-on-connect, not a standalone migrator.  
-* Master product checklist beyond CORE-000…003 / BASE-* was not found in-repo; extend the defect table when new IDs are introduced.
+* Checklist register is `checklist/psql_auditor_master_refactoring_checklist (5).md`; ownership is tracked in `docs/defect-module-map.md`.

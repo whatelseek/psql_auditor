@@ -14,7 +14,8 @@ A mandatory failure must produce a non-zero exit code locally and a red CI job.
 | `make test-unit` | no | `pytest -m unit` via `scripts/run_pytest_group.py` |
 | `make test-integration` | no | `pytest -m integration` via the same guard |
 | `make test` | no | Full suite via the same guard |
-| `make check` | no | `format-check` + `lint` + `typecheck` + unit + integration + full |
+| `make validate-defect-map` | no | AUD-001 checklist↔map completeness |
+| `make check` | no | `format-check` + `lint` + `typecheck` + `validate-defect-map` + unit + integration + full |
 
 Empty discovery is an error for unit, integration, and the full suite.
 `scripts/run_pytest_group.py` counts collected tests before running and exits
@@ -50,6 +51,7 @@ to LLM endpoints unless `AUDITOR_ALLOW_EXTERNAL_LLM=1`.
 | `unit` | `make test-unit` |
 | `integration` | `make test-integration` (+ Postgres service) |
 | `full-suite` | `make test` (+ Postgres service) |
+| `validate-defect-map` | `make validate-defect-map` |
 | `core-regression` | focused CORE-001/002/003 pytest files |
 
 `continue-on-error` is not used on mandatory gates.
