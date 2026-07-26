@@ -4,8 +4,8 @@ Canonical mapping of every checklist defect/task ID to production ownership.
 
 | Field | Value |
 |-------|-------|
-| Reviewed commit SHA | `a014373666e50e84c07a8c7aebde1641c1045f83` |
-| Checklist source | [`checklist/psql_auditor_master_refactoring_checklist (5).md`](../checklist/psql_auditor_master_refactoring_checklist%20(5).md) (version **1.8**, dated 2026-07-26) |
+| Reviewed commit SHA | *(set after CORE-005 implementation commit)* |
+| Checklist source | [`checklist/psql_auditor_master_refactoring_checklist (5).md`](../checklist/psql_auditor_master_refactoring_checklist%20(5).md) (version **1.9**, dated 2026-07-26) |
 | Validation | `make validate-defect-map` (`scripts/validate_defect_map.py`) |
 
 ## Status legend
@@ -32,7 +32,7 @@ Paths are repository-relative. Rows with status `MODULE NOT IMPLEMENTED` use `�
 | CORE-002 | `src/auditor/domain/audit_models.py`, `src/auditor/audit_registry.py`, `src/auditor/workflows/multi_runner.py` | `AuditRun`, `AuditJob`, `AuditRegistry` | RESOLVED | Separate run/job models with registry transitions; tests: `tests/test_audit_run_job.py`. |
 | CORE-003 | `src/auditor/domain/result_identity.py`, `src/auditor/result_identity_bind.py`, `src/auditor/state.py`, `src/auditor/evidence_store.py`, `src/auditor/results_store.py` | `validate_result_identity`, `merge_result_maps`, `merge_findings` | RESOLVED | Canonical `result_id` + logical key enforced on persist/merge; tests: `tests/test_canonical_result_identity.py`. |
 | CORE-004 | `src/auditor/domain/assessment_result.py`, `src/auditor/result_identity_bind.py`, `src/auditor/state.py`, `src/auditor/evidence_store.py`, `src/auditor/results_store.py`, `src/auditor/workflows/assessment.py`, `src/auditor/workflows/discovery.py` | `AssessmentResult`, `AssessmentError`, `from_execution_error`, `from_llm_payload`, `to_finding` | RESOLVED | Typed result with CORE-003 identity; `error` required iff `status=error`; `assess_parallel`/discovery exceptions use `from_execution_error` (empty observation); `Finding` report adapter only; legacy `from_finding` synthesizes `LegacyError`; tests: `tests/test_assessment_result.py`, `tests/test_parallel_assess.py` (AUD-003). EVID-004 still owns structured LLM binding. |
-| CORE-005 | `src/auditor/workflows/runner.py`, `src/auditor/config.py`, `src/auditor/graph.py` | `ensure_async_checkpointer`, `Settings.checkpoint_path` | IMPLEMENTED — DEFECT PRESENT | Durable Sqlite checkpointer is process-wide via `checkpoint_path`; not isolated per `audit_run_id`. |
+| CORE-005 | `src/auditor/run_scope.py`, `src/auditor/workflows/runner.py`, `src/auditor/workflows/multi_runner.py`, `src/auditor/workflows/intake.py`, `src/auditor/evidence_store.py`, `src/auditor/api/openai_compat.py` | `resolve_run_scope`, `checkpoint_thread_id`, `ensure_async_checkpointer`, `ownership.json`, `cleanup_run_scope` | RESOLVED | Checkpoints keyed `audit:<client_id>:<audit_run_id>[:ns]` with per-run Sqlite under `.checkpoints/<client_id>/<audit_run_id>.sqlite`; artifacts under `<slug>/<audit_run_id>/` with ownership manifest; resume validates registry+manifest+thread; tests: `tests/test_run_scope_isolation.py` (AUD-003). Legacy flat folders fail closed without ownership. |
 | CORE-006 | `src/auditor/graph.py`, `src/auditor/config.py`, `src/auditor/evidence_store.py`, `src/auditor/runtime_target.py` | `get_auditor_graph`, `get_settings`, `bind_runtime_credentials` | PARTIALLY IMPLEMENTED | ContextVar host/runtime binds exist; process singletons (`_graph`, settings cache, evidence maps) remain. |
 | INPUT-001 | — (capability absent) | — | MODULE NOT IMPLEMENTED | No strict `AuditRequest` pydantic/dataclass validator under `src/`. |
 | INPUT-002 | `src/auditor/frameworks.py`, `src/auditor/checklist.py` | `load_framework_checklist`, `parse_checklist_markdown`, `route_framework` | IMPLEMENTED — DEFECT PRESENT | Frameworks loaded from Markdown/YAML frontmatter without a hard schema reject path for invalid agents. |

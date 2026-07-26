@@ -43,6 +43,13 @@ from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
+from auditor.run_scope import (
+    OWNERSHIP_MANIFEST_NAME,
+    OwnershipManifestError,
+    ensure_ownership_manifest,
+    resolve_under_run_root,
+    safe_path_segment,
+)
 from auditor.tools.secrets import redact_secrets
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -122,8 +129,14 @@ def _safe_segment(value: str, fallback: str = "unknown") -> str:
     Returns:
         Alphanumeric/``._-`` only segment safe for filesystem paths.
     """
-    cleaned = _SAFE.sub("_", (value or "").strip()).strip("._-")
-    return cleaned or fallback
+    text = (value or "").strip().replace("\\", "/")
+    if not text or text in {".", ".."} or "/" in text:
+        return fallback
+    try:
+        return safe_path_segment(text, fallback=fallback)
+    except Exception:  # noqa: BLE001 — fall back for soft legacy callers
+        cleaned = _SAFE.sub("_", text).strip("._-")
+        return cleaned or fallback
 
 
 class EvidenceStore:
@@ -260,7 +273,15 @@ class EvidenceStore:
         return self.run_id
 
     @classmethod
-    def open_existing(cls, evidence_dir: Path | str, run_id: str) -> EvidenceStore:
+    def open_existing(
+        cls,
+        evidence_dir: Path | str,
+        run_id: str,
+        *,
+        client_id: str | None = None,
+        audit_run_id: str | None = None,
+        require_ownership: bool = False,
+    ) -> EvidenceStore:
         """Open an existing run folder (does not create a new run id).
 
         ``run_id`` may be a nested evidence key (``slug/arun_…``), a bare
@@ -268,32 +289,65 @@ class EvidenceStore:
         flat folder name. Client name/slug alone is rejected when it maps to
         more than one run.
 
+        When ``ownership.json`` is present it is validated. Passing
+        ``client_id`` + ``audit_run_id`` (or ``require_ownership=True``) fails
+        closed if the manifest is missing or mismatched (CORE-005).
+
         Args:
             evidence_dir: Root evidence directory.
             run_id: Existing evidence path, audit_run_id, or legacy folder.
+            client_id: Optional expected owner (validated against manifest).
+            audit_run_id: Optional expected audit run (validated against manifest).
+            require_ownership: When True, ownership.json must exist and match.
 
         Returns:
             Store instance with counters seeded from on-disk tool files.
 
         Raises:
             FileNotFoundError: When the evidence root cannot be resolved.
+            OwnershipManifestError: When ownership is missing/conflicting.
         """
         from auditor.client_registry import looks_like_audit_run_id
         from auditor.legacy_compat import (
             AmbiguousLegacyRunError,
             resolve_evidence_for_audit_run,
         )
+        from auditor.run_scope import assert_ownership, read_ownership_manifest
 
         base = Path(evidence_dir)
         rid = (run_id or "").strip().strip("/")
         if not rid:
             raise FileNotFoundError("Evidence run id is required")
         path = base / rid
+
+        def _finalize(store: EvidenceStore) -> EvidenceStore:
+            own_path = store.root / OWNERSHIP_MANIFEST_NAME
+            expect_cid = (client_id or "").strip()
+            expect_arid = (audit_run_id or "").strip()
+            if expect_cid and expect_arid:
+                if not own_path.is_file():
+                    raise OwnershipManifestError(
+                        f"missing ownership manifest for evidence run {store.run_id!r}"
+                    )
+                assert_ownership(
+                    store.root,
+                    client_id=expect_cid,
+                    audit_run_id=expect_arid,
+                    context="EvidenceStore.open_existing",
+                )
+                return store
+            if require_ownership:
+                read_ownership_manifest(store.root)
+                return store
+            if own_path.is_file():
+                # Present manifest must be well-formed even for soft opens.
+                read_ownership_manifest(store.root)
+            return store
+
         if path.is_dir():
             # Nested CORE-001 layout: slug/arun_… is a concrete evidence root.
             if "/" in rid or looks_like_audit_run_id(Path(rid).name):
-                store = cls(base, run_id=rid)
-                return store
+                return _finalize(cls(base, run_id=rid))
             # Bare client slug directory — only open if uniquely resolvable.
             nested_aruns = [
                 p
@@ -302,16 +356,19 @@ class EvidenceStore:
             ]
             if len(nested_aruns) == 1:
                 nested_id = f"{rid}/{nested_aruns[0].name}"
-                store = cls(base, run_id=nested_id)
-                return store
+                return _finalize(cls(base, run_id=nested_id))
             if len(nested_aruns) > 1:
                 raise AmbiguousLegacyRunError(
                     f"client folder {rid!r} has multiple audit runs; pass an explicit audit_run_id",
                     candidates=[f"{rid}/{p.name}" for p in nested_aruns],
                 )
             # Legacy flat client folder (meta / evidence at root).
-            store = cls(base, run_id=rid)
-            return store
+            if require_ownership or (client_id and audit_run_id):
+                raise OwnershipManifestError(
+                    f"refusing to adopt ambiguous legacy evidence folder {rid!r} "
+                    "without proven ownership.json (CORE-005)"
+                )
+            return _finalize(cls(base, run_id=rid))
         if looks_like_audit_run_id(rid):
             try:
                 hit = resolve_evidence_for_audit_run(base, rid)
@@ -319,8 +376,7 @@ class EvidenceStore:
                 raise
             except (KeyError, ValueError) as exc:
                 raise FileNotFoundError(str(exc)) from exc
-            store = cls(base, run_id=hit.evidence_run_id)
-            return store
+            return _finalize(cls(base, run_id=hit.evidence_run_id))
         raise FileNotFoundError(f"Evidence run not found: {path}")
 
     def seed_counters_from_disk(self) -> None:
@@ -500,6 +556,8 @@ class EvidenceStore:
         """Write/merge ``meta.json`` at the run root.
 
         Merges with existing keys, sets ``run_id`` and ``updated_at`` UTC.
+        When ``client_id`` and ``audit_run_id`` are present, also writes or
+        validates CORE-005 ``ownership.json`` (never silently rewrites ownership).
 
         Args:
             **meta: Arbitrary metadata fields (client, frameworks, language, …).
@@ -519,11 +577,34 @@ class EvidenceStore:
         existing.update(meta)
         existing["run_id"] = self.run_id
         existing["updated_at"] = datetime.now(timezone.utc).isoformat()
+        client_id = str(existing.get("client_id") or "").strip()
+        audit_run_id = str(existing.get("audit_run_id") or "").strip()
+        if client_id and audit_run_id:
+            ensure_ownership_manifest(
+                self.root,
+                client_id=client_id,
+                audit_run_id=audit_run_id,
+            )
         path.write_text(
             json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
         return path
+
+    def require_ownership(self, *, client_id: str, audit_run_id: str) -> None:
+        """Fail closed unless this run root's ownership.json matches."""
+        from auditor.run_scope import assert_ownership
+
+        assert_ownership(
+            self.root,
+            client_id=client_id,
+            audit_run_id=audit_run_id,
+            context="EvidenceStore.require_ownership",
+        )
+
+    def safe_artifact_path(self, *parts: str) -> Path:
+        """Resolve a path under this run root with traversal protection."""
+        return resolve_under_run_root(self.root, *parts)
 
     def requirement_dir(self, framework_id: str, req_id: str) -> Path:
         """Return (and create) the folder for one requirement.

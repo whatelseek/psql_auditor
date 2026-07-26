@@ -149,7 +149,6 @@ async def test_sqlite_checkpointer_survives_new_graph(tmp_path: Path):
         archive_enabled=False,
     )
     graph = AuditorGraph(settings=settings)
-    await graph.ensure_async_checkpointer()
 
     async def fake_fill(req_id, requirement, user_request, framework_id="", store=None, **kwargs):
         from auditor.state import Finding
@@ -175,9 +174,14 @@ async def test_sqlite_checkpointer_survives_new_graph(tmp_path: Path):
         paused = await graph.arun_one(
             "Audit PostgreSQL CIS",
             framework_id="postgres_cis",
-            thread_id="test-durable-pg",
         )
         assert paused.get("awaiting_hitl") is True
+
+    thread_id = str(paused.get("thread_id") or "")
+    client_id = str(paused.get("client_id") or "")
+    audit_run_id = str(paused.get("audit_run_id") or "")
+    assert thread_id.startswith("audit:")
+    assert client_id and audit_run_id
 
     # Flush / close so the second process sees durable rows.
     cm = getattr(graph, "_sqlite_cm", None)
@@ -186,12 +190,19 @@ async def test_sqlite_checkpointer_survives_new_graph(tmp_path: Path):
         graph._sqlite_cm = None
         graph._async_cp_ready = False
 
-    assert (tmp_path / "cp" / "auditor.sqlite").is_file()
+    from auditor.run_scope import resolve_run_scope
+
+    scope = resolve_run_scope(
+        settings.evidence_dir,
+        client_id=client_id,
+        audit_run_id=audit_run_id,
+    )
+    assert scope.checkpoint_db_path.is_file()
 
     graph2 = AuditorGraph(settings=settings)
-    await graph2.ensure_async_checkpointer()
+    await graph2.ensure_async_checkpointer(client_id=client_id, audit_run_id=audit_run_id)
     assert type(graph2._checkpointer).__name__ == "AsyncSqliteSaver"
-    snap = await graph2.graph.aget_state({"configurable": {"thread_id": "test-durable-pg"}})
+    snap = await graph2.graph.aget_state({"configurable": {"thread_id": thread_id}})
     assert snap.values.get("framework_id") == "postgres_cis"
     assert snap.tasks or snap.next
 
@@ -200,11 +211,21 @@ async def test_sqlite_checkpointer_survives_new_graph(tmp_path: Path):
         patch.object(graph2, "_fill_requirement_cells", side_effect=fake_fill),
         patch.object(graph2, "collect_host_facts", AsyncMock(return_value={})),
     ):
-        resumed = await graph2.aresume("test-durable-pg", "skip all")
+        resumed = await graph2.aresume(
+            thread_id,
+            "skip all",
+            client_id=client_id,
+            audit_run_id=audit_run_id,
+        )
         for _ in range(40):
             if not resumed.get("awaiting_hitl"):
                 break
-            resumed = await graph2.aresume("test-durable-pg", "skip all")
+            resumed = await graph2.aresume(
+                thread_id,
+                "skip all",
+                client_id=client_id,
+                audit_run_id=audit_run_id,
+            )
 
     assert resumed.get("awaiting_hitl") is False
     report = resumed.get("report") or ""

@@ -1,41 +1,41 @@
 # `psql_auditor` — Master Development and Acceptance Checklist
 
-Checklist version: **1.8**  
+Checklist version: **1.9**  
 Date: **2026-07-26**  
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
-Latest reviewed revision: [`a014373`](https://github.com/whatelseek/psql_auditor/commit/a014373666e50e84c07a8c7aebde1641c1045f83)  
+Latest reviewed revision: *(set after CORE-005 implementation commit)*  
 Total tasks: **71**
 
 ## Status summary
 
 | Status | Count |
 | --- | ---: |
-| Complete `[x]` | **7 / 71 (9.9%)** |
+| Complete `[x]` | **8 / 71 (11.3%)** |
 | Partially complete `[~]` | **5 / 71 (7.0%)** |
-| Open `[ ]` | **59 / 71 (83.1%)** |
-| Not fully complete | **64 / 71 (90.1%)** |
+| Open `[ ]` | **58 / 71 (81.7%)** |
+| Not fully complete | **63 / 71 (88.7%)** |
 
-Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`.
+Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`.
 
 Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Latest verification
 
-`CORE-004` enforces `status="error"` ↔ structured `AssessmentError` (no free-text
-exception embedding in `observation`). Local and CI gates share the same Make
-targets.
+`CORE-005` isolates LangGraph checkpoints and run artifacts by validated
+`client_id` + `audit_run_id` with ownership manifests. Local and CI gates share
+the same Make targets.
 
 | Check | Verified result |
 | --- | --- |
-| Format | 117 files already formatted |
+| Format | 119 files already formatted |
 | Lint | Passed |
-| Type check | Passed, 68 files |
-| Unit tests | 336 passed |
+| Type check | Passed, 69 files |
+| Unit tests | 350 passed |
 | PostgreSQL integration tests | 7 passed |
-| Full suite | 343 passed |
+| Full suite | 357 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | [Run 30198639284](https://github.com/whatelseek/psql_auditor/actions/runs/30198639284), all jobs passed |
+| Clean CI | *(pending push)* |
 
 Controlled negative runs:
 
@@ -49,11 +49,11 @@ Controlled negative runs:
 | Area | Baseline | Current | Change |
 | --- | ---: | ---: | ---: |
 | Architecture and separation of concerns | 4.0/10 | 7.0/10 | +3.0 |
-| Execution/result identity | 3.5/10 | 7.5/10 | +4.0 |
+| Execution/result identity | 3.5/10 | 8.0/10 | +4.5 |
 | Testability and regression coverage | 5.5/10 | 8.2/10 | +2.7 |
 | Maintainability | 3.5/10 | 7.0/10 | +3.5 |
-| Production readiness | 3.5/10 | 6.7/10 | +3.2 |
-| **Overall code rating** | **4.0/10** | **7.3/10** | **+3.3** |
+| Production readiness | 3.5/10 | 7.0/10 | +3.5 |
+| **Overall code rating** | **4.0/10** | **7.5/10** | **+3.5** |
 
 ## Task register
 
@@ -106,7 +106,7 @@ with `make validate-defect-map` enforced in CI.
 - [x] `CORE-002` — Separate `AuditRun` from `AuditJob`.
 - [x] `CORE-003` — Introduce canonical result identity.
 - [x] `CORE-004` — Introduce structured `AssessmentResult`.
-- [ ] `CORE-005` — Isolate checkpoints and artifacts by audit run.
+- [x] `CORE-005` — Isolate checkpoints and artifacts by audit run.
 - [~] `CORE-006` — Remove hidden global mutable state.
 
 ### M2 — Inputs and audit planning

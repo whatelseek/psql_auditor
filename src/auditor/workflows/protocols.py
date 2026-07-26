@@ -29,10 +29,13 @@ class AuditRuntime(Protocol):
     _orphan_tasks: dict[str, Any]
     _checkpointer: Any
     _checkpoint_conn: Any | None
+    _checkpoint_scope_key: str
     _async_cp_ready: bool
     _sqlite_cm: Any | None
     graph: Any
     intake_graph: Any
+
+    async def ensure_async_checkpointer(self, *args: Any, **kwargs: Any) -> None: ...
 
     def _build(self, *args: Any, **kwargs: Any) -> Any: ...
 

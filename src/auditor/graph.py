@@ -135,6 +135,7 @@ class AuditorGraph:
         self._multi_sessions = self._multi.sessions
         self._checkpointer = MemorySaver()
         self._checkpoint_conn = None
+        self._checkpoint_scope_key = ""
         self._async_cp_ready = False
         self._sqlite_cm = None
         self._orphan_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -303,6 +304,12 @@ class AuditorGraph:
         result.setdefault("evidence_run_id", store.run_id if store else "")
         result.setdefault("evidence_run_dir", str(store.root) if store else "")
         result["thread_id"] = thread_id
+        if store is not None:
+            meta = store.read_run_meta()
+            if meta.get("client_id"):
+                result.setdefault("client_id", str(meta.get("client_id") or ""))
+            if meta.get("audit_run_id"):
+                result.setdefault("audit_run_id", str(meta.get("audit_run_id") or ""))
 
         interrupts = result.get("__interrupt__") or []
         if not interrupts:

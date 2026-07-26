@@ -662,6 +662,16 @@ async def _run_or_resume_once(auditor, body: ChatCompletionRequest) -> dict[str,
         target = await resolve_continue_target(settings, user_text)
         if target:
             tid, run_id, _sess = target
+            from auditor.run_scope import parse_checkpoint_thread_id
+
+            parsed = parse_checkpoint_thread_id(tid)
+            if parsed is not None:
+                return await auditor.acontinue(
+                    tid,
+                    run_id=run_id,
+                    client_id=parsed[0],
+                    audit_run_id=parsed[1],
+                )
             return await auditor.acontinue(tid, run_id=run_id)
         if explicit_continue:
             slug = (client_hint or "client").strip().lower().replace(" ", "_")
@@ -711,9 +721,15 @@ async def _run_or_resume_once(auditor, body: ChatCompletionRequest) -> dict[str,
     paused = resolve_pause_resume(body.messages)
     if paused:
         kind, thread_id_pause = paused
+        from auditor.run_scope import parse_checkpoint_thread_id
+
+        parsed = parse_checkpoint_thread_id(thread_id_pause)
+        resume_kw: dict[str, str] = {}
+        if parsed is not None:
+            resume_kw = {"client_id": parsed[0], "audit_run_id": parsed[1]}
         if kind == "continue":
-            return await auditor.acontinue(thread_id_pause)
-        return await auditor.aresume(thread_id_pause, user_text)
+            return await auditor.acontinue(thread_id_pause, **resume_kw)
+        return await auditor.aresume(thread_id_pause, user_text, **resume_kw)
 
     return await auditor.arun(user_text, thread_id=thread_id)
 

@@ -33,6 +33,7 @@ from auditor.language import detect_report_language
 from auditor.legacy_compat import ClientOwnershipError, MissingAuditRunIdError, require_audit_run_id
 from auditor.report_archive import package_and_publish_archive
 from auditor.results_store import start_session_safe
+from auditor.run_scope import checkpoint_thread_id, evidence_run_id_for
 from auditor.secrets_file import InventorySshTarget, list_client_ssh_targets
 from auditor.session_store import drop_multi_session, load_all_multi_sessions, save_multi_session
 from auditor.workflows.protocols import AuditRuntime
@@ -373,8 +374,32 @@ def _bootstrap_audit_run(
         registry.mark_run_started(arun.audit_run_id)
         audit_run_id = arun.audit_run_id
     updated["audit_run_id"] = audit_run_id
+    # CORE-005: after identity is known, prefer the canonical checkpoint base.
+    # Callers may still pass a pre-identity base; jobs use the canonical key.
+    updated["base_thread"] = checkpoint_thread_id(client.client_id, audit_run_id)
+    # Nested evidence + ownership when a store exists for this run_id.
+    store = runtime._evidence_by_run.get(run_id)
+    if store is not None:
+        nested = evidence_run_id_for(client.slug, audit_run_id)
+        if store.run_id != nested:
+            old = store.run_id
+            store.rebind_run_id(nested)
+            runtime._evidence_by_run.pop(old, None)
+            runtime._evidence_by_run[store.run_id] = store
+            updated["evidence_run_id"] = store.run_id
+            run_row = registry.get_run(audit_run_id)
+            if run_row is not None:
+                run_row.evidence_run_id = store.run_id
+                run_row.base_thread_id = updated["base_thread"]
+                registry.save_run(run_row)
+        store.write_run_meta(
+            client_id=client.client_id,
+            client_slug=client.slug,
+            audit_run_id=audit_run_id,
+        )
 
     # Create pending jobs only once per logical task for this run.
+    job_base = str(updated.get("base_thread") or base_thread)
     assets = get_asset_registry(runtime.settings.evidence_dir)
     for job in pending:
         logical = _job_dict_key(job)
@@ -385,7 +410,7 @@ def _bootstrap_audit_run(
                 logical_task_id=logical,
                 job_type=AuditJobType.ASSESS_FRAMEWORK,
                 mandatory=True,
-                thread_id=_job_dict_thread_id(base_thread, job),
+                thread_id=_job_dict_thread_id(job_base, job),
                 framework_id=str(job.get("framework_id") or ""),
                 host_id=str(job.get("evidence_host_id") or ""),
             )
@@ -455,10 +480,12 @@ async def run_framework_jobs(
         intake_state=intake_state,
         pending=pending,
     )
+    canonical_base = str(intake_state.get("base_thread") or base_thread)
+    evid = str(intake_state.get("evidence_run_id") or run_id)
     return await runtime._schedule_framework_jobs(
         user_text=user_text,
-        base_thread=base_thread,
-        run_id=run_id,
+        base_thread=canonical_base,
+        run_id=evid,
         intake_state=intake_state,
         pending_jobs=pending,
         completed=[],

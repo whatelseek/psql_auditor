@@ -166,7 +166,6 @@ async def test_hitl_skip_then_finalize(tmp_path: Path):
     )
     graph = AuditorGraph(settings=settings)
     await graph.ensure_async_checkpointer()
-    thread_id = f"test-hitl-postgres-{tmp_path.name}"
 
     async def fake_fill(req_id, requirement, user_request, framework_id="", store=None, **_kw):
         return Finding(
@@ -189,15 +188,23 @@ async def test_hitl_skip_then_finalize(tmp_path: Path):
         paused = await graph.arun_one(
             "Audit PostgreSQL CIS",
             framework_id="postgres_cis",
-            thread_id=thread_id,
         )
 
         assert paused.get("awaiting_hitl") is True
         assert "Could not audit" in (paused.get("report") or "")
+        thread_id = str(paused.get("thread_id") or "")
+        client_id = str(paused.get("client_id") or "")
+        audit_run_id = str(paused.get("audit_run_id") or "")
+        assert thread_id.startswith("audit:")
         assert f"[AUDIT_HITL:{thread_id}]" in (paused.get("report") or "")
 
         # Skip all remaining failures in one HITL reply.
-        resumed = await graph.aresume(thread_id, "skip all")
+        resumed = await graph.aresume(
+            thread_id,
+            "skip all",
+            client_id=client_id,
+            audit_run_id=audit_run_id,
+        )
 
     assert resumed.get("awaiting_hitl") is False
     report = resumed.get("report") or ""

@@ -128,8 +128,10 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                     )
             intake["audit_run_id"] = audit_run_id
 
-            # Evidence root = <client_slug>/<audit_run_id> (never client name alone).
-            evidence_key = f"{client.slug}/{audit_run_id}"
+            # Evidence root = <client_slug>/<audit_run_id> (CORE-005 ownership via meta).
+            from auditor.run_scope import evidence_run_id_for, resolve_run_scope
+
+            evidence_key = evidence_run_id_for(client.slug, audit_run_id)
             store = runtime._store_from_state(state)
             if store is not None:
                 old_id = store.run_id
@@ -141,6 +143,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                     if sess.get("run_id") == old_id:
                         sess["run_id"] = store.run_id
                         sess["audit_run_id"] = audit_run_id
+                        sess["client_id"] = client.client_id
                 intake["artifacts_run_id"] = store.run_id
                 state["evidence_run_id"] = store.run_id
                 state["evidence_run_dir"] = str(store.root)
@@ -158,6 +161,17 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                 if run_row is not None:
                     run_row.evidence_run_id = store.run_id
                     registry.save_run(run_row)
+                # Bind durable checkpointer to this audit run (CORE-005).
+                run_scope = resolve_run_scope(
+                    runtime.settings.evidence_dir,
+                    client_id=client.client_id,
+                    audit_run_id=audit_run_id,
+                    client_slug=client.slug,
+                )
+                await runtime.ensure_async_checkpointer(
+                    client_id=run_scope.client_id,
+                    audit_run_id=run_scope.audit_run_id,
+                )
 
             applied = read_client_credentials(
                 runtime.settings.inventory_dir,

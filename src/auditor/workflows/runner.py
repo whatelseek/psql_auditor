@@ -13,16 +13,25 @@ from langgraph.types import Command
 
 from auditor.asset_registry import get_asset_registry
 from auditor.audit_registry import get_audit_registry
-from auditor.client_registry import get_client_registry, looks_like_audit_run_id
+from auditor.client_registry import get_client_registry
 from auditor.context import truncate_text
 from auditor.evidence_store import EvidenceStore, bind_host_segment, new_run_id
 from auditor.frameworks import get_framework
 from auditor.hitl import format_continue_assistant_message
 from auditor.intake import client_slug
 from auditor.language import detect_report_language
-from auditor.legacy_compat import assert_client_owns_run, require_audit_run_id
+from auditor.legacy_compat import assert_client_owns_run, require_audit_run_id, require_client_id
 from auditor.progress import emit_phase
 from auditor.result_identity_bind import attach_result_identity
+from auditor.run_scope import (
+    RunScopeIsolationError,
+    assert_thread_belongs_to_run,
+    checkpoint_thread_id,
+    open_run_scope,
+    parse_checkpoint_thread_id,
+    resolve_run_scope,
+    verify_registry_ownership,
+)
 from auditor.runtime_target import bind_runtime_credentials
 from auditor.secrets_file import InventorySshTarget, bind_host_target, read_client_credentials
 from auditor.session_store import find_run_for_thread, write_run_status
@@ -46,9 +55,13 @@ async def arun_one(
     evidence_host_id: str | None = None,
     ssh_target: InventorySshTarget | None = None,
 ) -> dict[str, Any]:
-    """Run a single-framework audit graph (optionally pinned)."""
+    """Run a single-framework audit graph (optionally pinned).
+
+    Checkpoint thread id and artifact root are derived from validated
+    ``client_id`` + ``audit_run_id`` (CORE-005). Caller-supplied ``thread_id``
+    cannot select another run's checkpoint scope.
+    """
     rid = run_id or new_run_id()
-    tid = thread_id or f"audit-{uuid.uuid4().hex[:12]}"
     store = runtime._evidence_by_run.get(rid)
     if store is None:
         store = EvidenceStore(runtime.settings.evidence_dir, run_id=rid)
@@ -61,7 +74,6 @@ async def arun_one(
             runtime.settings.max_user_request_chars,
             "user_request",
         ),
-        "thread_id": tid,
     }
     if framework_id:
         meta["framework_id"] = framework_id
@@ -91,6 +103,8 @@ async def arun_one(
     client_id = client.client_id
     registry = get_audit_registry(runtime.settings.evidence_dir)
     audit_run_id = str((intake_state or {}).get("audit_run_id") or "").strip()
+    # Temporary thread until audit_run_id is known; replaced by canonical key.
+    tid = f"audit-pending-{uuid.uuid4().hex[:12]}"
     if audit_run_id:
         require_audit_run_id(audit_run_id, context="arun_one")
         existing = registry.get_run(audit_run_id)
@@ -124,18 +138,47 @@ async def arun_one(
         )
         registry.mark_run_started(arun.audit_run_id)
         audit_run_id = arun.audit_run_id
-    # Nested evidence path when client is known (isolates concurrent runs).
-    if client.slug and looks_like_audit_run_id(audit_run_id):
-        nested = f"{client.slug}/{audit_run_id}"
-        if store.run_id != nested:
-            old_id = store.run_id
-            store.rebind_run_id(nested)
-            runtime._evidence_by_run.pop(old_id, None)
-            runtime._evidence_by_run[store.run_id] = store
-            run_row = registry.get_run(audit_run_id)
-            if run_row is not None:
-                run_row.evidence_run_id = store.run_id
-                registry.save_run(run_row)
+    # Canonical CORE-005 scope: thread + nested evidence + ownership manifest.
+    scope = resolve_run_scope(
+        runtime.settings.evidence_dir,
+        client_id=client_id,
+        audit_run_id=audit_run_id,
+        client_slug=client.slug,
+    )
+    ns: list[str] = []
+    if evidence_host_id:
+        ns.append(evidence_host_id)
+    if framework_id:
+        ns.append(framework_id.split("/", 1)[-1])
+    tid = checkpoint_thread_id(client_id, audit_run_id, *ns)
+    if thread_id and thread_id.strip() and thread_id.strip() != tid:
+        # Caller-supplied foreign threads cannot select another run's scope.
+        try:
+            assert_thread_belongs_to_run(
+                thread_id,
+                client_id=client_id,
+                audit_run_id=audit_run_id,
+                context="arun_one",
+            )
+            tid = thread_id.strip()
+        except RunScopeIsolationError:
+            tid = checkpoint_thread_id(client_id, audit_run_id, *ns)
+    meta["thread_id"] = tid
+    if store.run_id != scope.evidence_run_id:
+        old_id = store.run_id
+        store.rebind_run_id(scope.evidence_run_id)
+        runtime._evidence_by_run.pop(old_id, None)
+        runtime._evidence_by_run[store.run_id] = store
+    run_row = registry.get_run(audit_run_id)
+    if run_row is not None:
+        run_row.evidence_run_id = store.run_id
+        run_row.base_thread_id = scope.checkpoint_thread_id
+        registry.save_run(run_row)
+    await ensure_async_checkpointer(
+        runtime,
+        client_id=client_id,
+        audit_run_id=audit_run_id,
+    )
     asset_id = str((intake_state or {}).get("asset_id") or "")
     if not asset_id and ssh_target is not None:
         inv_key = ssh_target.inventory_key or ssh_target.label
@@ -228,16 +271,46 @@ async def arun_one(
             return await _invoke()
 
 
-async def aresume(runtime: AuditRuntime, thread_id: str, user_text: str) -> dict[str, Any]:
-    """Resume a graph paused on intake or ``human_gate``."""
-    config = {"configurable": {"thread_id": thread_id}}
-    is_intake = ":intake" in thread_id or thread_id.endswith("intake")
+async def aresume(
+    runtime: AuditRuntime,
+    thread_id: str,
+    user_text: str,
+    *,
+    client_id: str | None = None,
+    audit_run_id: str | None = None,
+) -> dict[str, Any]:
+    """Resume a graph paused on intake or ``human_gate``.
+
+    CORE-005: resume is bound to exact ``client_id`` + ``audit_run_id``. A
+    foreign ``thread_id`` cannot open another run's checkpoint.
+    """
+    cid, arid, tid = await _resolve_resume_identity(
+        runtime,
+        thread_id=thread_id,
+        client_id=client_id,
+        audit_run_id=audit_run_id,
+        context="aresume",
+    )
+    await ensure_async_checkpointer(runtime, client_id=cid, audit_run_id=arid)
+    config = {"configurable": {"thread_id": tid}}
+    is_intake = ":intake" in tid or tid.endswith("intake")
     graph = runtime.intake_graph if is_intake else runtime.graph
     try:
         pre = await graph.aget_state(config)
         pre_values = pre.values or {}
     except Exception:  # noqa: BLE001
         pre_values = {}
+    # Checkpoint state must not claim a different audit-run identity.
+    state_cid = str(pre_values.get("client_id") or "").strip()
+    state_arid = str(pre_values.get("audit_run_id") or "").strip()
+    if state_cid and state_cid != cid:
+        raise RunScopeIsolationError(
+            f"checkpoint client_id={state_cid!r} does not match resume client_id={cid!r}"
+        )
+    if state_arid and state_arid != arid:
+        raise RunScopeIsolationError(
+            f"checkpoint audit_run_id={state_arid!r} does not match resume audit_run_id={arid!r}"
+        )
     slug = runtime._client_slug_from_values(pre_values)
     with runtime._target_scope(
         client_slug=slug,
@@ -248,23 +321,36 @@ async def aresume(runtime: AuditRuntime, thread_id: str, user_text: str) -> dict
     values = snap.values or {}
     run_id = values.get("evidence_run_id") or ""
     store = runtime._evidence_by_run.get(run_id)
-    if store is None and values.get("evidence_run_dir"):
-        store = EvidenceStore(
-            runtime.settings.evidence_dir,
-            run_id=run_id or Path(str(values["evidence_run_dir"])).name,
-        )
-        runtime._evidence_by_run[store.run_id] = store
-    decorated = runtime._decorate_result(result, thread_id=thread_id, store=store, intake=is_intake)
+    if store is None and run_id:
+        try:
+            store = EvidenceStore.open_existing(
+                runtime.settings.evidence_dir,
+                str(run_id),
+                client_id=cid,
+                audit_run_id=arid,
+            )
+            runtime._evidence_by_run[store.run_id] = store
+        except Exception:  # noqa: BLE001
+            store = None
+    if store is not None:
+        store.require_ownership(client_id=cid, audit_run_id=arid)
+    decorated = runtime._decorate_result(result, thread_id=tid, store=store, intake=is_intake)
     if decorated.get("awaiting_hitl"):
         return decorated
 
     if is_intake and values.get("intake_complete"):
         # Continue into framework audits using intake answers.
-        session = runtime._forget_multi_session(thread_id) or {}
+        session = runtime._forget_multi_session(tid) or {}
         user_req = session.get("user_text") or values.get("user_request") or user_text
-        base_thread = session.get("base_thread") or thread_id.replace(":intake", "")
+        base_thread = session.get("base_thread") or checkpoint_thread_id(cid, arid)
         run_id = values.get("evidence_run_id") or session.get("run_id") or run_id
         intake = values.get("intake") or {}
+        if isinstance(intake, dict):
+            intake = {
+                **intake,
+                "client_id": cid,
+                "audit_run_id": arid,
+            }
         return await runtime._start_frameworks_after_intake(
             user_text=str(user_req),
             base_thread=base_thread,
@@ -273,81 +359,259 @@ async def aresume(runtime: AuditRuntime, thread_id: str, user_text: str) -> dict
         )
 
     # If this thread was part of a multi-framework run, continue the queue.
-    return await runtime._continue_multi_after_resume(thread_id, decorated)
+    return await runtime._continue_multi_after_resume(tid, decorated)
+
+
+async def _resolve_resume_identity(
+    runtime: AuditRuntime,
+    *,
+    thread_id: str,
+    client_id: str | None,
+    audit_run_id: str | None,
+    context: str,
+) -> tuple[str, str, str]:
+    """Validate resume identity and return ``(client_id, audit_run_id, thread_id)``."""
+    tid = (thread_id or "").strip()
+    if not tid:
+        raise RunScopeIsolationError(f"{context}: thread_id is required")
+    cid = (client_id or "").strip()
+    arid = (audit_run_id or "").strip()
+    registry = get_audit_registry(runtime.settings.evidence_dir)
+    parsed = parse_checkpoint_thread_id(tid)
+    if parsed is not None:
+        parsed_cid, parsed_arid = parsed
+        if not cid:
+            cid = parsed_cid
+        if not arid:
+            arid = parsed_arid
+        if cid != parsed_cid or arid != parsed_arid:
+            raise RunScopeIsolationError(
+                f"{context}: thread_id identity ({parsed_cid!r}, {parsed_arid!r}) "
+                f"conflicts with requested ({cid!r}, {arid!r})"
+            )
+
+    if arid:
+        arid = require_audit_run_id(arid, context=context)
+        arun = registry.get_run(arid)
+        if arun is None:
+            raise RunScopeIsolationError(f"{context}: unknown audit_run_id {arid!r}")
+        if cid:
+            cid = require_client_id(cid, context=context)
+            verify_registry_ownership(
+                audit_run_id=arid,
+                run_client_id=arun.client_id,
+                requested_client_id=cid,
+                context=context,
+            )
+        else:
+            cid = require_client_id(arun.client_id, context=context)
+    elif cid:
+        raise RunScopeIsolationError(
+            f"{context}: audit_run_id is required with client_id (no latest-run fallback)"
+        )
+    else:
+        # Soft path for in-process tests: load checkpoint once from current saver
+        # and require it already carries both identity fields.
+        await ensure_async_checkpointer(runtime)
+        is_intake = ":intake" in tid or tid.endswith("intake")
+        graph = runtime.intake_graph if is_intake else runtime.graph
+        try:
+            pre = await graph.aget_state({"configurable": {"thread_id": tid}})
+            values = pre.values or {}
+        except Exception as exc:  # noqa: BLE001
+            raise RunScopeIsolationError(
+                f"{context}: cannot load checkpoint for thread_id={tid!r}"
+            ) from exc
+        cid = str(values.get("client_id") or "").strip()
+        arid = str(values.get("audit_run_id") or "").strip()
+        if not cid or not arid:
+            raise RunScopeIsolationError(
+                f"{context}: required client_id and audit_run_id for resume "
+                f"(thread_id={tid!r}); refusing unbound checkpoint access"
+            )
+        cid = require_client_id(cid, context=context)
+        arid = require_audit_run_id(arid, context=context)
+        arun = registry.get_run(arid)
+        if arun is None:
+            raise RunScopeIsolationError(f"{context}: unknown audit_run_id {arid!r}")
+        verify_registry_ownership(
+            audit_run_id=arid,
+            run_client_id=arun.client_id,
+            requested_client_id=cid,
+            context=context,
+        )
+
+    arun = registry.get_run(arid)
+    registered_base = ""
+    if arun is not None:
+        registered_base = str(arun.base_thread_id or "").strip()
+    assert_thread_belongs_to_run(
+        tid,
+        client_id=cid,
+        audit_run_id=arid,
+        context=context,
+        registered_base_thread_id=registered_base,
+    )
+    # Artifact ownership must match before any resume mutation.
+    evid = ""
+    if arun is not None and arun.evidence_run_id:
+        evid = arun.evidence_run_id
+    try:
+        if evid:
+            EvidenceStore.open_existing(
+                runtime.settings.evidence_dir,
+                evid,
+                client_id=cid,
+                audit_run_id=arid,
+            )
+        else:
+            # Prefer slug from registry scope when present.
+            slug = ""
+            if arun is not None and isinstance(arun.scope, dict):
+                slug = str(arun.scope.get("client_slug") or "")
+            scope = resolve_run_scope(
+                runtime.settings.evidence_dir,
+                client_id=cid,
+                audit_run_id=arid,
+                client_slug=slug or None,
+            )
+            if scope.artifact_root.is_dir():
+                open_run_scope(
+                    runtime.settings.evidence_dir,
+                    client_id=cid,
+                    audit_run_id=arid,
+                    client_slug=scope.client_slug,
+                    create=False,
+                )
+    except FileNotFoundError:
+        # Brand-new pause before evidence rebind — checkpoint identity still binds.
+        pass
+    return cid, arid, tid
 
 
 async def acontinue(
-    runtime: AuditRuntime, thread_id: str, *, run_id: str | None = None
+    runtime: AuditRuntime,
+    thread_id: str,
+    *,
+    run_id: str | None = None,
+    client_id: str | None = None,
+    audit_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Resume an interrupted mid-assess (or HITL) run after disconnect/restart.
 
-    Active run identity must be explicit (``run_id`` / ``audit_run_id`` in meta)
-    or bound to ``thread_id``. Never selects "latest interrupted" as fallback.
+    CORE-005: active run identity must be explicit ``client_id`` +
+    ``audit_run_id`` (or resolvable from ``run_id`` / registry). Never selects
+    "latest interrupted" as fallback. Foreign ``thread_id`` values are rejected.
     """
     emit_phase(f"Continuing audit from checkpoint (`{thread_id}`)…")
-    config = {"configurable": {"thread_id": thread_id}}
-    is_intake = ":intake" in thread_id or thread_id.endswith("intake")
-    graph = runtime.intake_graph if is_intake else runtime.graph
-
     rid = (run_id or "").strip()
-    audit_run_id = ""
+    arid = (audit_run_id or "").strip()
+    cid = (client_id or "").strip()
+    registry = get_audit_registry(runtime.settings.evidence_dir)
+
     if rid.startswith("arun_"):
-        # Caller passed business AuditRun id instead of evidence folder id.
-        audit_run_id = rid
-        registry = get_audit_registry(runtime.settings.evidence_dir)
-        arun = registry.get_run(audit_run_id)
+        arid = rid
+        rid = ""
+    if arid:
+        arid = require_audit_run_id(arid, context="acontinue")
+        arun = registry.get_run(arid)
         if arun is None:
             return {
-                "report": f"Unknown audit_run_id `{audit_run_id}`.",
+                "report": f"Unknown audit_run_id `{arid}`.",
                 "awaiting_hitl": False,
                 "messages": [],
             }
-        rid = arun.evidence_run_id
+        if cid:
+            verify_registry_ownership(
+                audit_run_id=arid,
+                run_client_id=arun.client_id,
+                requested_client_id=cid,
+                context="acontinue",
+            )
+        else:
+            cid = require_client_id(arun.client_id, context="acontinue")
+        rid = arun.evidence_run_id or rid
         if arun.status.value == "cancelled":
-            registry.resume_run(audit_run_id)
-    if not rid:
+            registry.resume_run(arid)
+
+    if not arid:
         # Prefer in-memory multi-session bound to this thread.
         sess = (
             runtime._multi_sessions.get(thread_id) if hasattr(runtime, "_multi_sessions") else None
         )
-        if isinstance(sess, dict) and sess.get("run_id"):
-            rid = str(sess.get("run_id") or "")
-            audit_run_id = str(sess.get("audit_run_id") or audit_run_id)
+        if isinstance(sess, dict) and sess.get("audit_run_id"):
+            arid = str(sess.get("audit_run_id") or "")
+            cid = cid or str(sess.get("client_id") or "")
+            rid = rid or str(sess.get("run_id") or "")
+        elif isinstance(sess, dict) and sess.get("run_id"):
+            rid = rid or str(sess.get("run_id") or "")
         else:
             found = find_run_for_thread(runtime.settings.evidence_dir, thread_id)
             if found:
                 rid, meta = found
-                audit_run_id = str(meta.get("audit_run_id") or audit_run_id)
+                arid = arid or str(meta.get("audit_run_id") or "")
+                cid = cid or str(meta.get("client_id") or "")
 
+    if not arid or not cid:
+        # Fail closed — do not continue without both identity fields.
+        return {
+            "report": (
+                "Continue requires explicit client_id and audit_run_id "
+                "(CORE-005: no latest-run / unbound-thread fallback)."
+            ),
+            "awaiting_hitl": False,
+            "messages": [],
+        }
+
+    try:
+        cid, arid, tid = await _resolve_resume_identity(
+            runtime,
+            thread_id=thread_id,
+            client_id=cid,
+            audit_run_id=arid,
+            context="acontinue",
+        )
+    except RunScopeIsolationError as exc:
+        return {
+            "report": f"Isolation error: {exc}",
+            "awaiting_hitl": False,
+            "messages": [],
+        }
+
+    await ensure_async_checkpointer(runtime, client_id=cid, audit_run_id=arid)
+    config = {"configurable": {"thread_id": tid}}
+    is_intake = ":intake" in tid or tid.endswith("intake")
+    graph = runtime.intake_graph if is_intake else runtime.graph
+
+    store = None
     if rid:
         runtime._reload_multi_sessions(rid)
         store = runtime._evidence_by_run.get(rid)
         if store is None:
             try:
-                store = EvidenceStore.open_existing(runtime.settings.evidence_dir, rid)
+                store = EvidenceStore.open_existing(
+                    runtime.settings.evidence_dir,
+                    rid,
+                    client_id=cid,
+                    audit_run_id=arid,
+                )
                 runtime._evidence_by_run[rid] = store
             except Exception:  # noqa: BLE001
                 store = None
-        if store is not None and not audit_run_id:
-            audit_run_id = str(store.read_run_meta().get("audit_run_id") or "")
-        if audit_run_id:
-            registry = get_audit_registry(runtime.settings.evidence_dir)
-            arun = registry.get_run(audit_run_id)
-            if arun is not None:
-                meta_client = ""
-                if store is not None:
-                    meta_client = str(store.read_run_meta().get("client_id") or "").strip()
-                if meta_client:
-                    assert_client_owns_run(
-                        audit_run_id=audit_run_id,
-                        run_client_id=arun.client_id,
-                        requested_client_id=meta_client,
-                        context="acontinue",
-                    )
-                if arun.status.value == "cancelled":
-                    registry.resume_run(audit_run_id)
-    else:
-        store = None
+    if store is None:
+        arun = registry.get_run(arid)
+        if arun is not None and arun.evidence_run_id:
+            try:
+                store = EvidenceStore.open_existing(
+                    runtime.settings.evidence_dir,
+                    arun.evidence_run_id,
+                    client_id=cid,
+                    audit_run_id=arid,
+                )
+                runtime._evidence_by_run[store.run_id] = store
+                rid = store.run_id
+            except Exception:  # noqa: BLE001
+                store = None
 
     # Prefer LangGraph checkpoint if the graph still has work / interrupt.
     try:
@@ -364,7 +628,12 @@ async def acontinue(
         for task in snap.tasks or []:
             interrupts.extend(list(getattr(task, "interrupts", None) or []))
         if interrupts:
-            return await runtime.aresume(thread_id, "continue")
+            return await runtime.aresume(
+                tid,
+                "continue",
+                client_id=cid,
+                audit_run_id=arid,
+            )
         slug = runtime._client_slug_from_values(snap.values or {})
         with runtime._target_scope(
             client_slug=slug,
@@ -377,18 +646,21 @@ async def acontinue(
         run_id2 = values.get("evidence_run_id") or rid
         if store is None and run_id2:
             try:
-                store = EvidenceStore.open_existing(runtime.settings.evidence_dir, str(run_id2))
+                store = EvidenceStore.open_existing(
+                    runtime.settings.evidence_dir,
+                    str(run_id2),
+                    client_id=cid,
+                    audit_run_id=arid,
+                )
                 runtime._evidence_by_run[store.run_id] = store
             except Exception:  # noqa: BLE001
                 pass
-        decorated = runtime._decorate_result(
-            result, thread_id=thread_id, store=store, intake=is_intake
-        )
+        decorated = runtime._decorate_result(result, thread_id=tid, store=store, intake=is_intake)
         if decorated.get("awaiting_hitl"):
             return decorated
         if rid:
             write_run_status(runtime.settings.evidence_dir, str(run_id2 or rid), status="running")
-        return await runtime._continue_multi_after_resume(thread_id, decorated)
+        return await runtime._continue_multi_after_resume(tid, decorated)
 
     # Evidence fallback: rebuild pending_ids from disk and re-enter assess.
     if not rid:
@@ -405,13 +677,17 @@ async def acontinue(
 
     assert store is not None or rid
     if store is None:
-        store = EvidenceStore.open_existing(runtime.settings.evidence_dir, rid)
+        store = EvidenceStore.open_existing(
+            runtime.settings.evidence_dir,
+            rid,
+            client_id=cid,
+            audit_run_id=arid,
+        )
         runtime._evidence_by_run[rid] = store
+    store.require_ownership(client_id=cid, audit_run_id=arid)
 
     meta = store.read_run_meta()
-    framework_id = str(
-        meta.get("framework_id") or (thread_id.split(":")[-1] if ":" in thread_id else "")
-    )
+    framework_id = str(meta.get("framework_id") or (tid.split(":")[-1] if ":" in tid else ""))
     host_id = str(meta.get("evidence_host_id") or "")
     if host_id:
         store.host_segment = host_id
@@ -470,7 +746,7 @@ async def acontinue(
         runtime.settings.evidence_dir,
         rid,
         status="running",
-        thread_id=thread_id,
+        thread_id=tid,
         pending_ids=pending,
         framework_id=framework_id,
     )
@@ -499,7 +775,7 @@ async def acontinue(
                 "evidence_run_id": rid,
                 "evidence_run_dir": str(store.root),
                 "evidence_host_id": host_id,
-                "thread_id": thread_id,
+                "thread_id": tid,
                 "user_request": str(meta.get("user_request") or "continue"),
                 "intake_complete": True,
                 "awaiting_hitl": False,
@@ -508,8 +784,8 @@ async def acontinue(
         )
         with runtime._target_scope(client_slug=continue_slug, intake=continue_intake):
             result = await graph.ainvoke(None, config)
-        decorated = runtime._decorate_result(result, thread_id=thread_id, store=store)
-        return await runtime._continue_multi_after_resume(thread_id, decorated)
+        decorated = runtime._decorate_result(result, thread_id=tid, store=store)
+        return await runtime._continue_multi_after_resume(tid, decorated)
 
     await graph.aupdate_state(
         config,
@@ -523,7 +799,7 @@ async def acontinue(
             "evidence_run_id": rid,
             "evidence_run_dir": str(store.root),
             "evidence_host_id": host_id,
-            "thread_id": thread_id,
+            "thread_id": tid,
             "user_request": str(meta.get("user_request") or "continue"),
             "intake_complete": True,
             "awaiting_hitl": False,
@@ -534,11 +810,11 @@ async def acontinue(
     )
     with runtime._target_scope(client_slug=continue_slug, intake=continue_intake):
         result = await graph.ainvoke(None, config)
-    decorated = runtime._decorate_result(result, thread_id=thread_id, store=store)
+    decorated = runtime._decorate_result(result, thread_id=tid, store=store)
     if decorated.get("awaiting_hitl"):
         return decorated
     write_run_status(runtime.settings.evidence_dir, rid, status="completed")
-    return await runtime._continue_multi_after_resume(thread_id, decorated)
+    return await runtime._continue_multi_after_resume(tid, decorated)
 
 
 async def arun_intake(
@@ -597,10 +873,38 @@ def interrupted_continue_message(runtime: AuditRuntime, thread_id: str, run_id: 
     )
 
 
-async def ensure_async_checkpointer(runtime: AuditRuntime) -> None:
-    """Upgrade to AsyncSqliteSaver (required for ``ainvoke`` durability)."""
-    if runtime._async_cp_ready and runtime._checkpoint_conn is not None:
-        # Detect a closed aiosqlite connection (common after redeploy / WAL churn).
+async def ensure_async_checkpointer(
+    runtime: AuditRuntime,
+    *,
+    client_id: str | None = None,
+    audit_run_id: str | None = None,
+) -> None:
+    """Upgrade to AsyncSqliteSaver scoped per audit run when identity is known.
+
+    CORE-005: when ``client_id`` + ``audit_run_id`` are provided, open
+    ``<evidence_dir>/.checkpoints/<client_id>/<audit_run_id>.sqlite``. Otherwise
+    fall back to ``Settings.checkpoint_path`` (process-local / legacy tests).
+    """
+    path: Path
+    scope_key = ""
+    if client_id and audit_run_id:
+        scope = resolve_run_scope(
+            runtime.settings.evidence_dir,
+            client_id=client_id,
+            audit_run_id=audit_run_id,
+        )
+        path = scope.checkpoint_db_path
+        scope_key = f"{scope.client_id}:{scope.audit_run_id}"
+    else:
+        path = Path(runtime.settings.checkpoint_path)
+        scope_key = f"legacy:{path.resolve()}"
+
+    current_key = str(getattr(runtime, "_checkpoint_scope_key", "") or "")
+    if (
+        runtime._async_cp_ready
+        and runtime._checkpoint_conn is not None
+        and current_key == scope_key
+    ):
         try:
             conn = runtime._checkpoint_conn
             closed = bool(getattr(conn, "_connection", None) is None) or bool(
@@ -611,14 +915,11 @@ async def ensure_async_checkpointer(runtime: AuditRuntime) -> None:
         except Exception:  # noqa: BLE001
             pass
         runtime._async_cp_ready = False
-    if runtime._async_cp_ready:
-        return
+
     try:
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-        path = Path(runtime.settings.checkpoint_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Keep the async context manager open for the process lifetime.
         sqlite_cm = getattr(runtime, "_sqlite_cm", None)
         if sqlite_cm is not None:
             try:
@@ -631,12 +932,14 @@ async def ensure_async_checkpointer(runtime: AuditRuntime) -> None:
         assert sqlite_cm is not None
         runtime._checkpointer = await sqlite_cm.__aenter__()
         runtime._checkpoint_conn = getattr(runtime._checkpointer, "conn", None)
+        runtime._checkpoint_scope_key = scope_key
         runtime.graph = runtime._build()
         runtime.intake_graph = runtime._build_intake()
         runtime._async_cp_ready = True
     except Exception:  # noqa: BLE001
         # Keep MemorySaver — process-local resume only.
         runtime._checkpointer = MemorySaver()
+        runtime._checkpoint_scope_key = scope_key
         runtime.graph = runtime._build()
         runtime.intake_graph = runtime._build_intake()
         runtime._async_cp_ready = True
