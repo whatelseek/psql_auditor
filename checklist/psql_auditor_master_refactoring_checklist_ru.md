@@ -32,6 +32,13 @@
 [`5286a4d`](https://github.com/whatelseek/psql_auditor/commit/5286a4d773f62d0bc796b205ddd18994bdfc89af)
 не принимается автоматически. `CORE-006` остаётся `[~]` до независимой приёмки.
 
+| Проверка | Результат |
+| --- | --- |
+| Format / Lint | Passed |
+| Type check | Passed, 84 files |
+| Unit tests | 403 passed |
+| Defect map | `validate-defect-map: OK` (71/71) |
+
 ## Реестр задач
 
 ### M0 — Базовая линия, тесты и CI

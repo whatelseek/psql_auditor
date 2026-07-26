@@ -31,12 +31,11 @@ is not auto-accepted. `CORE-006` remains `[~]` pending independent acceptance.
 | --- | --- |
 | Format | Passed |
 | Lint | Passed |
-| Type check | Passed, 71 files |
-| Unit tests | 373 passed |
-| PostgreSQL integration tests | 7 passed |
-| Full suite | 380 passed |
+| Type check | Passed, 84 files |
+| Unit tests | 403 passed |
+| PostgreSQL integration tests | Not re-run in this environment (requires `AUDITOR_TEST_DATABASE_URL`) |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | [Run 30203329883](https://github.com/whatelseek/psql_auditor/actions/runs/30203329883), all jobs passed |
+| Prior clean CI (INPUT-001 candidate) | [Run 30203329883](https://github.com/whatelseek/psql_auditor/actions/runs/30203329883), all jobs passed |
 
 
 ## Quality assessment
