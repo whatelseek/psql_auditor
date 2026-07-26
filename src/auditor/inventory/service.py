@@ -243,7 +243,7 @@ def plan_to_audit_request_payload(
     }
 
 
-def start_confirmed_audit(
+async def astart_confirmed_audit(
     inventory_dir: Path | str,
     client_name: str,
     plan: AuditPlan,
@@ -256,7 +256,8 @@ def start_confirmed_audit(
 ) -> dict[str, Any]:
     """Confirm a fresh plan and execute it via ``arun_request`` (or ``executor``).
 
-    Returns a dict including ``audit_run_id``, ``plan_id``, and ``audit_request``.
+    Async entry point for FastAPI and other event-loop callers. Returns a dict
+    including ``audit_run_id``, ``plan_id``, and ``audit_request``.
     """
     settings = settings or load_settings()
     inventory_dir = Path(inventory_dir)
@@ -313,11 +314,7 @@ def start_confirmed_audit(
         return await graph.arun_request(req, operator_context="CLI inventory-driven start")
 
     run_executor = executor or _default_execute
-
-    async def _run() -> dict[str, Any]:
-        return await run_executor(request)
-
-    result: dict[str, Any] = asyncio.run(_run())
+    result = await run_executor(request)
     return {
         "status": "started",
         "plan_id": plan.plan_id,
@@ -342,6 +339,36 @@ def start_confirmed_audit(
             if k in result
         },
     }
+
+
+def start_confirmed_audit(
+    inventory_dir: Path | str,
+    client_name: str,
+    plan: AuditPlan,
+    *,
+    settings: Settings | None = None,
+    agents_dir: Path | str | None = None,
+    note: str = "",
+    executor: AuditExecutor | None = None,
+    discoverer: DiscoveryCollector | None = None,
+) -> dict[str, Any]:
+    """CLI-only synchronous wrapper around :func:`astart_confirmed_audit`.
+
+    Uses ``asyncio.run`` and must not be called from an active event loop
+    (FastAPI must ``await astart_confirmed_audit`` instead).
+    """
+    return asyncio.run(
+        astart_confirmed_audit(
+            inventory_dir,
+            client_name,
+            plan,
+            settings=settings,
+            agents_dir=agents_dir,
+            note=note,
+            executor=executor,
+            discoverer=discoverer,
+        )
+    )
 
 
 def _safe_inventory_dump(inventory: ClientInventory) -> dict[str, Any]:
@@ -374,6 +401,7 @@ __all__ = [
     "load_plan",
     "persist_plan",
     "plan_confirmation_prompt",
+    "astart_confirmed_audit",
     "plan_to_audit_request_payload",
     "reject_audit_launch",
     "start_confirmed_audit",

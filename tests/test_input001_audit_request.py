@@ -74,11 +74,30 @@ def _setup_client(tmp_path: Path, *, slug: str = "acme_corp", host: str = "db_se
     return settings, client, host
 
 
-def _valid_payload(client_id: str, *, slug: str = "acme_corp", host: str = "db_server_01") -> dict:
+def _valid_payload(
+    client_id: str,
+    *,
+    slug: str = "acme_corp",
+    host: str = "db_server_01",
+    settings: Settings | None = None,
+    version_id: str | None = None,
+    content_hash: str | None = None,
+) -> dict:
+    if settings is not None and (version_id is None or content_hash is None):
+        from auditor.inventory.service import load_client_inventory
+
+        inventory = load_client_inventory(settings.inventory_dir, slug)
+        version_id = inventory.version.version_id
+        content_hash = inventory.version.content_hash
+    inventory_ref: dict = {"kind": "client_file", "ref": f"{slug}/INVENTORY.md"}
+    if version_id:
+        inventory_ref["version_id"] = version_id
+    if content_hash:
+        inventory_ref["content_hash"] = content_hash
     return {
         "schema_version": 1,
         "client_id": client_id,
-        "inventory": {"kind": "client_file", "ref": f"{slug}/INVENTORY.md"},
+        "inventory": inventory_ref,
         "targets": [
             {
                 "inventory_target_ref": host,
@@ -226,14 +245,16 @@ def test_b_unknown_client_and_cross_client_inventory(tmp_path: Path):
         _inventory_md(host="other_host"), encoding="utf-8"
     )
 
-    unknown = parse_audit_request(_valid_payload("client_deadbeefdeadbeef", host=host))
+    unknown = parse_audit_request(
+        _valid_payload("client_deadbeefdeadbeef", host=host, settings=settings)
+    )
     with pytest.raises(AuditRequestRejected) as exc:
         validate_audit_request_semantics(unknown, settings)
     assert any(i.code == "unknown_client" for i in exc.value.issues)
 
     cross = parse_audit_request(
         {
-            **_valid_payload(client.client_id, host=host),
+            **_valid_payload(client.client_id, host=host, settings=settings),
             "inventory": {"kind": "client_file", "ref": "other_corp/INVENTORY.md"},
         }
     )
@@ -244,7 +265,7 @@ def test_b_unknown_client_and_cross_client_inventory(tmp_path: Path):
 
 def test_b_absolute_traversal_missing_unresolved_framework_profile_settings(tmp_path: Path):
     settings, client, host = _setup_client(tmp_path)
-    base = _valid_payload(client.client_id, host=host)
+    base = _valid_payload(client.client_id, host=host, settings=settings)
 
     with pytest.raises(AuditRequestRejected):
         parse_audit_request({**base, "inventory": {"kind": "client_file", "ref": "/etc/passwd"}})
@@ -266,6 +287,7 @@ def test_b_absolute_traversal_missing_unresolved_framework_profile_settings(tmp_
     (settings.inventory_dir / "acme_corp" / "INVENTORY.md").write_text(
         _inventory_md(host=host), encoding="utf-8"
     )
+    base = _valid_payload(client.client_id, host=host, settings=settings)
     bad_target = {
         **base,
         "targets": [
@@ -328,7 +350,7 @@ def test_b_absolute_traversal_missing_unresolved_framework_profile_settings(tmp_
 async def test_c_operator_context_cannot_override_request(tmp_path: Path):
     settings, client, host = _setup_client(tmp_path)
     req = validate_audit_request_semantics(
-        parse_audit_request(_valid_payload(client.client_id, host=host)),
+        parse_audit_request(_valid_payload(client.client_id, host=host, settings=settings)),
         settings,
     )
     graph = AuditorGraph(settings=settings)
@@ -419,7 +441,7 @@ async def test_e_manifest_scope_and_resume_request(tmp_path: Path):
     registry = get_audit_registry(settings.evidence_dir)
     run = registry.create_run(client_id=client.client_id)
     req = validate_audit_request_semantics(
-        parse_audit_request(_valid_payload(client.client_id, host=host)),
+        parse_audit_request(_valid_payload(client.client_id, host=host, settings=settings)),
         settings,
     )
     run.scope = scope_with_audit_request(run.scope, req)
@@ -464,7 +486,7 @@ async def test_e_manifest_scope_and_resume_request(tmp_path: Path):
 async def test_f_secret_canary_absent_and_reresolved(tmp_path: Path):
     settings, client, host = _setup_client(tmp_path)
     req = validate_audit_request_semantics(
-        parse_audit_request(_valid_payload(client.client_id, host=host)),
+        parse_audit_request(_valid_payload(client.client_id, host=host, settings=settings)),
         settings,
     )
     dump_json = req.model_dump_json()
@@ -635,3 +657,5 @@ def test_g_build_from_selected_jobs_sets_poc_profile(tmp_path: Path):
     assert isinstance(req.targets[0], AuditTarget)
     assert isinstance(req.targets[0].frameworks[0], FrameworkReference)
     assert isinstance(req.inventory, InventoryReference)
+    assert req.inventory.version_id
+    assert req.inventory.content_hash

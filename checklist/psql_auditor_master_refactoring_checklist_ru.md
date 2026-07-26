@@ -1,6 +1,6 @@
 # `psql_auditor` — Мастер-чеклист разработки и приёмки
 
-Версия чеклиста: **1.11**  
+Версия чеклиста: **1.12**  
 Дата: **2026-07-26**  
 Репозиторий: `whatelseek/psql_auditor`  
 Базовый commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
@@ -66,6 +66,11 @@
 `INPUT-001` остаётся открытым до независимой приёмки. Commit
 [`5286a4d`](https://github.com/whatelseek/psql_auditor/commit/5286a4d773f62d0bc796b205ddd18994bdfc89af)
 — только кандидат (зелёный CI недостаточен).
+Доп. доказательства: `validate_audit_request_semantics()` требует pinned
+`inventory.version_id` / `content_hash` и сравнивает их с текущим
+нормализованным `ClientInventory.version` (`inventory_hash_mismatch` /
+`inventory_version_mismatch`); устаревшие сохранённые request отклоняются
+до исполнения `arun_request`.
 
 - [ ] `INPUT-002` — Строгая валидация фреймворков.
 - [~] `INPUT-003` — Валидируемая модель inventory.
@@ -81,9 +86,13 @@ Markdown/YAML/JSON, уровни error/warning/information, версия invento
 
 Частичные доказательства `INPUT-005`: типизированный `AuditPlan` с обязательным
 подтверждением; stale-plan (`plan_stale`); merge `CREDENTIALS.md`;
-`needs_discovery` + injectable read-only discovery/reconcile; confirm →
-`AuditRequest` (version/hash) → `arun_request` / `audit_run_id`. Default
-discoverer — no-op до wiring live SSH/WinRM; независимая приёмка обязательна.
+`needs_discovery` + injectable read-only discovery/reconcile; CLI sync
+`start_confirmed_audit` / API `await astart_confirmed_audit` → `AuditRequest`
+(version/hash) → `arun_request` / `audit_run_id` (FastAPI не вызывает
+`asyncio.run` на start); проверка inventory identity на границе исполнения
+отклоняет stale saved requests (`inventory_hash_mismatch` /
+`inventory_version_mismatch`). Default discoverer — no-op до wiring live
+SSH/WinRM; независимая приёмка обязательна.
 
 ### M3 — Оркестрация LangGraph и сбор доказательств
 

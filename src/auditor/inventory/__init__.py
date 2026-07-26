@@ -11,6 +11,7 @@ from auditor.inventory.discovery import (
 )
 from auditor.inventory.service import (
     analyze_client_inventory,
+    astart_confirmed_audit,
     confirm_audit_plan,
     generate_audit_plan,
     load_client_inventory,
@@ -26,6 +27,7 @@ __all__ = [
     "NoopDiscoveryCollector",
     "StaticDiscoveryCollector",
     "analyze_client_inventory",
+    "astart_confirmed_audit",
     "confirm_audit_plan",
     "generate_audit_plan",
     "load_client_inventory",
