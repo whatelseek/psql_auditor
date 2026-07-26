@@ -38,7 +38,7 @@ scopes. Local and CI gates share the same Make targets.
 | PostgreSQL integration tests | 7 passed |
 | Full suite | 361 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | Pending push of gap-closure commit (prior green: [Run 30199323665](https://github.com/whatelseek/psql_auditor/actions/runs/30199323665)) |
+| Clean CI | [Run 30199875643](https://github.com/whatelseek/psql_auditor/actions/runs/30199875643), all jobs passed |
 
 Controlled negative runs:
 
