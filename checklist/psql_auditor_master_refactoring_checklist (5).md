@@ -35,7 +35,7 @@ mandatory gates are green locally; CI URL recorded after push.
 | PostgreSQL integration tests | 7 passed |
 | Full suite | 336 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | *(pending push)* |
+| Clean CI | [Run 30198271737](https://github.com/whatelseek/psql_auditor/actions/runs/30198271737), all jobs passed |
 
 Controlled negative runs:
 
