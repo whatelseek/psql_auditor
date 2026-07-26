@@ -36,7 +36,7 @@ checkpoint leases (no force-close), and failure-atomic scoped Sqlite init.
 | PostgreSQL integration tests | 7 passed |
 | Full suite | 380 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | Pending push of lifecycle-fix commit |
+| Clean CI | [Run 30203329883](https://github.com/whatelseek/psql_auditor/actions/runs/30203329883), all jobs passed |
 
 
 ## Quality assessment
