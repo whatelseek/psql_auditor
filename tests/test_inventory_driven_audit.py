@@ -893,7 +893,8 @@ async def test_saved_request_cannot_execute_after_inventory_modification(tmp_pat
     with pytest.raises(AuditRequestRejected) as exc:
         validate_audit_request_semantics(replay, settings)
     assert any(
-        i.code in {"inventory_hash_mismatch", "inventory_version_mismatch"} for i in exc.value.issues
+        i.code in {"inventory_hash_mismatch", "inventory_version_mismatch"}
+        for i in exc.value.issues
     )
 
     graph = AuditorGraph(settings=settings)
