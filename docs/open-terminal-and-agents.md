@@ -129,16 +129,29 @@ If Open WebUI reports the terminal as inaccessible:
 ## Add a New Agent Framework
 
 In this project, an "agent" is a Markdown framework file under `agents/`.
+Drop in a new `.md` file — no Python changes are required. The Markdown
+framework registry validates each file on load.
 
 ### 1) Create framework file
 
-Create `agents/<framework_id>.md` with frontmatter:
+Create `agents/<framework_id>.md`. **YAML frontmatter is optional.**
+
+Without frontmatter the registry derives:
+
+- `id` from the filename stem;
+- `title` from the first H1;
+- `version` as a deterministic `src-<hash>` token from the file contents.
+
+Optional frontmatter example:
 
 ```markdown
 ---
 id: my_framework
+version: "1.0"
 aliases: [my framework, my_audit]
 description: My custom audit framework
+applicability: Linux servers running my_service
+discovery_guidance: Confirm my_service is installed before selecting this framework
 domain: it
 detect:
   os_ids: [ubuntu, debian]
@@ -157,23 +170,45 @@ framework family in the operator's language.
 
 ### 2) Add requirements
 
-Use `REQ-*` sections in order:
+Use stable requirement headings (`##` or `###`) with ids such as `REQ-*` or
+`CTRL-*`. Metadata values may be single-line or multiline (including Markdown
+lists):
 
 ```markdown
 ## REQ-001: Example control
 **Category:** Access Control
 **Severity:** High
-**How to verify:** Run specific command or check file.
+**Applicability:** Ubuntu 24.04
+**Evidence required:** Command output excerpt
+**How to verify:**
+1. Run specific command
+2. Inspect the resulting file
 **Pass criteria:** Explicit expected secure state.
+**Fail criteria:** Explicit insecure state.
+**Insufficient evidence criteria:** When evidence cannot be collected.
+**Recommendation:** Remediation hint for operators.
 ```
+
+`Verification guidance:` is accepted as an alias of `How to verify:`.
 
 Guidelines:
 
 - Keep `Pass criteria` explicit and human-readable.
 - Keep one check intent per requirement.
 - Prefer deterministic command-based verification text.
+- Duplicate framework ids / requirement ids, or empty required fields, make the
+  framework **invalid**: it still appears in the catalog with errors, but is
+  not routed or executed.
 
-### 3) Deploy and test
+### 3) LLM retrieval shape
+
+Assessment prompts never receive an entire framework body. The runtime exposes:
+
+1. compact framework catalog (ids, versions, applicability, validity);
+2. compact requirement index for the selected framework;
+3. full text for the **current** requirement only.
+
+### 4) Deploy and test
 
 After file changes:
 
@@ -183,7 +218,7 @@ docker compose up -d --build agent
 
 Then in Open WebUI request an audit mentioning framework id/alias.
 
-### 4) Optional host-based auto-selection
+### 5) Optional host-based auto-selection
 
 Use `detect` frontmatter (`always`, `os_ids`, `binaries`, `ports`) so
 frameworks can be selected from discovered host facts.

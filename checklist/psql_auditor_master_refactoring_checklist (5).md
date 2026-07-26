@@ -1,20 +1,20 @@
 # `psql_auditor` — Master Development and Acceptance Checklist
 
-Checklist version: **1.13**  
+Checklist version: **1.14**  
 Date: **2026-07-26**  
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
 Latest independently reviewed revision: [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8)  
-Total tasks: **72**
+Total tasks: **77**
 
 ## Status summary
 
 | Status | Count |
 | --- | ---: |
-| Complete `[x]` | **10 / 72 (13.9%)** |
-| Partially complete `[~]` | **5 / 72 (6.9%)** |
-| Open `[ ]` | **57 / 72 (79.2%)** |
-| Not fully complete | **62 / 72 (86.1%)** |
+| Complete `[x]` | **10 / 77 (13.0%)** |
+| Partially complete `[~]` | **5 / 77 (6.5%)** |
+| Open `[ ]` | **62 / 77 (80.5%)** |
+| Not fully complete | **67 / 77 (87.0%)** |
 
 Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `INPUT-001`, `INPUT-003`.
 
@@ -22,25 +22,26 @@ Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Latest verification
 
-PR #36 (inventory-driven audit + production SSH/WinRM discovery) supersedes
-closed PR #35. Independent review of the inventory-driven launch path accepted
-`INPUT-001` and `INPUT-003` at
+PR #36 (inventory-driven audit + SSH/WinRM discovery) is merged. Independent
+review of the inventory-driven launch path accepted `INPUT-001` and
+`INPUT-003` at
 [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8).
-`INPUT-005` remains `[~]` pending independent acceptance (YAML/JSON execution
-integration and production-discovery acceptance review). Checklist acceptance
-statuses are not changed automatically by green CI.
+`INPUT-005` remains `[~]`. `INPUT-002` remains `[ ]` (Markdown framework
+registry candidate on PR #37). Tool adapters `TOOL-001`…`TOOL-005` are open
+backlog items. Checklist acceptance statuses are not changed automatically by
+green CI.
 
 | Check | Verified result |
 | --- | --- |
 | Format | Passed |
 | Lint | Passed |
-| Type check | Passed, 88 files |
-| Unit tests | 442 passed |
+| Type check | Passed, 89 files |
+| Unit tests | 460 passed |
 | Integration tests | 8 passed |
-| Full suite | 450 passed |
-| Defect map | `validate-defect-map: OK` (72/72) |
+| Full suite | 468 passed |
+| Defect map | `validate-defect-map: OK` (77/77) |
+| Prior clean CI (PR #36 merge base) | See Actions after PR #36 merge |
 | Prior clean CI (PR #35 review base) | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), all jobs passed |
-| Prior clean CI (async start + inventory identity) | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), all jobs passed |
 
 ### Closed findings carried from PR #35 (superseded by PR #36)
 
@@ -71,7 +72,7 @@ statuses are not changed automatically by green CI.
 
 Closure evidence:
 
-- defect-to-module map covers all 72 checklist IDs and is enforced in CI;
+- defect-to-module map covers all 77 checklist IDs and is enforced in CI;
 - canonical local and CI targets include format, lint, typecheck, unit, integration and full-suite tests;
 - deterministic shared fixtures and fake LLM scenarios are reused across regression tests;
 - mandatory tests block unintended external HTTP/LLM access.
@@ -107,6 +108,19 @@ Acceptance evidence:
 - regression tests verify secret-safe errors and persisted request handling.
 
 - [ ] `INPUT-002` — Enforce strict framework validation.
+
+Partial evidence (acceptance still open):
+
+- Markdown `FrameworkRegistry` for `agents/*.md` with optional YAML frontmatter;
+- without frontmatter: id from filename, title from H1, deterministic
+  `src-<hash>` version;
+- multiline requirement sections and Markdown lists;
+- compact catalog + compact requirement index + full text for the current
+  requirement only;
+- invalid frameworks remain visible with errors but are not executable;
+- drop-in `.md` frameworks require no Python changes;
+- tests: `tests/test_framework_registry.py`, `tests/test_checklist.py`.
+
 - [ ] `AGENT-001` — Provide administrator-managed Markdown audit agents under `agents/`.
 - [x] `INPUT-003` — Introduce a validated inventory model.
 
@@ -126,6 +140,11 @@ The incomplete YAML/JSON execution path does not block `INPUT-003`; it belongs t
 execution integration rather than the validated inventory domain model.
 
 - [ ] `INPUT-004` — Introduce a tool registry and capability policy.
+- [ ] `TOOL-001` — SSH execution adapter.
+- [ ] `TOOL-002` — WinRM PowerShell adapter.
+- [ ] `TOOL-003` — HTTP/HTTPS request adapter.
+- [ ] `TOOL-004` — TCP connectivity adapter.
+- [ ] `TOOL-005` — SNMP adapter.
 - [~] `INPUT-005` — Implement deterministic preflight and `AuditPlan`.
 
 Partial evidence:
@@ -157,7 +176,8 @@ Remaining work:
 
 - YAML/JSON inventory execution integration beyond the validated domain model;
 - independent acceptance review for production discovery (do not mark `[x]`
-  automatically).
+  automatically);
+- dedicated tool adapters tracked under `TOOL-001`…`TOOL-005`.
 
 ### M3 — LangGraph orchestration and evidence collection
 
@@ -238,6 +258,7 @@ Remaining work:
 
 - `INPUT-005`: complete YAML/JSON execution integration and independent
   acceptance of production discovery.
+- `TOOL-001`…`TOOL-005`: dedicated SSH / WinRM / HTTP / TCP / SNMP adapters.
 - `AGENT-001` / `INPUT-002`: administrator-managed agent authoring with strict
   framework validation.
 - `FLOW-007`: remove deprecated process-wide graph getters after independent review.

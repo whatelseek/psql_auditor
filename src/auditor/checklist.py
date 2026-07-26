@@ -1,39 +1,72 @@
 """Parse Markdown audit checklists into structured requirement objects.
 
-The auditor treats a Markdown file as the source of truth. Each requirement must
-use a stable heading id of the form ``REQ-NNN`` plus metadata fields:
+The auditor treats a Markdown file as the source of truth. Each requirement
+uses a stable heading id plus metadata fields. Supported heading shapes:
 
 .. code-block:: markdown
 
     ## REQ-001: Authentication method
+    ### WIN-001 — Host identity
+
     **Category:** Access Control
     **Severity:** High
-    **How to verify:** …
+    **Applicability:** Windows Server
+    **Evidence required:** WinRM hostname output
+    **How to verify:** …   / **Verification guidance:** …
     **Pass criteria:** …
+    **Fail criteria:** …
+    **Insufficient evidence criteria:** …
+    **Recommendation:** …
 
+Metadata values may be single-line or multiline (paragraphs and Markdown lists).
 ``parse_checklist_markdown`` extracts these blocks; ``load_checklist`` reads a
-file from disk. The LangGraph ``load_checklist`` node calls ``load_checklist``
-at the start of every audit run so checklist edits take effect without restart
-(path itself still comes from settings).
+file from disk. Assessment prompts receive only the current requirement via
+:meth:`Requirement.to_prompt_block` — never the entire framework body.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Matches "## REQ-001: Title" headings (requirement boundaries).
+# Matches "## REQ-001: Title" or "### WIN-001 — Title" (and hyphen variants).
 _REQ_HEADING = re.compile(
-    r"^##\s+(REQ-\d+)\s*:\s*(.+?)\s*$",
+    r"^(#{2,3})\s+"
+    r"([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d+)\s*"
+    r"[—–\-:]\s*"
+    r"(.+?)\s*$",
     re.MULTILINE,
 )
 
-# Matches bold metadata lines inside a requirement block.
-_META = re.compile(
-    r"^\*\*(Category|Severity|How to verify|Pass criteria):\*\*\s*(.+?)\s*$",
+# Bold metadata key line; value may continue on following lines until the next key.
+_META_KEY = re.compile(
+    r"^\*\*("
+    r"Category|Severity|Applicability|"
+    r"Evidence required|Evidence Required|"
+    r"How to verify|Verification guidance|Verification Guidance|"
+    r"Pass criteria|Fail criteria|"
+    r"Insufficient evidence criteria|Insufficient-evidence criteria|"
+    r"Insufficient evidence|Recommendation"
+    r"):\*\*[^\S\n]*(.*)$",
     re.MULTILINE | re.IGNORECASE,
 )
+
+_META_ALIASES = {
+    "category": "category",
+    "severity": "severity",
+    "applicability": "applicability",
+    "evidence required": "evidence_required",
+    "how to verify": "verification_guidance",
+    "verification guidance": "verification_guidance",
+    "pass criteria": "pass_criteria",
+    "fail criteria": "fail_criteria",
+    "insufficient evidence criteria": "insufficient_evidence_criteria",
+    "insufficient-evidence criteria": "insufficient_evidence_criteria",
+    "insufficient evidence": "insufficient_evidence_criteria",
+    "recommendation": "recommendation",
+}
 
 
 @dataclass(slots=True)
@@ -41,13 +74,20 @@ class Requirement:
     """A single auditable checklist item.
 
     Attributes:
-        id: Stable identifier such as ``REQ-001``.
+        id: Stable identifier such as ``REQ-001`` or ``WIN-001``.
         title: Short human-readable name from the heading.
         category: Grouping label (e.g. Access Control, Encryption).
         severity: Risk severity hint (Critical / High / Medium / Low).
         how_to_verify: Instructions the agent should follow (tools / queries).
         pass_criteria: Conditions that define a passing assessment.
+        applicability: Optional scope / OS / role applicability.
+        evidence_required: Optional evidence expectations.
+        fail_criteria: Optional explicit fail conditions.
+        insufficient_evidence_criteria: When status should be insufficient.
+        recommendation: Optional remediation guidance.
+        content_hash: Deterministic hash of normalized requirement content.
         raw: Original Markdown block for debugging or prompt fallback.
+        verification_guidance: Alias of ``how_to_verify`` (registry naming).
     """
 
     id: str
@@ -56,21 +96,54 @@ class Requirement:
     severity: str = ""
     how_to_verify: str = ""
     pass_criteria: str = ""
+    applicability: str = ""
+    evidence_required: str = ""
+    fail_criteria: str = ""
+    insufficient_evidence_criteria: str = ""
+    recommendation: str = ""
+    content_hash: str = ""
     raw: str = ""
+    verification_guidance: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.verification_guidance and self.how_to_verify:
+            self.verification_guidance = self.how_to_verify
+        elif not self.how_to_verify and self.verification_guidance:
+            self.how_to_verify = self.verification_guidance
+        if not self.content_hash:
+            self.content_hash = content_hash_for_requirement(self)
 
     def to_prompt_block(self) -> str:
         """Format this requirement for injection into the assessment prompt.
 
-        Returns:
-            A compact Markdown-ish bullet block the LLM can reason over.
+        Returns only this requirement — never the full framework body.
         """
-        return (
-            f"### {self.id}: {self.title}\n"
-            f"- Category: {self.category}\n"
-            f"- Severity: {self.severity}\n"
-            f"- How to verify: {self.how_to_verify}\n"
-            f"- Pass criteria: {self.pass_criteria}\n"
+        lines = [
+            f"### {self.id}: {self.title}",
+        ]
+        _append_prompt_field(lines, "Category", self.category)
+        _append_prompt_field(lines, "Severity", self.severity)
+        if self.applicability:
+            _append_prompt_field(lines, "Applicability", self.applicability)
+        if self.evidence_required:
+            _append_prompt_field(lines, "Evidence required", self.evidence_required)
+        _append_prompt_field(
+            lines,
+            "How to verify",
+            self.how_to_verify or self.verification_guidance,
         )
+        _append_prompt_field(lines, "Pass criteria", self.pass_criteria)
+        if self.fail_criteria:
+            _append_prompt_field(lines, "Fail criteria", self.fail_criteria)
+        if self.insufficient_evidence_criteria:
+            _append_prompt_field(
+                lines,
+                "Insufficient evidence criteria",
+                self.insufficient_evidence_criteria,
+            )
+        if self.recommendation:
+            _append_prompt_field(lines, "Recommendation", self.recommendation)
+        return "\n".join(lines) + "\n"
 
 
 @dataclass(slots=True)
@@ -88,20 +161,71 @@ class Checklist:
     source_path: str | None = None
 
     def by_id(self) -> dict[str, Requirement]:
-        """Index requirements by id for O(1) lookup during assessment.
-
-        Returns:
-            Mapping of ``REQ-NNN`` → ``Requirement``.
-        """
+        """Index requirements by id for O(1) lookup during assessment."""
         return {r.id: r for r in self.requirements}
 
     def ids(self) -> list[str]:
-        """Return requirement ids in checklist order.
-
-        Returns:
-            Ordered list used to seed LangGraph ``pending_ids``.
-        """
+        """Return requirement ids in checklist order."""
         return [r.id for r in self.requirements]
+
+
+def content_hash_for_requirement(req: Requirement) -> str:
+    """SHA-256 of normalized requirement fields (stable across reloads)."""
+    payload = "\n".join(
+        [
+            (req.id or "").strip(),
+            (req.title or "").strip(),
+            (req.category or "").strip(),
+            (req.severity or "").strip(),
+            (req.applicability or "").strip(),
+            (req.evidence_required or "").strip(),
+            (req.how_to_verify or req.verification_guidance or "").strip(),
+            (req.pass_criteria or "").strip(),
+            (req.fail_criteria or "").strip(),
+            (req.insufficient_evidence_criteria or "").strip(),
+            (req.recommendation or "").strip(),
+            (req.raw or "").strip(),
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _append_prompt_field(lines: list[str], label: str, value: str) -> None:
+    text = (value or "").strip()
+    if not text:
+        lines.append(f"- {label}:")
+        return
+    if "\n" in text:
+        lines.append(f"- {label}:")
+        for part in text.splitlines():
+            lines.append(f"  {part}")
+        return
+    lines.append(f"- {label}: {text}")
+
+
+def _extract_meta_fields(block: str) -> dict[str, str]:
+    """Extract metadata fields, supporting multiline values and Markdown lists."""
+    matches = list(_META_KEY.finditer(block))
+    meta: dict[str, str] = {}
+    for idx, match in enumerate(matches):
+        canon = _META_ALIASES.get(match.group(1).lower())
+        if not canon:
+            continue
+        inline = (match.group(2) or "").strip()
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(block)
+        continuation = block[start:end].strip("\n")
+        # Drop a single leading blank line after the key line.
+        if continuation.startswith("\n"):
+            continuation = continuation[1:]
+        continuation = continuation.rstrip()
+        parts: list[str] = []
+        if inline:
+            parts.append(inline)
+        if continuation.strip():
+            parts.append(continuation.strip())
+        meta[canon] = "\n".join(parts).strip()
+    return meta
 
 
 def parse_checklist_markdown(text: str, source_path: str | None = None) -> Checklist:
@@ -110,39 +234,46 @@ def parse_checklist_markdown(text: str, source_path: str | None = None) -> Check
     Algorithm:
 
     1. Read the first H1 as the document title.
-    2. Find all ``## REQ-NNN: …`` headings.
+    2. Find all ``##`` / ``###`` requirement headings (``REQ-`` / ``WIN-`` / …).
     3. For each heading, slice text until the next heading (or EOF).
-    4. Extract ``Category``, ``Severity``, ``How to verify``, ``Pass criteria``.
+    4. Extract metadata fields (category, severity, criteria, …), including
+       multiline sections and Markdown lists.
 
     Args:
         text: Full Markdown document contents.
-        source_path: Optional path stored on the resulting ``Checklist`` for
-            diagnostics (not used for reading).
+        source_path: Optional path stored on the resulting ``Checklist``.
 
     Returns:
         A ``Checklist`` with zero or more ``Requirement`` entries. Missing
-        metadata fields default to empty strings.
+        optional metadata fields default to empty strings.
     """
     title_match = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
-    title = title_match.group(1).strip() if title_match else "PostgreSQL Checklist"
+    title = title_match.group(1).strip() if title_match else "Audit Checklist"
 
     headings = list(_REQ_HEADING.finditer(text))
     requirements: list[Requirement] = []
 
     for idx, match in enumerate(headings):
-        # Slice this requirement's Markdown block [heading, next_heading).
         start = match.start()
         end = headings[idx + 1].start() if idx + 1 < len(headings) else len(text)
         block = text[start:end].strip()
-        meta = {key.lower(): value.strip() for key, value in _META.findall(block)}
+        meta = _extract_meta_fields(block)
+
+        verification = meta.get("verification_guidance", "")
         requirements.append(
             Requirement(
-                id=match.group(1),
-                title=match.group(2).strip(),
+                id=match.group(2).strip(),
+                title=match.group(3).strip(),
                 category=meta.get("category", ""),
                 severity=meta.get("severity", ""),
-                how_to_verify=meta.get("how to verify", ""),
-                pass_criteria=meta.get("pass criteria", ""),
+                how_to_verify=verification,
+                verification_guidance=verification,
+                pass_criteria=meta.get("pass_criteria", ""),
+                applicability=meta.get("applicability", ""),
+                evidence_required=meta.get("evidence_required", ""),
+                fail_criteria=meta.get("fail_criteria", ""),
+                insufficient_evidence_criteria=meta.get("insufficient_evidence_criteria", ""),
+                recommendation=meta.get("recommendation", ""),
                 raw=block,
             )
         )

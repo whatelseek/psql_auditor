@@ -1,11 +1,11 @@
 # `psql_auditor` — Мастер-чеклист разработки и приёмки
 
-Версия чеклиста: **1.13**  
+Версия чеклиста: **1.14**  
 Дата: **2026-07-26**  
 Репозиторий: `whatelseek/psql_auditor`  
 Базовый commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
 Последняя независимо рассмотренная ревизия: [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8)  
-Всего задач: **72**
+Всего задач: **77**
 
 Синхронизирован с английской версией
 [`psql_auditor_master_refactoring_checklist (5).md`](psql_auditor_master_refactoring_checklist%20(5).md).
@@ -16,10 +16,10 @@
 
 | Статус | Количество |
 | --- | ---: |
-| Принято `[x]` | **10 / 72 (13.9%)** |
-| Частично `[~]` | **5 / 72 (6.9%)** |
-| Открыто `[ ]` | **57 / 72 (79.2%)** |
-| Не полностью завершено | **62 / 72 (86.1%)** |
+| Принято `[x]` | **10 / 77 (13.0%)** |
+| Частично `[~]` | **5 / 77 (6.5%)** |
+| Открыто `[ ]` | **62 / 77 (80.5%)** |
+| Не полностью завершено | **67 / 77 (87.0%)** |
 
 Принято: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `INPUT-001`, `INPUT-003`.
 
@@ -27,22 +27,22 @@
 
 ## Последняя проверка
 
-PR #36 (inventory-driven audit + production SSH/WinRM discovery) заменяет
-закрытый PR #35. Независимая приёмка inventory-driven запуска приняла
-`INPUT-001` и `INPUT-003` на commit
+PR #36 (inventory-driven audit + SSH/WinRM discovery) влит в `main`.
+Независимая приёмка inventory-driven запуска приняла `INPUT-001` и
+`INPUT-003` на commit
 [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8).
-`INPUT-005` остаётся `[~]` до независимой приёмки (интеграция YAML/JSON
-execution и review production discovery). Статусы приёмки не меняются
-автоматически по зелёному CI.
+`INPUT-005` остаётся `[~]`. `INPUT-002` остаётся `[ ]` (кандидат Markdown
+framework registry в PR #37). Адаптеры `TOOL-001`…`TOOL-005` — открытый
+backlog. Статусы приёмки не меняются автоматически по зелёному CI.
 
 | Проверка | Результат |
 | --- | --- |
 | Format / Lint | Passed |
-| Type check | Passed, 88 files |
-| Unit tests | 442 passed |
+| Type check | Passed, 89 files |
+| Unit tests | 460 passed |
 | Integration tests | 8 passed |
-| Full suite | 450 passed |
-| Defect map | `validate-defect-map: OK` (72/72) |
+| Full suite | 468 passed |
+| Defect map | `validate-defect-map: OK` (77/77) |
 | Prior clean CI (база review PR #35) | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), все jobs зелёные |
 | Prior clean CI (async start + inventory identity) | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), все jobs зелёные |
 
@@ -64,7 +64,7 @@ execution и review production discovery). Статусы приёмки не м
 
 Доказательства закрытия:
 
-- defect-to-module map покрывает все 72 ID чеклиста и enforced в CI;
+- defect-to-module map покрывает все 77 ID чеклиста и enforced в CI;
 - единые local/CI targets: format, lint, typecheck, unit, integration, full suite;
 - детерминированные shared fixtures и fake LLM scenarios переиспользуются;
 - обязательные тесты блокируют непреднамеренный external HTTP/LLM доступ.
@@ -102,6 +102,19 @@ race-fix реализованы, но полное удаление legacy proce
 - регрессионные тесты secret-safe ошибок и persisted request handling.
 
 - [ ] `INPUT-002` — Строгая валидация фреймворков.
+
+Частичные доказательства (приёмка всё ещё открыта):
+
+- Markdown `FrameworkRegistry` для `agents/*.md` с optional YAML frontmatter;
+- без frontmatter: id из имени файла, title из H1, детерминированная версия
+  `src-<hash>`;
+- multiline секции требований и Markdown-списки;
+- compact catalog + compact requirement index + полный текст только текущего
+  требования;
+- невалидные frameworks видны с errors, но не executable;
+- drop-in `.md` без изменений Python;
+- тесты: `tests/test_framework_registry.py`, `tests/test_checklist.py`.
+
 - [ ] `AGENT-001` — Администраторские Markdown audit-агенты в `agents/`.
 - [x] `INPUT-003` — Валидируемая модель inventory.
 
@@ -121,6 +134,11 @@ race-fix реализованы, но полное удаление legacy proce
 execution integration, а не к validated inventory domain model.
 
 - [ ] `INPUT-004` — Реестр инструментов и политика capabilities.
+- [ ] `TOOL-001` — Адаптер выполнения SSH.
+- [ ] `TOOL-002` — Адаптер WinRM PowerShell.
+- [ ] `TOOL-003` — Адаптер HTTP/HTTPS запросов.
+- [ ] `TOOL-004` — Адаптер TCP connectivity.
+- [ ] `TOOL-005` — Адаптер SNMP.
 - [~] `INPUT-005` — Детерминированный preflight и `AuditPlan`.
 
 Частичные доказательства:
@@ -150,7 +168,8 @@ execution integration, а не к validated inventory domain model.
 Осталось:
 
 - интеграция YAML/JSON inventory execution за пределами validated domain model;
-- независимая приёмка production discovery (не помечать `[x]` автоматически).
+- независимая приёмка production discovery (не помечать `[x]` автоматически);
+- отдельные tool-адаптеры — в `TOOL-001`…`TOOL-005`.
 
 ### M3 — Оркестрация LangGraph и сбор доказательств
 
@@ -231,6 +250,7 @@ execution integration, а не к validated inventory domain model.
 
 - `INPUT-005`: завершить YAML/JSON execution integration и независимую приёмку
   production discovery.
+- `TOOL-001`…`TOOL-005`: отдельные адаптеры SSH / WinRM / HTTP / TCP / SNMP.
 - `AGENT-001` / `INPUT-002`: администраторские агенты и строгая валидация
   фреймворков.
 - `FLOW-007`: удалить deprecated process-wide graph getters после независимой
