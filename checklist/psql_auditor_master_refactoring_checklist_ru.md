@@ -36,9 +36,12 @@
 | --- | --- |
 | Format / Lint | Passed |
 | Type check | Passed, 85 files |
-| Unit tests | 414 passed |
+| Unit tests | 422 passed |
+| Integration tests | 7 passed |
+| Full suite | 429 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | [Run 30208965512](https://github.com/whatelseek/psql_auditor/actions/runs/30208965512), все jobs зелёные |
+| Clean CI (async start + inventory identity) | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), все jobs зелёные |
+| Prior clean CI | [Run 30208965512](https://github.com/whatelseek/psql_auditor/actions/runs/30208965512), все jobs зелёные |
 
 ## Реестр задач
 
