@@ -9,7 +9,8 @@ changes. Numbers below were measured on a clean virtualenv using
 | Role | SHA |
 |------|-----|
 | Historical reviewed revision (task seed) | `67b7b083da7df0892dd232cb164e781b3ac11099` |
-| Baseline measurement revision (this doc) | `f513134d03b764bd9ca33da44d346cc3a550051c` (+ CORE-000 commit on top) |
+| Code under test when gates were measured | `f513134d03b764bd9ca33da44d346cc3a550051c` (CORE-001) |
+| CORE-000 documentation / tooling commit | `df7d9ad0b1a6ac9cdfc5d22705d42201d14b3710` |
 
 Update the “measurement revision” row when regenerating lock/results.
 
