@@ -8,11 +8,9 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from auditor.hitl import (
-    format_hitl_assistant_message,
-    interrupt_payload_to_prompt,
-)
-from auditor.intake import format_intake_assistant_message
+from auditor.compliance import format_compliance_markdown
+from auditor.context import compact_findings_for_summary
+from auditor.followup import followup_footer
 from auditor.language import (
     ReportLanguage,
     detect_report_language,
@@ -21,12 +19,10 @@ from auditor.language import (
 )
 from auditor.prompts import FINALIZE_PROMPT
 from auditor.report_archive import package_and_publish_archive
-from auditor.state import AuditorState, render_report
-from auditor.compliance import format_compliance_markdown
-from auditor.followup import followup_footer
-from auditor.context import compact_findings_for_summary
 from auditor.results_store import record_results_safe
+from auditor.state import AuditorState, aggregate_findings, render_report
 from auditor.workflows.protocols import AuditRuntime
+
 
 async def finalize(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
     """Assemble fixed report + short executive summary."""
@@ -42,16 +38,10 @@ async def finalize(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]
 
     findings = state.get("findings") or {}
     requirements = state.get("requirements") or {}
-    title = (
-        state.get("checklist_title")
-        or state.get("framework_title")
-        or "Security Audit"
-    )
+    title = state.get("checklist_title") or state.get("framework_title") or "Security Audit"
     report_lang = runtime._report_language(state)
     lang_instr = language_instruction(report_lang)
-    full_report = render_report(
-        title, findings, requirements, language=report_lang
-    )
+    full_report = render_report(title, findings, requirements, language=report_lang)
     digest = compact_findings_for_summary(
         findings,
         evidence_chars=runtime.settings.max_finalize_evidence_chars,
@@ -87,9 +77,7 @@ async def finalize(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]
         host_id = str(state.get("evidence_host_id") or "").strip()
         if host_id:
             store.host_segment = host_id
-        store.write_report(
-            fw or "framework", f"{summary}\n\n---\n\n{full_report}"
-        )
+        store.write_report(fw or "framework", f"{summary}\n\n---\n\n{full_report}")
         evidence_note = f" | evidence: `{store.root}`"
 
     if findings or requirements:
@@ -97,9 +85,7 @@ async def finalize(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]
         if store is not None:
             try:
                 evidence_rel = str(
-                    store.root.relative_to(
-                        Path(runtime.settings.evidence_dir).resolve()
-                    )
+                    store.root.relative_to(Path(runtime.settings.evidence_dir).resolve())
                 )
             except ValueError:
                 evidence_rel = str(store.root)
@@ -113,16 +99,13 @@ async def finalize(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]
                     session_number = None
         if session_number is None and state.get("results_session_number") is not None:
             try:
-                session_number = int(state["results_session_number"])  # type: ignore[index]
+                session_number = int(state["results_session_number"])
             except (TypeError, ValueError):
                 session_number = None
         await record_results_safe(
             runtime.settings,
-            client_name=str(state.get("client_name") or "")
-            or (store.run_id if store else ""),
-            evidence_run_id=str(
-                state.get("evidence_run_id") or (store.run_id if store else "")
-            ),
+            client_name=str(state.get("client_name") or "") or (store.run_id if store else ""),
+            evidence_run_id=str(state.get("evidence_run_id") or (store.run_id if store else "")),
             framework_id=fw or "framework",
             evidence_host_id=str(state.get("evidence_host_id") or "") or None,
             findings=findings,
@@ -137,9 +120,7 @@ async def finalize(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]
     else:
         session_number = None
 
-    header = (
-        f"Framework: `{fw}` | session reconnects: {retries}{evidence_note}\n\n"
-    )
+    header = f"Framework: `{fw}` | session reconnects: {retries}{evidence_note}\n\n"
     client = state.get("client_name") or ""
     if client:
         header = f"Client: **{client}** | {header}"
@@ -158,29 +139,26 @@ async def finalize(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]
         except Exception:  # noqa: BLE001
             pass
 
-    chat_text = (
-        f"{header}"
-        f"## Management summary\n\n{summary.strip()}\n"
+    counts = aggregate_findings(findings)
+    status_line = (
+        f"Status counts — pass: {counts['pass']}, fail: {counts['fail']}, "
+        f"partial: {counts['partial']}, error: {counts['error']}, "
+        f"skipped: {counts['skipped']}.\n\n"
     )
+    chat_text = f"{header}{status_line}## Management summary\n\n{summary.strip()}\n"
 
     archive_path = ""
     archive_url = ""
     # Multi-framework runs package once in ``_merge_multi_reports``.
     run_id = state.get("evidence_run_id") or (store.run_id if store else "")
-    in_multi = any(
-        (sess.get("run_id") == run_id) for sess in runtime._multi_sessions.values()
-    )
+    in_multi = any((sess.get("run_id") == run_id) for sess in runtime._multi_sessions.values())
     if store is not None and runtime.settings.archive_enabled and not in_multi:
         try:
             store.write_root_report(disk_report)
-            packaged = await package_and_publish_archive(
-                store.root, runtime.settings
-            )
+            packaged = await package_and_publish_archive(store.root, runtime.settings)
             archive_path = str(packaged.get("zip_path") or "")
             archive_url = str(packaged.get("download_url") or "")
-            chat_text = (
-                f"{chat_text.rstrip()}\n{packaged.get('chat_section') or ''}"
-            )
+            chat_text = f"{chat_text.rstrip()}\n{packaged.get('chat_section') or ''}"
         except Exception as exc:  # noqa: BLE001
             chat_text = (
                 f"{chat_text.rstrip()}\n\n---\n\n"
@@ -194,9 +172,7 @@ async def finalize(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]
     return {
         "report": chat_text,
         "evidence_run_id": state.get("evidence_run_id") or "",
-        "evidence_run_dir": state.get("evidence_run_dir") or (
-            str(store.root) if store else ""
-        ),
+        "evidence_run_dir": state.get("evidence_run_dir") or (str(store.root) if store else ""),
         "archive_path": archive_path,
         "archive_url": archive_url,
         "pending_ids": [],
@@ -207,7 +183,9 @@ async def finalize(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]
         ],
     }
 
-def report_language(runtime: AuditRuntime, state: AuditorState | None = None, user_request: str = ""
+
+def report_language(
+    runtime: AuditRuntime, state: AuditorState | None = None, user_request: str = ""
 ) -> ReportLanguage:
     """Resolve report language from state or user request text.
 
@@ -225,7 +203,7 @@ def report_language(runtime: AuditRuntime, state: AuditorState | None = None, us
     text = user_request or (state.get("user_request") if state else "") or ""
     return detect_report_language(text)
 
+
 def report_language_from_request(runtime: AuditRuntime, user_request: str) -> ReportLanguage:
     """Detect report language from the operator request string only."""
     return detect_report_language(user_request)
-

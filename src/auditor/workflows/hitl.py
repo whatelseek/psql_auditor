@@ -18,7 +18,9 @@ from auditor.state import AuditorState, Finding
 from auditor.workflows.helpers import _as_finding, _hitl_candidates
 from auditor.workflows.protocols import AuditRuntime
 
-def route_after_assess(runtime: AuditRuntime, state: AuditorState
+
+def route_after_assess(
+    runtime: AuditRuntime, state: AuditorState
 ) -> Literal["reconnect_session", "human_gate", "finalize"]:
     """Reconnect on transport errors; otherwise ask the human about failures."""
     pending = state.get("pending_ids") or []
@@ -30,7 +32,9 @@ def route_after_assess(runtime: AuditRuntime, state: AuditorState
         return "human_gate"
     return "finalize"
 
-def route_after_hitl(runtime: AuditRuntime, state: AuditorState
+
+def route_after_hitl(
+    runtime: AuditRuntime, state: AuditorState
 ) -> Literal["assess_parallel", "human_gate", "finalize"]:
     """After skip/retry: reassess, ask about the next failure, or finalize."""
     pending = state.get("pending_ids") or []
@@ -39,6 +43,7 @@ def route_after_hitl(runtime: AuditRuntime, state: AuditorState
     if runtime.settings.hitl_enabled and _hitl_candidates(state):
         return "human_gate"
     return "finalize"
+
 
 async def human_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
     """Pause for the operator when a requirement could not be audited.
@@ -112,16 +117,10 @@ async def human_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, An
         )
     if decision.action == "unknown":
         # Last resort: continue the audit rather than deadlocking the chat.
-        decision = HitlDecision(
-            action="skip_all", raw=decision.raw, source="llm"
-        )
+        decision = HitlDecision(action="skip_all", raw=decision.raw, source="llm")
 
     skipped = list(state.get("hitl_skipped") or [])
-    via = (
-        " (LLM interpreted reply)"
-        if decision.source == "llm"
-        else ""
-    )
+    via = " (LLM interpreted reply)" if decision.source == "llm" else ""
 
     if decision.action == "skip_all":
         updates: dict[str, Finding] = {}
@@ -143,10 +142,7 @@ async def human_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, An
             "awaiting_hitl": False,
             "messages": [
                 AIMessage(
-                    content=(
-                        f"Operator skipped {len(candidates)} failed "
-                        f"requirement(s){via}."
-                    ),
+                    content=(f"Operator skipped {len(candidates)} failed requirement(s){via}."),
                     name="auditor",
                 )
             ],
@@ -200,6 +196,7 @@ async def human_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, An
             )
         ],
     }
+
 
 def _skipped_finding(finding: Finding, *, reason: str) -> Finding:
     """Mark a failed finding as skipped while preserving the failure why."""

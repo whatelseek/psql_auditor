@@ -47,15 +47,15 @@ def test_route_framework_by_alias():
     assert fw.id == "ubuntu_cis_24_l2"
     fw = route_framework("audit postgresql scram and ssl", agents)
     assert fw.id == "postgres_cis"
-    fw = route_framework("Run an IT inventory baseline audit", agents)
-    assert fw.id == "it_audit"
+    fw = route_framework("Run a host inventory baseline audit", agents)
+    assert fw.id == "host_facts"
 
 
 def test_catalog_lists_drop_ins():
     text = frameworks_catalog_text("agents")
     assert "postgres_cis" in text
     assert "ubuntu_cis_24_l2" in text
-    assert "it_audit" in text
+    assert "host_facts" in text
     assert "windows_cis" not in text
 
 
@@ -89,22 +89,18 @@ def test_select_frameworks_for_ubuntu_postgres_host():
         facts, domains=["it", "cybersecurity"], agents_dir="agents"
     )
     ids = [fw.id for fw in selected]
-    assert ids[0] == "it_audit"
+    assert ids[0] == "host_facts"
     assert "ubuntu_cis_24_l2" in ids
     assert "postgres_cis" in ids
 
 
 def test_select_frameworks_it_domain_only():
     facts = HostFacts(hostname="db-01", os_id="ubuntu", binaries=["psql"])
-    selected = select_frameworks_for_host(
-        facts, domains=["it"], agents_dir="agents"
-    )
-    assert [fw.id for fw in selected] == ["it_audit"]
+    selected = select_frameworks_for_host(facts, domains=["it"], agents_dir="agents")
+    assert [fw.id for fw in selected] == ["host_facts", "host_facts_ru"]
 
 
 def test_select_frameworks_windows_has_no_bundled_cis():
     facts = HostFacts(hostname="win-01", os_id="windows")
-    selected = select_frameworks_for_host(
-        facts, domains=["cybersecurity"], agents_dir="agents"
-    )
+    selected = select_frameworks_for_host(facts, domains=["cybersecurity"], agents_dir="agents")
     assert selected == []

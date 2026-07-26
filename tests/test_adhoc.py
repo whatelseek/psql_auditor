@@ -82,9 +82,7 @@ async def test_adhoc_freeform_uses_tool_loop(tmp_path: Path):
     graph.evidence_model = MagicMock()
     graph.evidence_model.ainvoke = AsyncMock(side_effect=[tool_response, final_response])
     graph._execute_tool_calls = AsyncMock(  # type: ignore[method-assign]
-        return_value=[
-            ToolMessage(content="up 3 days", tool_call_id="call-1", name="ssh_run")
-        ]
+        return_value=[ToolMessage(content="up 3 days", tool_call_id="call-1", name="ssh_run")]
     )
 
     result = await run_adhoc_commands(graph, "Run this command: `uptime`")

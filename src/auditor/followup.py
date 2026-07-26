@@ -19,11 +19,11 @@ Key entry points:
 
 from __future__ import annotations
 
+import json
+import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
-import json
 from pathlib import Path
-import re
 from typing import TYPE_CHECKING, Any, Iterator, Sequence
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -45,12 +45,17 @@ from auditor.language import (
 )
 from auditor.prompts import FILL_CELL_PROMPT, FILL_SYSTEM_PROMPT, FINALIZE_PROMPT
 from auditor.report_archive import package_and_publish_archive
+from auditor.results_store import (
+    record_requirement_result_safe,
+    record_results_safe,
+)
 from auditor.run_resolve import (
     ResolvedTarget,
     checklist_framework_id,
     resolve_target,
     split_evidence_framework_key,
 )
+from auditor.runtime_target import bind_runtime_credentials
 from auditor.secrets_file import (
     InventorySshTarget,
     bind_ssh_target,
@@ -58,11 +63,6 @@ from auditor.secrets_file import (
     list_client_ssh_targets,
     read_client_credentials,
 )
-from auditor.results_store import (
-    record_requirement_result_safe,
-    record_results_safe,
-)
-from auditor.runtime_target import bind_runtime_credentials
 from auditor.state import Finding, render_report
 
 if TYPE_CHECKING:
@@ -252,9 +252,7 @@ async def run_revise_req(
     mode = "revise_full" if full else "gather_evidence"
     evidence_req_root = store.root / target.framework_id
     sections: list[str] = [
-        "## Post-audit evidence collection"
-        if not full
-        else "## Post-audit requirement revision",
+        "## Post-audit evidence collection" if not full else "## Post-audit requirement revision",
         "",
         f"**Run:** `{target.run_id}` (resolved via {target.source})",
         f"**Framework:** `{target.framework_id}`",
@@ -275,9 +273,7 @@ async def run_revise_req(
             if requirement is None:
                 sections.append(f"### {req_id}")
                 sections.append("")
-                sections.append(
-                    f"Requirement `{req_id}` is not in checklist `{fw.id}` — skipped."
-                )
+                sections.append(f"Requirement `{req_id}` is not in checklist `{fw.id}` — skipped.")
                 sections.append("")
                 continue
 
@@ -466,10 +462,7 @@ async def run_refill_finding(
     bare_fw = checklist_framework_id(target.framework_id)
     fw = get_framework(bare_fw, settings.agents_dir)
     if fw is None:
-        msg = (
-            f"Framework `{bare_fw}` (from `{target.framework_id}`) "
-            "not found under agents/."
-        )
+        msg = f"Framework `{bare_fw}` (from `{target.framework_id}`) not found under agents/."
         return {
             "report": msg,
             "messages": [AIMessage(content=msg)],
@@ -522,9 +515,7 @@ async def run_refill_finding(
             continue
 
         fill_messages = [
-            SystemMessage(
-                content=FILL_SYSTEM_PROMPT.format(language_instruction=lang_instr)
-            ),
+            SystemMessage(content=FILL_SYSTEM_PROMPT.format(language_instruction=lang_instr)),
             HumanMessage(
                 content=FILL_CELL_PROMPT.format(
                     report_language=report_lang.name,
@@ -542,6 +533,7 @@ async def run_refill_finding(
         response = await graph.fill_model.ainvoke(fill_messages)
         finding = graph._cells_to_finding(req_id, requirement, response, evidence)
         from auditor.result_identity_bind import attach_result_identity
+
         finding = attach_result_identity(
             finding,
             state={
@@ -564,9 +556,7 @@ async def run_refill_finding(
                 session_number = None
         evidence_rel = ""
         try:
-            evidence_rel = str(
-                store.root.relative_to(Path(settings.evidence_dir).resolve())
-            )
+            evidence_rel = str(store.root.relative_to(Path(settings.evidence_dir).resolve()))
         except ValueError:
             evidence_rel = str(store.root)
         await record_requirement_result_safe(
@@ -580,9 +570,7 @@ async def run_refill_finding(
             evidence_relpath=evidence_rel,
             source="refill",
             session_number=session_number,
-            audit_run_id=str(
-                finding.audit_run_id or meta.get("audit_run_id") or ""
-            ),
+            audit_run_id=str(finding.audit_run_id or meta.get("audit_run_id") or ""),
             client_id=str(finding.client_id or meta.get("client_id") or ""),
         )
         refilled.append(req_id)
@@ -660,19 +648,17 @@ async def run_update_report(
     )
     try:
         # require_req=False — update whole run (or named framework).
+        from auditor.evidence_store import EvidenceStore
         from auditor.run_resolve import (
             extract_run_id,
             extract_run_id_from_messages,
             resolve_framework_for_req,
         )
-        from auditor.evidence_store import EvidenceStore
 
         run_id = extract_run_id(user_request, evidence_dir=settings.evidence_dir)
         source = "explicit"
         if not run_id and messages:
-            run_id = extract_run_id_from_messages(
-                messages, evidence_dir=settings.evidence_dir
-            )
+            run_id = extract_run_id_from_messages(messages, evidence_dir=settings.evidence_dir)
             if run_id:
                 source = "history"
         if not run_id:
@@ -693,9 +679,7 @@ async def run_update_report(
     frameworks = store.list_framework_ids()
     meta = store.read_run_meta()
     if not frameworks:
-        frameworks = [
-            str(x) for x in (meta.get("frameworks") or []) if x and x != "adhoc"
-        ]
+        frameworks = [str(x) for x in (meta.get("frameworks") or []) if x and x != "adhoc"]
 
     # Optional single-framework filter from text.
     try:
@@ -815,9 +799,7 @@ async def run_update_report(
 
         evidence_rel = ""
         try:
-            evidence_rel = str(
-                store.root.relative_to(Path(settings.evidence_dir).resolve())
-            )
+            evidence_rel = str(store.root.relative_to(Path(settings.evidence_dir).resolve()))
         except ValueError:
             evidence_rel = str(store.root)
         client = str(meta.get("client_name") or store.run_id or "")
@@ -859,9 +841,7 @@ async def run_update_report(
     if len(completed) == 1:
         combined = completed[0][2]
     else:
-        parts = [
-            f"## {title} (`{fw_id}`)\n\n{body}" for fw_id, title, body in completed
-        ]
+        parts = [f"## {title} (`{fw_id}`)\n\n{body}" for fw_id, title, body in completed]
         combined = "# Multi-framework report update\n\n" + "\n\n---\n\n".join(parts)
 
     archive_path = ""
@@ -999,17 +979,15 @@ async def run_anonymize_report(
     )
     del user_request
     try:
+        from auditor.evidence_store import EvidenceStore
         from auditor.run_resolve import (
             extract_run_id,
             extract_run_id_from_messages,
         )
-        from auditor.evidence_store import EvidenceStore
 
         run_id = extract_run_id(user_text, evidence_dir=settings.evidence_dir)
         if not run_id and messages:
-            run_id = extract_run_id_from_messages(
-                messages, evidence_dir=settings.evidence_dir
-            )
+            run_id = extract_run_id_from_messages(messages, evidence_dir=settings.evidence_dir)
         if not run_id:
             raise FileNotFoundError(
                 "No audit_run_id in your message or chat history. "

@@ -86,8 +86,18 @@ async def _run_remote(command: str, settings: Settings | None = None) -> str:
                 check=False,
                 timeout=float(settings.ssh_command_timeout or 30),
             )
-            stdout = result.stdout or ""
-            stderr = result.stderr or ""
+            stdout_raw = result.stdout or ""
+            stderr_raw = result.stderr or ""
+            stdout = (
+                stdout_raw.decode("utf-8", errors="replace")
+                if isinstance(stdout_raw, bytes)
+                else stdout_raw
+            )
+            stderr = (
+                stderr_raw.decode("utf-8", errors="replace")
+                if isinstance(stderr_raw, bytes)
+                else stderr_raw
+            )
             parts = [
                 f"exit_code={result.exit_status}",
                 f"stdout:\n{stdout.strip()}",
@@ -96,10 +106,7 @@ async def _run_remote(command: str, settings: Settings | None = None) -> str:
                 parts.append(f"stderr:\n{stderr.strip()}")
             return "\n".join(parts)
     except TimeoutError as exc:
-        return (
-            f"SSH error: TimeoutError: command exceeded "
-            f"{settings.ssh_command_timeout}s ({exc})"
-        )
+        return f"SSH error: TimeoutError: command exceeded {settings.ssh_command_timeout}s ({exc})"
     except Exception as exc:  # noqa: BLE001 — surface to agent as evidence
         return f"SSH error: {type(exc).__name__}: {exc}"
 

@@ -102,12 +102,8 @@ def resolve_pause_resume(messages: list[Any]) -> tuple[PauseKind, str] | None:
         if not matches:
             continue
         m = matches[-1]
-        kind = str(
-            m.group("kind") or m.group("h_kind") or m.group("m_kind") or ""
-        ).lower()
-        thread = str(
-            m.group("thread") or m.group("h_thread") or m.group("m_thread") or ""
-        )
+        kind = str(m.group("kind") or m.group("h_kind") or m.group("m_kind") or "").lower()
+        thread = str(m.group("thread") or m.group("h_thread") or m.group("m_thread") or "")
         if kind in ("hitl", "intake", "continue"):
             return kind, thread  # type: ignore[return-value]
     return None
@@ -258,23 +254,18 @@ async def interpret_hitl_decision(
         f"Operator reply:\n{raw[:1500]}"
     )
     try:
-        response = await llm.ainvoke(
-            [SystemMessage(content=system), HumanMessage(content=human)]
-        )
+        response = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=human)])
         content = getattr(response, "content", response)
         if isinstance(content, list):
             content = " ".join(
-                str(part.get("text") if isinstance(part, dict) else part)
-                for part in content
+                str(part.get("text") if isinstance(part, dict) else part) for part in content
             )
         token = re.sub(r"[*_`]+", "", str(content or "").strip().lower())
         token = re.sub(r"\s+", "_", token.split()[0]) if token.split() else ""
         # Accept "skip all" style from the model too
         llm_parsed = parse_hitl_decision(str(content or ""))
         if llm_parsed.action != "unknown":
-            return HitlDecision(
-                action=llm_parsed.action, raw=raw, source="llm"
-            )
+            return HitlDecision(action=llm_parsed.action, raw=raw, source="llm")
         if token in _VALID_ACTIONS:
             return HitlDecision(action=token, raw=raw, source="llm")  # type: ignore[arg-type]
     except Exception:  # noqa: BLE001 — fall through to unknown
@@ -322,15 +313,14 @@ def build_hitl_prompt(
         Markdown string shown to the operator during HITL pause.
     """
     why = (finding.evidence or finding.notes or "No evidence collected.").strip()
-    recommendation = (
-        finding.remediation or _default_recommendation(finding, requirement)
-    ).strip()
+    recommendation = (finding.remediation or _default_recommendation(finding, requirement)).strip()
     lines = [
         f"## Could not audit `{requirement.id}`",
         "",
         f"**Framework:** `{framework_id}`",
         f"**Requirement:** {requirement.title}",
-        f"**Category:** {requirement.category or '—'} | **Severity:** {requirement.severity or '—'}",
+        f"**Category:** {requirement.category or '—'} | "
+        f"**Severity:** {requirement.severity or '—'}",
         "",
         "### Why",
         why,
@@ -407,9 +397,7 @@ def _default_recommendation(finding: Finding, requirement: Requirement) -> str:
     if "timeout" in blob:
         tips.append("Increase timeouts or reduce load on the target, then retry.")
     if "permission" in blob or "denied" in blob:
-        tips.append(
-            "Grant the audit user read access to the needed files/views, then retry."
-        )
+        tips.append("Grant the audit user read access to the needed files/views, then retry.")
     if not tips:
         tips.append(
             "Fix the underlying access/config issue described above, then reply **retry**; "

@@ -7,7 +7,6 @@ SSH host / IP is stored as an attribute and may change without changing
 
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 import threading
@@ -16,7 +15,6 @@ from typing import Any
 from uuid import uuid4
 
 from auditor.domain.result_identity import IncompleteResultIdentityError
-
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS assets (
@@ -78,9 +76,7 @@ class AssetRegistry:
         """
         client = (client_id or "").strip()
         if not client:
-            raise IncompleteResultIdentityError(
-                "client_id is required to resolve asset_id"
-            )
+            raise IncompleteResultIdentityError("client_id is required to resolve asset_id")
         key = (inventory_key or label or "").strip()
         if not key:
             raise IncompleteResultIdentityError(

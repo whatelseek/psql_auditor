@@ -29,32 +29,30 @@ ProgressKind = Literal[
 
 _STREAM_TRUNCATE = 1200
 
-_current_sink: ContextVar["ProgressSink | None"] = ContextVar(
-    "auditor_progress_sink", default=None
-)
+_current_sink: ContextVar["ProgressSink | None"] = ContextVar("auditor_progress_sink", default=None)
 
 
 @dataclass(slots=True)
 class ProgressEvent:
     """One live progress event for SSE adapters and chat UI rendering.
 
-  Serialized by the API layer into Server-Sent Events so operators see tool
-  calls, reasoning snippets, per-requirement status changes, and phase labels
-  in real time during long audit runs.
+    Serialized by the API layer into Server-Sent Events so operators see tool
+    calls, reasoning snippets, per-requirement status changes, and phase labels
+    in real time during long audit runs.
 
-  Attributes:
-      kind: Event category (reasoning, tool_call, tool_result, req_status, phase).
-      text: Human-readable message or reasoning excerpt.
-      tool_name: Tool identifier for tool_call / tool_result events.
-      tool_call_id: Correlates a tool call with its result.
-      arguments: Tool input payload (dict or wrapped scalar).
-      result: Truncated tool output or error text.
-      requirement_id: Associated checklist id (``REQ-NNN``) when applicable.
-      requirement_title: Human checklist title for ``requirement_id`` (UI labels).
-      framework_id: Framework slug when running multi-framework audits.
-      status: Sub-status for tool results (``ok`` / ``error``) or REQ status.
-      extra: Optional extension fields for forward-compatible metadata.
-  """
+    Attributes:
+        kind: Event category (reasoning, tool_call, tool_result, req_status, phase).
+        text: Human-readable message or reasoning excerpt.
+        tool_name: Tool identifier for tool_call / tool_result events.
+        tool_call_id: Correlates a tool call with its result.
+        arguments: Tool input payload (dict or wrapped scalar).
+        result: Truncated tool output or error text.
+        requirement_id: Associated checklist id (``REQ-NNN``) when applicable.
+        requirement_title: Human checklist title for ``requirement_id`` (UI labels).
+        framework_id: Framework slug when running multi-framework audits.
+        status: Sub-status for tool results (``ok`` / ``error``) or REQ status.
+        extra: Optional extension fields for forward-compatible metadata.
+    """
 
     kind: ProgressKind
     text: str = ""
@@ -84,10 +82,10 @@ def format_requirement_label(
 class ProgressSink:
     """Async queue of progress events; ``None`` sentinel marks end-of-stream.
 
-  Created per HTTP request or graph invocation. Producers call :meth:`emit`;
-  consumers await :attr:`queue.get` until :meth:`close` enqueues a ``None``
-  sentinel. The sink ignores further emits after close.
-  """
+    Created per HTTP request or graph invocation. Producers call :meth:`emit`;
+    consumers await :attr:`queue.get` until :meth:`close` enqueues a ``None``
+    sentinel. The sink ignores further emits after close.
+    """
 
     def __init__(self) -> None:
         """Initialize an open sink with an unbounded asyncio queue."""
@@ -176,9 +174,7 @@ def emit_phase(text: str, *, framework_id: str = "") -> None:
         text: Phase description shown in the live stream.
         framework_id: Optional framework slug for multi-standard runs.
     """
-    emit_progress(
-        ProgressEvent(kind="phase", text=text, framework_id=framework_id)
-    )
+    emit_progress(ProgressEvent(kind="phase", text=text, framework_id=framework_id))
 
 
 def emit_req_status(

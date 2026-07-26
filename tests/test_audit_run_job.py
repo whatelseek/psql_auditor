@@ -151,9 +151,7 @@ async def test_full_restart_creates_new_run(tmp_path: Path):
         patch.object(
             graph,
             "_merge_multi_reports",
-            new=AsyncMock(
-                return_value={"report": "merged", "awaiting_hitl": False}
-            ),
+            new=AsyncMock(return_value={"report": "merged", "awaiting_hitl": False}),
         ),
     ):
         await graph._run_framework_jobs(
@@ -198,14 +196,10 @@ async def test_attempt_numbers_increase(tmp_path: Path):
         new_attempt=False,
     )
     registry.fail_job(j1.job_id, RuntimeError("x"))
-    j2 = registry.retry_job(
-        audit_run_id=run.audit_run_id, logical_task_id="h1/fw1"
-    )
+    j2 = registry.retry_job(audit_run_id=run.audit_run_id, logical_task_id="h1/fw1")
     assert j2.attempt == 2
     registry.fail_job(j2.job_id, RuntimeError("y"))
-    j3 = registry.retry_job(
-        audit_run_id=run.audit_run_id, logical_task_id="h1/fw1"
-    )
+    j3 = registry.retry_job(audit_run_id=run.audit_run_id, logical_task_id="h1/fw1")
     assert j3.attempt == 3
     assert j1.audit_run_id == j2.audit_run_id == j3.audit_run_id
 
@@ -236,9 +230,7 @@ async def test_concurrent_runs_do_not_mix_jobs(tmp_path: Path):
         patch.object(
             graph,
             "_merge_multi_reports",
-            new=AsyncMock(
-                return_value={"report": "merged", "awaiting_hitl": False}
-            ),
+            new=AsyncMock(return_value={"report": "merged", "awaiting_hitl": False}),
         ),
     ):
         await asyncio.gather(
@@ -277,9 +269,7 @@ def test_run_cannot_complete_while_mandatory_unfinished(tmp_path: Path):
     registry = get_audit_registry(tmp_path)
     run = registry.create_run(client_id="acme")
     registry.mark_run_started(run.audit_run_id)
-    job = registry.create_job(
-        audit_run_id=run.audit_run_id, logical_task_id="fw1"
-    )
+    job = registry.create_job(audit_run_id=run.audit_run_id, logical_task_id="fw1")
     registry.transition_job(job.job_id, AuditJobStatus.RUNNING)
 
     with pytest.raises(InvalidStatusTransition):
@@ -296,19 +286,14 @@ def test_run_cannot_complete_while_mandatory_unfinished(tmp_path: Path):
     # Optional failure → PARTIAL terminal is allowed when mandatory OK.
     run2 = registry.create_run(client_id="acme2")
     registry.mark_run_started(run2.audit_run_id)
-    mand = registry.create_job(
-        audit_run_id=run2.audit_run_id, logical_task_id="m1", mandatory=True
-    )
-    opt = registry.create_job(
-        audit_run_id=run2.audit_run_id, logical_task_id="o1", mandatory=False
-    )
+    mand = registry.create_job(audit_run_id=run2.audit_run_id, logical_task_id="m1", mandatory=True)
+    opt = registry.create_job(audit_run_id=run2.audit_run_id, logical_task_id="o1", mandatory=False)
     registry.transition_job(mand.job_id, AuditJobStatus.RUNNING)
     registry.complete_job(mand.job_id)
     registry.transition_job(opt.job_id, AuditJobStatus.RUNNING)
     registry.fail_job(opt.job_id, RuntimeError("optional"))
     assert (
-        resolve_terminal_run_status(registry.list_jobs(run2.audit_run_id))
-        == AuditRunStatus.PARTIAL
+        resolve_terminal_run_status(registry.list_jobs(run2.audit_run_id)) == AuditRunStatus.PARTIAL
     )
     finalized = registry.finalize_run(run2.audit_run_id)
     assert finalized.status == AuditRunStatus.PARTIAL
@@ -321,9 +306,7 @@ def test_cancel_and_resume_preserve_audit_run_id(tmp_path: Path):
     registry = get_audit_registry(tmp_path)
     run = registry.create_run(client_id="acme", evidence_run_id="ev-c")
     registry.mark_run_started(run.audit_run_id)
-    job = registry.create_job(
-        audit_run_id=run.audit_run_id, logical_task_id="fw1"
-    )
+    job = registry.create_job(audit_run_id=run.audit_run_id, logical_task_id="fw1")
     registry.transition_job(job.job_id, AuditJobStatus.RUNNING)
 
     cancelled = graph.cancel_audit_run(run.audit_run_id)
@@ -339,17 +322,11 @@ def test_cancel_and_resume_preserve_audit_run_id(tmp_path: Path):
 def test_invalid_status_transitions_rejected():
     """Illegal run/job transitions raise InvalidStatusTransition."""
     with pytest.raises(InvalidStatusTransition):
-        validate_run_transition(
-            AuditRunStatus.COMPLETED, AuditRunStatus.RUNNING
-        )
+        validate_run_transition(AuditRunStatus.COMPLETED, AuditRunStatus.RUNNING)
     with pytest.raises(InvalidStatusTransition):
-        validate_job_transition(
-            AuditJobStatus.COMPLETED, AuditJobStatus.FAILED
-        )
+        validate_job_transition(AuditJobStatus.COMPLETED, AuditJobStatus.FAILED)
     with pytest.raises(InvalidStatusTransition):
-        validate_job_transition(
-            AuditJobStatus.PENDING, AuditJobStatus.COMPLETED
-        )
+        validate_job_transition(AuditJobStatus.PENDING, AuditJobStatus.COMPLETED)
 
 
 @pytest.mark.asyncio

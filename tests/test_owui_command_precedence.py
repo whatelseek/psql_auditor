@@ -19,9 +19,7 @@ async def test_list_sessions_wins_over_stale_intake_marker(monkeypatch):
     settings = MagicMock()
     settings.agents_dir = "agents"
     settings.adhoc_commands_enabled = True
-    monkeypatch.setattr(
-        "auditor.api.openai_compat.get_settings", lambda: settings
-    )
+    monkeypatch.setattr("auditor.api.openai_compat.get_settings", lambda: settings)
 
     body = ChatCompletionRequest(
         messages=[
@@ -53,9 +51,7 @@ async def test_plain_intake_answer_still_resumes(monkeypatch):
     settings = MagicMock()
     settings.agents_dir = "agents"
     settings.adhoc_commands_enabled = True
-    monkeypatch.setattr(
-        "auditor.api.openai_compat.get_settings", lambda: settings
-    )
+    monkeypatch.setattr("auditor.api.openai_compat.get_settings", lambda: settings)
 
     body = ChatCompletionRequest(
         messages=[

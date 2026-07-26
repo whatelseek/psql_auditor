@@ -13,15 +13,11 @@ def test_route_after_assess_cycles_when_retries_remain():
     )
     graph = AuditorGraph(settings=settings)
     assert (
-        graph.route_after_assess(
-            {"pending_ids": ["REQ-001"], "retry_count": 0}
-        )
+        graph.route_after_assess({"pending_ids": ["REQ-001"], "retry_count": 0})
         == "reconnect_session"
     )
     assert (
-        graph.route_after_assess(
-            {"pending_ids": ["REQ-001"], "retry_count": 2, "findings": {}}
-        )
+        graph.route_after_assess({"pending_ids": ["REQ-001"], "retry_count": 2, "findings": {}})
         == "finalize"
     )
     assert (

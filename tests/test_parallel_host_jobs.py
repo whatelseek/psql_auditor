@@ -97,8 +97,7 @@ async def test_schedule_respects_host_lock_and_concurrency():
             "_merge_multi_reports",
             new=AsyncMock(
                 side_effect=lambda completed, **_k: {
-                    "report": "merged:"
-                    + ",".join(c[0] for c in completed),
+                    "report": "merged:" + ",".join(c[0] for c in completed),
                     "awaiting_hitl": False,
                 }
             ),
@@ -181,9 +180,7 @@ async def test_schedule_hitl_drains_inflight_and_keeps_remaining():
     assert tid.endswith("host-a:fw1") or "host-a" in tid
     session = graph._multi_sessions.get(tid)
     assert session is not None
-    remaining_keys = [
-        graph._job_dict_key(j) for j in (session.get("remaining_jobs") or [])
-    ]
+    remaining_keys = [graph._job_dict_key(j) for j in (session.get("remaining_jobs") or [])]
     assert remaining_keys == ["host-c/fw1"]
     # Peer host-b completed during drain
     completed_keys = [c[0] for c in (session.get("completed") or [])]

@@ -24,28 +24,28 @@ from typing import Any
 class HostFacts:
     """Normalized snapshot of a target host's identity and software footprint.
 
-  Populated by LLM structured output (:func:`parse_host_facts_json`) and/or
-  deterministic parsers in :func:`merge_facts_from_raw`. Stored in evidence
-  artifacts and used for framework ``detect`` matching.
+    Populated by LLM structured output (:func:`parse_host_facts_json`) and/or
+    deterministic parsers in :func:`merge_facts_from_raw`. Stored in evidence
+    artifacts and used for framework ``detect`` matching.
 
-  Attributes:
-      hostname: Resolved static hostname.
-      ips: Non-loopback IPv4 addresses observed on the host.
-      disk: Short disk usage excerpt (``df``-style).
-      ram: Memory summary lines.
-      cpu: CPU model / core count excerpt.
-      os_id: Lowercase OS id from ``/etc/os-release`` (e.g. ``ubuntu``).
-      os_version_id: OS version id when available.
-      os_pretty_name: Human-readable OS name.
-      binaries: Command names found on PATH (lowercase).
-      packages: Installed package names relevant to framework selection.
-      key_files: Existing paths that signal OS/DB/app stacks.
-      listening_ports: TCP ports in LISTEN state.
-      raw: Map of semantic tool keys → raw stdout blobs.
-      collected_at: ISO-8601 UTC timestamp when facts were assembled.
-      error: First SSH or probe error message, if any.
-      ssh_host: Configured SSH target string for context.
-  """
+    Attributes:
+        hostname: Resolved static hostname.
+        ips: Non-loopback IPv4 addresses observed on the host.
+        disk: Short disk usage excerpt (``df``-style).
+        ram: Memory summary lines.
+        cpu: CPU model / core count excerpt.
+        os_id: Lowercase OS id from ``/etc/os-release`` (e.g. ``ubuntu``).
+        os_version_id: OS version id when available.
+        os_pretty_name: Human-readable OS name.
+        binaries: Command names found on PATH (lowercase).
+        packages: Installed package names relevant to framework selection.
+        key_files: Existing paths that signal OS/DB/app stacks.
+        listening_ports: TCP ports in LISTEN state.
+        raw: Map of semantic tool keys → raw stdout blobs.
+        collected_at: ISO-8601 UTC timestamp when facts were assembled.
+        error: First SSH or probe error message, if any.
+        ssh_host: Configured SSH target string for context.
+    """
 
     hostname: str = ""
     ips: list[str] = field(default_factory=list)
@@ -69,12 +69,12 @@ class HostFacts:
 class DriftItem:
     """One optional drift comparison row (legacy host_facts JSON compatibility).
 
-  Attributes:
-      field: Compared attribute name (``hostname``, ``ip``, ``device``, …).
-      expected: Value from CMDB or a placeholder when missing.
-      observed: Value gathered from the live host.
-      status: ``match``, ``mismatch``, ``missing_cmdb``, or ``missing_host``.
-  """
+    Attributes:
+        field: Compared attribute name (``hostname``, ``ip``, ``device``, …).
+        expected: Value from CMDB or a placeholder when missing.
+        observed: Value gathered from the live host.
+        status: ``match``, ``mismatch``, ``missing_cmdb``, or ``missing_host``.
+    """
 
     field: str
     expected: str
@@ -85,12 +85,12 @@ class DriftItem:
 def _first_line(text: str) -> str:
     """Return the first non-empty line, skipping ``exit_code`` noise.
 
-  Args:
-      text: Multi-line command stdout.
+    Args:
+        text: Multi-line command stdout.
 
-  Returns:
-      First meaningful line, or empty string when none found.
-  """
+    Returns:
+        First meaningful line, or empty string when none found.
+    """
     for line in (text or "").splitlines():
         line = line.strip()
         if line and not line.lower().startswith("exit_code"):
@@ -101,15 +101,15 @@ def _first_line(text: str) -> str:
 def parse_hostname(stdout: str) -> str:
     """Extract hostname from ``hostname`` or ``hostnamectl`` output.
 
-  Prefers ``Static hostname`` / ``hostname:`` lines from hostnamectl; falls
-  back to :func:`_first_line`.
+    Prefers ``Static hostname`` / ``hostname:`` lines from hostnamectl; falls
+    back to :func:`_first_line`.
 
-  Args:
-      stdout: Raw command output.
+    Args:
+        stdout: Raw command output.
 
-  Returns:
-      Hostname string, or empty when unparseable.
-  """
+    Returns:
+        Hostname string, or empty when unparseable.
+    """
     # Prefer hostnamectl Static hostname / Pretty, else first non-empty line
     for line in (stdout or "").splitlines():
         if "static hostname" in line.lower() or "static hostname:" in line.lower():
@@ -122,15 +122,15 @@ def parse_hostname(stdout: str) -> str:
 def parse_ips(stdout: str) -> list[str]:
     """Extract non-loopback IPv4 addresses from command output.
 
-  Scans for dotted-quad patterns and skips ``127.*`` addresses. Preserves
-  first-seen order without duplicates.
+    Scans for dotted-quad patterns and skips ``127.*`` addresses. Preserves
+    first-seen order without duplicates.
 
-  Args:
-      stdout: Text from ``ip addr``, ``ifconfig``, or similar probes.
+    Args:
+        stdout: Text from ``ip addr``, ``ifconfig``, or similar probes.
 
-  Returns:
-      List of IPv4 strings.
-  """
+    Returns:
+        List of IPv4 strings.
+    """
     found: list[str] = []
     for match in re.finditer(
         r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}"
@@ -148,12 +148,12 @@ def parse_ips(stdout: str) -> list[str]:
 def parse_os_release(stdout: str) -> tuple[str, str, str]:
     """Parse ``/etc/os-release`` or Windows probe output into OS fields.
 
-  Args:
-      stdout: Contents of os-release or a Windows environment probe.
+    Args:
+        stdout: Contents of os-release or a Windows environment probe.
 
-  Returns:
-      Tuple ``(id, version_id, pretty_name)`` with lowercase ``id`` when known.
-  """
+    Returns:
+        Tuple ``(id, version_id, pretty_name)`` with lowercase ``id`` when known.
+    """
     data: dict[str, str] = {}
     for line in (stdout or "").splitlines():
         line = line.strip()
@@ -175,15 +175,15 @@ def parse_os_release(stdout: str) -> tuple[str, str, str]:
 def parse_binaries_present(stdout: str) -> list[str]:
     """Parse ``command -v`` / ``which`` probe lines of the form ``name=/path``.
 
-  Ignores lines where the path is missing or ``not found``. Skips internal
-  keys like ``exit_code``.
+    Ignores lines where the path is missing or ``not found``. Skips internal
+    keys like ``exit_code``.
 
-  Args:
-      stdout: Multi-line probe output.
+    Args:
+        stdout: Multi-line probe output.
 
-  Returns:
-      Lowercase binary names found on PATH, in first-seen order.
-  """
+    Returns:
+        Lowercase binary names found on PATH, in first-seen order.
+    """
     skip = {"exit_code", "stdout", "stderr"}
     found: list[str] = []
     for line in (stdout or "").splitlines():
@@ -204,15 +204,15 @@ def parse_binaries_present(stdout: str) -> list[str]:
 def parse_listening_ports(stdout: str) -> list[int]:
     """Extract listening TCP ports from ``ss`` or ``netstat`` style output.
 
-  Collects port numbers after colons in address:port tokens. Valid range is
-  1–65535; duplicates are omitted.
+    Collects port numbers after colons in address:port tokens. Valid range is
+    1–65535; duplicates are omitted.
 
-  Args:
-      stdout: Socket listing command output.
+    Args:
+        stdout: Socket listing command output.
 
-  Returns:
-      Sorted list is **not** guaranteed; order follows first occurrence in text.
-  """
+    Returns:
+        Sorted list is **not** guaranteed; order follows first occurrence in text.
+    """
     ports: list[int] = []
     for match in re.finditer(r":(\d{1,5})\b", stdout or ""):
         try:
@@ -232,17 +232,17 @@ def parse_host_facts_json(
 ) -> HostFacts:
     """Build :class:`HostFacts` from an LLM-produced JSON object.
 
-  Coerces list-like fields from strings when needed (comma/space separated IPs
-  and binaries). Sets ``collected_at`` to the current UTC time.
+    Coerces list-like fields from strings when needed (comma/space separated IPs
+    and binaries). Sets ``collected_at`` to the current UTC time.
 
-  Args:
-      payload: Dict from structured LLM output; non-dicts yield empty facts.
-      ssh_host: SSH target label to store on the facts record.
-      raw: Optional map of tool keys → stdout for later :func:`merge_facts_from_raw`.
+    Args:
+        payload: Dict from structured LLM output; non-dicts yield empty facts.
+        ssh_host: SSH target label to store on the facts record.
+        raw: Optional map of tool keys → stdout for later :func:`merge_facts_from_raw`.
 
-  Returns:
-      Populated :class:`HostFacts` (fields may still be empty).
-  """
+    Returns:
+        Populated :class:`HostFacts` (fields may still be empty).
+    """
     data = payload if isinstance(payload, dict) else {}
     ips_raw = data.get("ips") or []
     if isinstance(ips_raw, str):
@@ -252,31 +252,19 @@ def parse_host_facts_json(
 
     binaries_raw = data.get("binaries") or []
     if isinstance(binaries_raw, str):
-        binaries = [
-            p.strip().lower()
-            for p in re.split(r"[\s,;]+", binaries_raw)
-            if p.strip()
-        ]
+        binaries = [p.strip().lower() for p in re.split(r"[\s,;]+", binaries_raw) if p.strip()]
     else:
         binaries = [str(b).strip().lower() for b in binaries_raw if str(b).strip()]
 
     packages_raw = data.get("packages") or []
     if isinstance(packages_raw, str):
-        packages = [
-            p.strip()
-            for p in re.split(r"[\s,;]+", packages_raw)
-            if p.strip()
-        ]
+        packages = [p.strip() for p in re.split(r"[\s,;]+", packages_raw) if p.strip()]
     else:
         packages = [str(p).strip() for p in packages_raw if str(p).strip()]
 
     files_raw = data.get("key_files") or data.get("files") or []
     if isinstance(files_raw, str):
-        key_files = [
-            p.strip()
-            for p in re.split(r"[\s,;]+", files_raw)
-            if p.strip()
-        ]
+        key_files = [p.strip() for p in re.split(r"[\s,;]+", files_raw) if p.strip()]
     else:
         key_files = [str(p).strip() for p in files_raw if str(p).strip()]
 
@@ -316,27 +304,25 @@ def parse_host_facts_json(
 def merge_facts_from_raw(facts: HostFacts, raw: dict[str, str] | None = None) -> HostFacts:
     """Fill empty :class:`HostFacts` fields using deterministic parsers on tool stdout.
 
-  Used when the LLM fill JSON is incomplete. ``raw`` keys may be semantic
-  (``hostname``, ``os``, …) or opaque (``tool_1``, …); for opaque blobs the
-  full concatenated text is also scanned.
+    Used when the LLM fill JSON is incomplete. ``raw`` keys may be semantic
+    (``hostname``, ``os``, …) or opaque (``tool_1``, …); for opaque blobs the
+    full concatenated text is also scanned.
 
-  Mutates and returns the same ``facts`` instance for chaining.
+    Mutates and returns the same ``facts`` instance for chaining.
 
-  Args:
-      facts: Partial facts object to enrich in place.
-      raw: Optional stdout map; defaults to ``facts.raw``.
+    Args:
+        facts: Partial facts object to enrich in place.
+        raw: Optional stdout map; defaults to ``facts.raw``.
 
-  Returns:
-      The same ``facts`` object with empty fields filled where possible.
-  """
+    Returns:
+        The same ``facts`` object with empty fields filled where possible.
+    """
     blob_map = dict(raw or facts.raw or {})
     facts.raw = blob_map
     combined = "\n".join(str(v) for v in blob_map.values() if v)
 
     if not facts.hostname:
-        facts.hostname = parse_hostname(
-            blob_map.get("hostname", "") or combined
-        )
+        facts.hostname = parse_hostname(blob_map.get("hostname", "") or combined)
     if not facts.ips:
         facts.ips = parse_ips(blob_map.get("ips", "") or combined)
 
@@ -353,13 +339,9 @@ def merge_facts_from_raw(facts: HostFacts, raw: dict[str, str] | None = None) ->
             facts.os_pretty_name = os_pretty
 
     if not facts.binaries:
-        facts.binaries = parse_binaries_present(
-            blob_map.get("binaries", "") or combined
-        )
+        facts.binaries = parse_binaries_present(blob_map.get("binaries", "") or combined)
     if not facts.listening_ports:
-        facts.listening_ports = parse_listening_ports(
-            blob_map.get("ports", "") or combined
-        )
+        facts.listening_ports = parse_listening_ports(blob_map.get("ports", "") or combined)
 
     if not facts.disk and blob_map.get("disk"):
         facts.disk = blob_map["disk"].strip()
@@ -416,33 +398,32 @@ def merge_facts_from_raw(facts: HostFacts, raw: dict[str, str] | None = None) ->
     return facts
 
 
-
 def facts_to_dict(facts: HostFacts) -> dict[str, Any]:
     """Serialize :class:`HostFacts` to a plain dict via :func:`dataclasses.asdict`.
 
-  Args:
-      facts: Host facts dataclass instance.
+    Args:
+        facts: Host facts dataclass instance.
 
-  Returns:
-      JSON-serializable mapping of all fields.
-  """
+    Returns:
+        JSON-serializable mapping of all fields.
+    """
     return asdict(facts)
 
 
 def write_host_facts_json(path: Path, facts: HostFacts, drift: list[DriftItem]) -> Path:
     """Write host facts (and optional empty drift list) to a JSON artifact file.
 
-  Creates parent directories as needed. Payload includes ``written_at`` UTC
-  timestamp metadata.
+    Creates parent directories as needed. Payload includes ``written_at`` UTC
+    timestamp metadata.
 
-  Args:
-      path: Destination ``.json`` file path.
-      facts: Host facts to persist.
-      drift: Optional drift rows (usually empty; kept for artifact shape).
+    Args:
+        path: Destination ``.json`` file path.
+        facts: Host facts to persist.
+        drift: Optional drift rows (usually empty; kept for artifact shape).
 
-  Returns:
-      The same ``path`` after writing.
-  """
+    Returns:
+        The same ``path`` after writing.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "facts": facts_to_dict(facts),
@@ -461,17 +442,17 @@ def format_host_facts_markdown(
 ) -> str:
     """Render host facts as Markdown for graph state.
 
-  Produces a section suitable for ``AuditorState.host_facts_md`` with hostname,
-  OS, network, binaries, ports, resource excerpts, and an optional drift table.
+    Produces a section suitable for ``AuditorState.host_facts_md`` with hostname,
+    OS, network, binaries, ports, resource excerpts, and an optional drift table.
 
-  Args:
-      facts: Host facts to display.
-      drift: Optional legacy drift rows (usually unused).
-      language: ``"ru"`` prefix selects Russian section headings; else English.
+    Args:
+        facts: Host facts to display.
+        drift: Optional legacy drift rows (usually unused).
+        language: ``"ru"`` prefix selects Russian section headings; else English.
 
-  Returns:
-      Markdown string (no trailing file newline required by caller).
-  """
+    Returns:
+        Markdown string (no trailing file newline required by caller).
+    """
     ru = language.startswith("ru")
     lines = [
         "## " + ("Факты о хосте" if ru else "Host facts"),
@@ -490,15 +471,11 @@ def format_host_facts_markdown(
             f"- **Binaries:** {', '.join(facts.binaries) if facts.binaries else '—'}",
             f"- **Packages:** {', '.join(facts.packages) if facts.packages else '—'}",
             f"- **Key files:** {', '.join(facts.key_files) if facts.key_files else '—'}",
-            f"- **Listening ports:** "
-            + (
-                ", ".join(str(p) for p in facts.listening_ports)
-                if facts.listening_ports
-                else "—"
-            ),
+            "- **Listening ports:** "
+            + (", ".join(str(p) for p in facts.listening_ports) if facts.listening_ports else "—"),
             f"- **CPU:** {facts.cpu or '—'}",
             f"- **RAM:** {facts.ram or '—'}",
-            f"- **Disk:**",
+            "- **Disk:**",
             "",
             "```",
             (facts.disk or "—")[:4000],
@@ -508,14 +485,14 @@ def format_host_facts_markdown(
     )
     if drift:
         title = "Расхождения с inventory" if ru else "Inventory drift"
-        lines.extend([f"## {title}", "", "| Field | Expected | Observed | Status |", "|---|---|---|---|"])
+        lines.extend(
+            [f"## {title}", "", "| Field | Expected | Observed | Status |", "|---|---|---|---|"]
+        )
         for item in drift:
             mark = item.status
             if item.status == "mismatch":
                 mark = f"**{item.status}**"
-            lines.append(
-                f"| {item.field} | {item.expected} | {item.observed} | {mark} |"
-            )
+            lines.append(f"| {item.field} | {item.expected} | {item.observed} | {mark} |")
         lines.append("")
     return "\n".join(lines)
 
@@ -530,20 +507,20 @@ def upsert_inventory_md(
 ) -> Path:
     """Create or refresh ``INVENTORY.md`` for a client when CMDB is absent.
 
-  Preserves an existing ``## Credentials`` / ``## Credentials & access`` section
-  so operator secrets are not wiped on host-facts refresh. Overwrites scope,
-  reachable-services table, and host sections with current data.
+    Preserves an existing ``## Credentials`` / ``## Credentials & access`` section
+    so operator secrets are not wiped on host-facts refresh. Overwrites scope,
+    reachable-services table, and host sections with current data.
 
-  Args:
-      inventory_path: Full path to ``INVENTORY.md``.
-      client_name: Display name for the document title.
-      facts: Optional host facts for the Host section.
-      scope_text: Audit scope prose for the Scope section.
-      reachable_services: Optional rows from :func:`probe_access_services`.
+    Args:
+        inventory_path: Full path to ``INVENTORY.md``.
+        client_name: Display name for the document title.
+        facts: Optional host facts for the Host section.
+        scope_text: Audit scope prose for the Scope section.
+        reachable_services: Optional rows from :func:`probe_access_services`.
 
-  Returns:
-      The same ``inventory_path`` after writing.
-  """
+    Returns:
+        The same ``inventory_path`` after writing.
+    """
     inventory_path.parent.mkdir(parents=True, exist_ok=True)
     creds_block = ""
     if inventory_path.is_file():
@@ -575,7 +552,9 @@ def upsert_inventory_md(
         ]
     )
     if reachable_services:
-        lines.extend(["## Reachable services", "", "| Service | Status | Detail |", "|---|---|---|"])
+        lines.extend(
+            ["## Reachable services", "", "| Service | Status | Detail |", "|---|---|---|"]
+        )
         for svc in reachable_services:
             lines.append(
                 f"| {svc.get('name')} | {svc.get('status')} | {svc.get('detail') or '—'} |"
@@ -614,19 +593,19 @@ def resolve_client_dir(
 ) -> Path:
     """Resolve ``inventory/<client>/`` with case-insensitive folder matching.
 
-  Prefer an existing directory whose name matches the slug ignoring case
-  (e.g. ``TestCompany`` for slug ``testcompany``). When several case variants
-  exist, prefer ``display_name`` casing, then mixed-case over all-lowercase.
-  Otherwise return the path for ``display_name`` (sanitized) or the slug.
+    Prefer an existing directory whose name matches the slug ignoring case
+    (e.g. ``TestCompany`` for slug ``testcompany``). When several case variants
+    exist, prefer ``display_name`` casing, then mixed-case over all-lowercase.
+    Otherwise return the path for ``display_name`` (sanitized) or the slug.
 
-  Args:
-      inventory_dir: Root ``inventory/`` directory.
-      client_slug_name: Artifact-safe client slug.
-      display_name: Optional human name used for preferred folder casing.
+    Args:
+        inventory_dir: Root ``inventory/`` directory.
+        client_slug_name: Artifact-safe client slug.
+        display_name: Optional human name used for preferred folder casing.
 
-  Returns:
-      Resolved client directory path (may not exist yet).
-  """
+    Returns:
+        Resolved client directory path (may not exist yet).
+    """
     from auditor.evidence_store import client_artifacts_id
 
     inventory_dir = Path(inventory_dir)
@@ -634,9 +613,7 @@ def resolve_client_dir(
     if not slug and not display_name:
         return inventory_dir / "client"
 
-    preferred_name = (
-        client_artifacts_id(display_name) if display_name else (slug or "client")
-    )
+    preferred_name = client_artifacts_id(display_name) if display_name else (slug or "client")
     if inventory_dir.is_dir():
         lower = (slug or preferred_name).lower()
         matches = [
@@ -668,17 +645,17 @@ def resolve_client_inventory(
 ) -> tuple[Path | None, str, bool]:
     """Locate ``inventory/<client>/INVENTORY.md`` before asking about access.
 
-  Creates the client directory when the file is missing but returns
-  ``found=False`` with guidance text for the operator.
+    Creates the client directory when the file is missing but returns
+    ``found=False`` with guidance text for the operator.
 
-  Args:
-      inventory_dir: Root ``inventory/`` directory.
-      client_slug_name: Client slug used to resolve the subdirectory.
+    Args:
+        inventory_dir: Root ``inventory/`` directory.
+        client_slug_name: Client slug used to resolve the subdirectory.
 
-  Returns:
-      Tuple ``(path, content_or_message, found)``. Does **not** fall back to the
-      example template — that file is documentation only.
-  """
+    Returns:
+        Tuple ``(path, content_or_message, found)``. Does **not** fall back to the
+        example template — that file is documentation only.
+    """
     inventory_dir = Path(inventory_dir)
     slug = (client_slug_name or "").strip()
     if not slug:
@@ -702,4 +679,3 @@ def resolve_client_inventory(
         ),
         False,
     )
-

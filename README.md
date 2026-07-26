@@ -28,7 +28,7 @@ description: Ubuntu CIS host hardening
 
 No code changes required — new files are discovered from `AGENTS_DIR`.
 
-Bundled examples: `postgres_cis`, `ubuntu_cis_24_l2`, `it_audit`.
+Bundled examples: `postgres_cis`, `ubuntu_cis_24_l2`, `host_facts`.
 
 ## Graph (cyclic + HITL)
 
@@ -240,8 +240,9 @@ MCP architecture: [`docs/langchain-mcp.md`](docs/langchain-mcp.md) · add server
 
 ## Development
 
-Reproducible install and canonical checks (CORE-000): see
-[`docs/baseline.md`](docs/baseline.md).
+Canonical local/CI quality gates (AUD-002). Historical CORE-000 numbers live in
+[`docs/baseline.md`](docs/baseline.md); developer commands are also summarized in
+[`docs/quality-gates.md`](docs/quality-gates.md).
 
 ```bash
 python3 -m venv .venv
@@ -249,10 +250,18 @@ python3 -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -e '.[dev]' -c constraints.txt
 
-make test-unit          # unit tests
-make test-integration   # integration markers (none yet)
-make test               # full suite
-make format-check lint typecheck
-make check              # all gates
-make baseline-compare   # fail only on new test regressions
+# Optional / required for integration + full suite:
+export AUDITOR_TEST_DATABASE_URL='postgresql://aud002:aud002_ci_secret@127.0.0.1:5432/postgres'
+
+make format             # may modify files
+make format-check       # non-destructive
+make lint
+make typecheck
+make test-unit          # fails if zero tests collected
+make test-integration   # isolated PostgreSQL; fails if zero collected
+make test               # full suite; fails if zero collected
+make check              # all mandatory gates
 ```
+
+Mandatory CI jobs invoke the same Make targets. Optional real-provider LLM tests
+require `AUDITOR_ALLOW_EXTERNAL_LLM=1` and are not part of PR CI.

@@ -5,8 +5,6 @@ from pathlib import Path
 from auditor.host_facts import (
     HostFacts,
     parse_binaries_present,
-    parse_hostname,
-    parse_ips,
     parse_listening_ports,
     parse_os_release,
     upsert_inventory_md,
@@ -80,7 +78,9 @@ def test_parse_os_and_software():
     assert os_id == "ubuntu"
     assert ver == "22.04"
     assert "Ubuntu" in pretty
-    assert parse_binaries_present("postgres=/usr/bin/postgres\npsql=\ndocker=/usr/bin/docker\n") == [
+    assert parse_binaries_present(
+        "postgres=/usr/bin/postgres\npsql=\ndocker=/usr/bin/docker\n"
+    ) == [
         "postgres",
         "docker",
     ]

@@ -97,26 +97,26 @@ def merge_findings(
 class AuditorState(TypedDict, total=False):
     """Shared state for one audit graph run.
 
-  All keys are optional at construction time; nodes populate them as the graph
-  progresses from intake through assessment to finalize. Message history uses
-  LangGraph's ``add_messages`` reducer; findings use :func:`merge_findings`.
+    All keys are optional at construction time; nodes populate them as the graph
+    progresses from intake through assessment to finalize. Message history uses
+    LangGraph's ``add_messages`` reducer; findings use :func:`merge_findings`.
 
-  Key fields:
-      messages: Chat history for the current graph thread.
-      user_request: Original operator prompt.
-      report_language: ``en`` or ``ru`` from language detection.
-      framework_id / framework_title / checklist_title: Active framework metadata.
-      requirements: Parsed checklist map keyed by ``REQ-NNN``.
-      pending_ids / current_id: Assessment queue cursor.
-      findings: Model-filled cells keyed by ``result_id`` (not requirement_id).
-      report: Final Markdown report string.
-      evidence_run_id / evidence_run_dir: On-disk artifact paths.
-      intake / intake_complete: Pre-audit questionnaire answers.
-      results_session_number: Postgres warehouse session id.
-      audit_run_id / asset_id / client_id / framework_version: CORE-003 identity.
-      host_facts_md / cmdb_drift_md: Host inventory snapshots.
-      archive_path / archive_url: Zip bundle for chat download.
-  """
+    Key fields:
+        messages: Chat history for the current graph thread.
+        user_request: Original operator prompt.
+        report_language: ``en`` or ``ru`` from language detection.
+        framework_id / framework_title / checklist_title: Active framework metadata.
+        requirements: Parsed checklist map keyed by ``REQ-NNN``.
+        pending_ids / current_id: Assessment queue cursor.
+        findings: Model-filled cells keyed by ``result_id`` (not requirement_id).
+        report: Final Markdown report string.
+        evidence_run_id / evidence_run_dir: On-disk artifact paths.
+        intake / intake_complete: Pre-audit questionnaire answers.
+        results_session_number: Postgres warehouse session id.
+        audit_run_id / asset_id / client_id / framework_version: CORE-003 identity.
+        host_facts_md / cmdb_drift_md: Host inventory snapshots.
+        archive_path / archive_url: Zip bundle for chat download.
+    """
 
     messages: Annotated[list[BaseMessage], add_messages]
     user_request: str
@@ -167,15 +167,15 @@ class AuditorState(TypedDict, total=False):
 def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:
     """Count findings by status for the report summary line.
 
-  Accepts either :class:`Finding` instances or dict-like objects with a
-  ``status`` key (for deserialized state).
+    Accepts either :class:`Finding` instances or dict-like objects with a
+    ``status`` key (for deserialized state).
 
-  Args:
-      findings: Map of ``result_id`` (or any key) → finding record.
+    Args:
+        findings: Map of ``result_id`` (or any key) → finding record.
 
-  Returns:
-      Dict with keys ``pass``, ``fail``, ``partial``, ``error``, ``skipped``.
-  """
+    Returns:
+        Dict with keys ``pass``, ``fail``, ``partial``, ``error``, ``skipped``.
+    """
     counts: dict[str, int] = {
         "pass": 0,
         "fail": 0,
@@ -192,15 +192,15 @@ def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:
 def _md_escape_cell(text: str) -> str:
     """Flatten text for a single Markdown table cell.
 
-  Replaces pipe characters (which would break tables), collapses whitespace,
-  and strips leading/trailing space.
+    Replaces pipe characters (which would break tables), collapses whitespace,
+    and strips leading/trailing space.
 
-  Args:
-      text: Raw cell content.
+    Args:
+        text: Raw cell content.
 
-  Returns:
-      Single-line safe string for pipe-delimited tables.
-  """
+    Returns:
+        Single-line safe string for pipe-delimited tables.
+    """
     return " ".join((text or "").replace("|", "/").split())
 
 
@@ -243,9 +243,7 @@ def render_report(
         matched = finding_for_requirement(findings, req_id)
         if matched is not None:
             effective[req_id] = (
-                matched
-                if isinstance(matched, Finding)
-                else Finding.model_validate(matched)
+                matched if isinstance(matched, Finding) else Finding.model_validate(matched)
             )
         elif requirements and req_id in requirements:
             req = requirements[req_id]
@@ -293,9 +291,9 @@ def render_report(
         f = effective.get(req_id)
         if f is None:
             continue
-        req = requirements.get(req_id) if requirements else None
-        title = f.title or (req.title if req else "")
-        severity = f.severity or (req.severity if req else "")
+        req_meta = requirements.get(req_id) if requirements else None
+        title = f.title or (req_meta.title if req_meta else "")
+        severity = f.severity or (req_meta.severity if req_meta else "")
         lines.append(
             "| "
             + " | ".join(
@@ -317,12 +315,12 @@ def render_report(
         f = effective.get(req_id)
         if f is None:
             continue
-        req = requirements.get(req_id) if requirements else None
-        title = f.title or (req.title if req else "")
-        category = f.category or (req.category if req else "")
-        severity = f.severity or (req.severity if req else "")
-        pass_criteria = f.pass_criteria or (req.pass_criteria if req else "")
-        how = req.how_to_verify if req else ""
+        req_detail = requirements.get(req_id) if requirements else None
+        title = f.title or (req_detail.title if req_detail else "")
+        category = f.category or (req_detail.category if req_detail else "")
+        severity = f.severity or (req_detail.severity if req_detail else "")
+        pass_criteria = f.pass_criteria or (req_detail.pass_criteria if req_detail else "")
+        how = req_detail.how_to_verify if req_detail else ""
 
         lines.append(f"### {req_id}: {title}")
         lines.append("")
@@ -335,9 +333,7 @@ def render_report(
             lines.append(f"| {ui['how_to_verify']} | {_md_escape_cell(how)} |")
         lines.append(f"| **{ui['status']}** | {f.status} |")
         lines.append(f"| **{ui['observation']}** | {_md_escape_cell(f.evidence)} |")
-        lines.append(
-            f"| **{ui['recommendation']}** | {_md_escape_cell(f.remediation)} |"
-        )
+        lines.append(f"| **{ui['recommendation']}** | {_md_escape_cell(f.remediation)} |")
         lines.append("")
 
     return "\n".join(lines).strip() + "\n"

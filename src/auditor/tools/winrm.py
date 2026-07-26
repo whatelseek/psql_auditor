@@ -91,7 +91,7 @@ async def _read_file(path: str, settings: Settings | None = None) -> str:
     script = (
         f"$p = '{escaped}'; "
         "if (-not (Test-Path -LiteralPath $p)) { "
-        "Write-Error \"missing: $p\"; exit 1 }; "
+        'Write-Error "missing: $p"; exit 1 }; '
         "Get-Content -LiteralPath $p -TotalCount 4000 -ErrorAction Stop"
     )
     return await _run_ps(script, settings=settings)

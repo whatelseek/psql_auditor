@@ -52,9 +52,7 @@ async def test_assess_parallel_runs_workers_and_merges_findings():
         "REQ-003",
     }
     assert all(f.result_id for f in result["findings"].values())
-    assert set(result["findings"]) == {
-        f.result_id for f in result["findings"].values()
-    }
+    assert set(result["findings"]) == {f.result_id for f in result["findings"].values()}
     assert result["pending_ids"] == []
     assert all(f.status == "pass" for f in result["findings"].values())
 
@@ -89,10 +87,7 @@ async def test_assess_parallel_respects_concurrency_limit():
             evidence="ok",
         )
 
-    reqs = {
-        f"REQ-{i:03d}": Requirement(id=f"REQ-{i:03d}", title=str(i))
-        for i in range(1, 6)
-    }
+    reqs = {f"REQ-{i:03d}": Requirement(id=f"REQ-{i:03d}", title=str(i)) for i in range(1, 6)}
     with patch.object(graph, "_fill_requirement_cells", side_effect=fake_assess):
         await graph.assess_parallel(
             {

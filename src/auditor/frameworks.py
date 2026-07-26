@@ -35,16 +35,16 @@ _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n(.*)\Z", re.DOTALL)
 class FrameworkDetect:
     """Host-matching rules from agent frontmatter ``detect:`` block.
 
-  Used by :func:`framework_matches_host` during intake to decide which
-  cybersecurity or IT frameworks apply to the target without explicit operator
-  naming.
+    Used by :func:`framework_matches_host` during intake to decide which
+    cybersecurity or IT frameworks apply to the target without explicit operator
+    naming.
 
-  Attributes:
-      os_ids: ``/etc/os-release`` id prefixes that must match (e.g. ``ubuntu``).
-      binaries: At least one of these command names must be present on the host.
-      ports: At least one listening TCP port must match.
-      always: When ``True``, the framework matches every host in its domain.
-  """
+    Attributes:
+        os_ids: ``/etc/os-release`` id prefixes that must match (e.g. ``ubuntu``).
+        binaries: At least one of these command names must be present on the host.
+        ports: At least one listening TCP port must match.
+        always: When ``True``, the framework matches every host in its domain.
+    """
 
     os_ids: tuple[str, ...] = ()
     binaries: tuple[str, ...] = ()
@@ -56,18 +56,18 @@ class FrameworkDetect:
 class Framework:
     """One drop-in framework discovered from ``agents/*.md``.
 
-  Attributes:
-      id: Stable framework slug (from frontmatter or filename stem).
-      title: Human-readable checklist title.
-      path: Absolute or relative path to the Markdown file.
-      description: Short summary for catalogs and prompts.
-      aliases: Search tokens for :func:`route_framework` scoring.
-      domain: ``it`` or ``cybersecurity`` for intake filtering.
-      detect: Host auto-detection rules parsed from frontmatter.
-      language: Preferred checklist language (``en`` / ``ru`` / ``any``).
-      family_id: Logical family key used to prefer language variants.
-      version: Explicit framework version from frontmatter (required to persist results).
-  """
+    Attributes:
+        id: Stable framework slug (from frontmatter or filename stem).
+        title: Human-readable checklist title.
+        path: Absolute or relative path to the Markdown file.
+        description: Short summary for catalogs and prompts.
+        aliases: Search tokens for :func:`route_framework` scoring.
+        domain: ``it`` or ``cybersecurity`` for intake filtering.
+        detect: Host auto-detection rules parsed from frontmatter.
+        language: Preferred checklist language (``en`` / ``ru`` / ``any``).
+        family_id: Logical family key used to prefer language variants.
+        version: Explicit framework version from frontmatter (required to persist results).
+    """
 
     id: str
     title: str
@@ -97,16 +97,16 @@ def _normalize_framework_language(value: Any) -> str:
 def _default_aliases(stem: str, title: str) -> tuple[str, ...]:
     """Derive search aliases from filename stem and document title.
 
-  Splits the title on whitespace and punctuation and keeps tokens of length ≥ 3.
-  Includes underscore/hyphen variants of the stem for flexible operator matching.
+    Splits the title on whitespace and punctuation and keeps tokens of length ≥ 3.
+    Includes underscore/hyphen variants of the stem for flexible operator matching.
 
-  Args:
-      stem: Filename without extension (e.g. ``postgres_cis``).
-      title: H1 title from the checklist body.
+    Args:
+        stem: Filename without extension (e.g. ``postgres_cis``).
+        title: H1 title from the checklist body.
 
-  Returns:
-      Sorted unique lowercase alias strings.
-  """
+    Returns:
+        Sorted unique lowercase alias strings.
+    """
     parts = {stem.lower(), stem.replace("_", " ").lower(), stem.replace("-", " ").lower()}
     for token in re.split(r"[\s_/.-]+", title.lower()):
         if len(token) >= 3:
@@ -117,15 +117,15 @@ def _default_aliases(stem: str, title: str) -> tuple[str, ...]:
 def _parse_detect(raw: Any) -> FrameworkDetect:
     """Parse a frontmatter ``detect`` mapping into :class:`FrameworkDetect`.
 
-  Accepts comma-separated strings or lists for ``os_ids``, ``binaries``, and
-  ``ports``. Invalid port values are skipped silently.
+    Accepts comma-separated strings or lists for ``os_ids``, ``binaries``, and
+    ``ports``. Invalid port values are skipped silently.
 
-  Args:
-      raw: YAML-loaded value under the ``detect`` key (dict or non-dict).
+    Args:
+        raw: YAML-loaded value under the ``detect`` key (dict or non-dict).
 
-  Returns:
-      Normalized detect rules, or empty rules when ``raw`` is not a dict.
-  """
+    Returns:
+        Normalized detect rules, or empty rules when ``raw`` is not a dict.
+    """
     if not isinstance(raw, dict):
         return FrameworkDetect()
     os_ids_raw = raw.get("os_ids") or raw.get("os") or []
@@ -163,19 +163,19 @@ def _parse_detect(raw: Any) -> FrameworkDetect:
 def _parse_agent_file(path: Path) -> Framework:
     """Parse one ``agents/*.md`` file into a :class:`Framework`.
 
-  Reads optional YAML frontmatter, extracts title from H1 or meta, builds
-  aliases, infers domain, and applies IT-audit defaults when detect rules are
-  absent.
+    Reads optional YAML frontmatter, extracts title from H1 or meta, builds
+    aliases, infers domain, and applies IT-audit defaults when detect rules are
+    absent.
 
-  Args:
-      path: Path to a framework Markdown file.
+    Args:
+        path: Path to a framework Markdown file.
 
-  Returns:
-      Fully populated :class:`Framework` instance.
+    Returns:
+        Fully populated :class:`Framework` instance.
 
-  Raises:
-      OSError: If the file cannot be read (propagated from :meth:`Path.read_text`).
-  """
+    Raises:
+        OSError: If the file cannot be read (propagated from :meth:`Path.read_text`).
+    """
     text = path.read_text(encoding="utf-8")
     meta: dict = {}
     body = text
@@ -219,8 +219,10 @@ def _parse_agent_file(path: Path) -> Framework:
 
     detect = _parse_detect(meta.get("detect"))
     # it_audit defaults to always-on when domain is IT and no detect block
-    if domain == "it" and fw_id == "it_audit" and not (
-        detect.os_ids or detect.binaries or detect.ports or detect.always
+    if (
+        domain == "it"
+        and fw_id == "it_audit"
+        and not (detect.os_ids or detect.binaries or detect.ports or detect.always)
     ):
         detect = FrameworkDetect(always=True)
 
@@ -286,13 +288,13 @@ def get_framework(
 ) -> Framework | None:
     """Look up a discovered framework by id.
 
-  Args:
-      framework_id: Framework slug to match (exact id comparison).
-      agents_dir: Directory to scan; defaults to ``agents``.
+    Args:
+        framework_id: Framework slug to match (exact id comparison).
+        agents_dir: Directory to scan; defaults to ``agents``.
 
-  Returns:
-      The matching :class:`Framework`, or ``None`` if not found.
-  """
+    Returns:
+        The matching :class:`Framework`, or ``None`` if not found.
+    """
     for fw in list_frameworks(agents_dir):
         if fw.id == framework_id:
             return fw
@@ -307,19 +309,19 @@ def _score_frameworks(
 ) -> list[tuple[int, Framework]]:
     """Score every discovered framework against the operator request text.
 
-  Scoring weights: exact id match (+10), alias word-boundary hits (+1–3 by
-  length), title substring (+4). Results are sorted by descending score, then id.
+    Scoring weights: exact id match (+10), alias word-boundary hits (+1–3 by
+    length), title substring (+4). Results are sorted by descending score, then id.
 
-  Args:
-      user_request: Natural-language audit request from chat.
-      agents_dir: Framework directory to scan.
+    Args:
+        user_request: Natural-language audit request from chat.
+        agents_dir: Framework directory to scan.
 
-  Returns:
-      List of ``(score, framework)`` tuples, highest score first.
+    Returns:
+        List of ``(score, framework)`` tuples, highest score first.
 
-  Raises:
-      FileNotFoundError: When ``agents_dir`` contains no ``*.md`` frameworks.
-  """
+    Raises:
+        FileNotFoundError: When ``agents_dir`` contains no ``*.md`` frameworks.
+    """
     frameworks = list_frameworks(agents_dir)
     frameworks = _prefer_language_variants(frameworks, preferred_language)
     if not frameworks:
@@ -358,23 +360,21 @@ def route_framework(
 ) -> Framework:
     """Pick the single best framework for a natural-language audit request.
 
-  When no alias/id scores above zero, falls back to the first framework whose
-  id contains ``postgres``, else the first discovered framework alphabetically.
+    When no alias/id scores above zero, falls back to the first framework whose
+    id contains ``postgres``, else the first discovered framework alphabetically.
 
-  Args:
-      user_request: Operator chat text naming or implying a standard.
-      agents_dir: Framework directory to scan.
+    Args:
+        user_request: Operator chat text naming or implying a standard.
+        agents_dir: Framework directory to scan.
 
-  Returns:
-      The highest-scoring :class:`Framework`.
+    Returns:
+        The highest-scoring :class:`Framework`.
 
-  Raises:
-      FileNotFoundError: When no frameworks exist in ``agents_dir``.
-  """
+    Raises:
+        FileNotFoundError: When no frameworks exist in ``agents_dir``.
+    """
     lang = preferred_language or detect_report_language(user_request).code
-    scored = _score_frameworks(
-        user_request, agents_dir, preferred_language=lang
-    )
+    scored = _score_frameworks(user_request, agents_dir, preferred_language=lang)
     best_score, best = scored[0]
     if best_score == 0:
         for _score, fw in scored:
@@ -401,9 +401,7 @@ def route_frameworks(
     to a single ``route_framework`` result.
     """
     lang = preferred_language or detect_report_language(user_request).code
-    scored = _score_frameworks(
-        user_request, agents_dir, preferred_language=lang
-    )
+    scored = _score_frameworks(user_request, agents_dir, preferred_language=lang)
     matched = [fw for score, fw in scored if score >= min_score]
     if not matched:
         return [
@@ -436,14 +434,10 @@ def framework_matches_host(fw: Framework, facts: Any) -> bool:
 
     os_id = str(getattr(facts, "os_id", "") or "").strip().lower()
     binaries = {
-        str(b).strip().lower()
-        for b in (getattr(facts, "binaries", None) or [])
-        if str(b).strip()
+        str(b).strip().lower() for b in (getattr(facts, "binaries", None) or []) if str(b).strip()
     }
     packages = {
-        str(p).strip().lower()
-        for p in (getattr(facts, "packages", None) or [])
-        if str(p).strip()
+        str(p).strip().lower() for p in (getattr(facts, "packages", None) or []) if str(p).strip()
     }
     ports: set[int] = set()
     for p in getattr(facts, "listening_ports", None) or []:
@@ -453,9 +447,7 @@ def framework_matches_host(fw: Framework, facts: Any) -> bool:
             continue
 
     if detect.os_ids:
-        if not os_id or not any(
-            os_id == want or os_id.startswith(want) for want in detect.os_ids
-        ):
+        if not os_id or not any(os_id == want or os_id.startswith(want) for want in detect.os_ids):
             return False
 
     if detect.binaries or detect.ports:
@@ -556,15 +548,15 @@ def prefer_framework_ids(
 def load_framework_checklist(framework: Framework) -> Checklist:
     """Load checklist body from a framework file, stripping YAML frontmatter.
 
-  Delegates to :func:`auditor.checklist.parse_checklist_markdown` on the body
-  after optional frontmatter removal.
+    Delegates to :func:`auditor.checklist.parse_checklist_markdown` on the body
+    after optional frontmatter removal.
 
-  Args:
-      framework: Discovered framework whose :attr:`~Framework.path` is read.
+    Args:
+        framework: Discovered framework whose :attr:`~Framework.path` is read.
 
-  Returns:
-      Parsed :class:`Checklist` with requirements in document order.
-  """
+    Returns:
+        Parsed :class:`Checklist` with requirements in document order.
+    """
     text = framework.path.read_text(encoding="utf-8")
     match = _FRONTMATTER.match(text)
     body = match.group(2) if match else text
@@ -574,12 +566,12 @@ def load_framework_checklist(framework: Framework) -> Checklist:
 def frameworks_catalog_text(agents_dir: Path | str | None = None) -> str:
     """Build a human-readable catalog of available frameworks for prompts.
 
-  Args:
-      agents_dir: Directory to scan for ``*.md`` frameworks.
+    Args:
+        agents_dir: Directory to scan for ``*.md`` frameworks.
 
-  Returns:
-      Multi-line bullet list suitable for system prompts or help text.
-  """
+    Returns:
+        Multi-line bullet list suitable for system prompts or help text.
+    """
     frameworks = list_frameworks(agents_dir)
     if not frameworks:
         return "No frameworks in agents/. Drop a .md checklist file to add one."
@@ -587,8 +579,7 @@ def frameworks_catalog_text(agents_dir: Path | str | None = None) -> str:
     for fw in frameworks:
         alias_preview = ", ".join(fw.aliases[:6])
         lines.append(
-            f"- `{fw.id}` [{fw.domain}]: {fw.title} — {fw.description} "
-            f"(aliases: {alias_preview})"
+            f"- `{fw.id}` [{fw.domain}]: {fw.title} — {fw.description} (aliases: {alias_preview})"
         )
     return "\n".join(lines)
 

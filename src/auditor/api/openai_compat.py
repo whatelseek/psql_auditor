@@ -30,22 +30,22 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 
+from auditor.api.stream_progress import (
+    chat_progress_chunks,
+    responses_progress_events,
+)
 from auditor.config import get_settings
 from auditor.graph import get_auditor_graph_ready
 from auditor.hitl import is_continue_reply, resolve_pause_resume
 from auditor.intent import classify_intent
 from auditor.progress import ProgressSink, bind_progress_sink
-from auditor.api.stream_progress import (
-    chat_progress_chunks,
-    responses_progress_events,
-)
 from auditor.report_archive import archive_filename, verify_download_token
 from auditor.results_store import (
     parse_continue_session_request,
@@ -172,7 +172,7 @@ def _messages_from_responses_input(
             role = "user"
         text = _text_from_content_parts(item.get("content"))
         if text:
-            messages.append(ChatMessage(role=role, content=text))  # type: ignore[arg-type]
+            messages.append(ChatMessage(role=role, content=text))
     return messages
 
 
@@ -362,20 +362,13 @@ async def _stream_responses_audit(
         if result.get("awaiting_intake"):
             content = content or ""
         elif result.get("awaiting_hitl"):
-            content = (
-                "Paused for your decision (skip / retry).\n\n" + (content or "")
-            )
+            content = "Paused for your decision (skip / retry).\n\n" + (content or "")
         if not content:
             content = "Audit finished (no report captured)."
     except Exception as exc:  # noqa: BLE001
         if not run_task.done():
-            # Keep orphan running for continue-from-checkpoint
-            tid = ""
-            try:
-                # best-effort: leave task in auditor orphan map if thread known later
-                pass
-            except Exception:  # noqa: BLE001
-                pass
+            # Keep orphan running for continue-from-checkpoint (best-effort).
+            pass
         content = f"Audit error: {exc}"
 
     chunk_size = 400
@@ -520,7 +513,7 @@ def _sse_chunk(
     Returns:
         SSE frame: ``data: {json}\\n\\n``.
     """
-    payload = {
+    payload: dict[str, Any] = {
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": int(time.time()),
@@ -699,9 +692,7 @@ async def _run_or_resume_once(auditor, body: ChatCompletionRequest) -> dict[str,
     if intent == "list_sessions":
         return await auditor.alist_sessions(user_text)
     if intent == "revise_req":
-        return await auditor.arun_revise_req(
-            user_text, messages=body.messages, thread_id=thread_id
-        )
+        return await auditor.arun_revise_req(user_text, messages=body.messages, thread_id=thread_id)
     if intent == "refill_finding":
         return await auditor.arun_refill_finding(
             user_text, messages=body.messages, thread_id=thread_id

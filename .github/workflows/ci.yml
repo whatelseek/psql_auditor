@@ -1,4 +1,4 @@
-# CORE-000: reproducible CI on a clean checkout with locked dependencies.
+# AUD-002 — mandatory quality gates via repository Make targets.
 name: ci
 
 on:
@@ -7,8 +7,8 @@ on:
   pull_request:
 
 jobs:
-  quality:
-    name: format / lint / typecheck (baseline may be red)
+  format-check:
+    name: format-check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,32 +16,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install (locked)
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]' -c constraints.txt
-      - name: Formatter check
-        id: format
-        continue-on-error: true
+        run: make install-locked
+      - name: format-check
         run: make format-check
-      - name: Lint
-        id: lint
-        continue-on-error: true
-        run: make lint
-      - name: Typecheck
-        id: typecheck
-        continue-on-error: true
-        run: make typecheck
-      - name: Record quality gate status
-        run: |
-          echo "format=${{ steps.format.outcome }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "lint=${{ steps.lint.outcome }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "typecheck=${{ steps.typecheck.outcome }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Quality gates are documented as baseline-red in docs/baseline.md." >> "$GITHUB_STEP_SUMMARY"
-          echo "They run with continue-on-error until cleaned up; they are not hidden." >> "$GITHUB_STEP_SUMMARY"
 
-  tests:
-    name: unit / integration / full + baseline compare
+  lint:
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,22 +29,106 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install (locked)
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]' -c constraints.txt
-      - name: Unit tests
+        run: make install-locked
+      - name: lint
+        run: make lint
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (locked)
+        run: make install-locked
+      - name: typecheck
+        run: make typecheck
+
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (locked)
+        run: make install-locked
+      - name: unit tests
         run: make test-unit
-        continue-on-error: true
-        id: unit
-      - name: Integration tests
+
+  integration:
+    name: integration tests (isolated PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: aud002
+          POSTGRES_PASSWORD: aud002_ci_secret
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aud002 -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AUDITOR_TEST_DATABASE_URL: postgresql://aud002:aud002_ci_secret@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (locked)
+        run: make install-locked
+      - name: integration tests
         run: make test-integration
-      - name: Full suite (complete output retained)
+
+  full-suite:
+    name: full suite
+    runs-on: ubuntu-latest
+    needs: [unit, integration]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: aud002
+          POSTGRES_PASSWORD: aud002_ci_secret
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aud002 -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AUDITOR_TEST_DATABASE_URL: postgresql://aud002:aud002_ci_secret@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (locked)
+        run: make install-locked
+      - name: full suite
         run: make test
-        continue-on-error: true
-        id: full
-      - name: Baseline compare (fail only on new regressions)
-        run: make baseline-compare
-      - name: CORE-002 / CORE-003 / CORE-001 focused suites
+
+  core-regression:
+    name: CORE-001 / CORE-002 / CORE-003
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (locked)
+        run: make install-locked
+      - name: Focused identity / job / result regressions
         run: |
           python -m pytest -q \
             tests/test_audit_run_job.py \

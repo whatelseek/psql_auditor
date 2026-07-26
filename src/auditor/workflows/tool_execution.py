@@ -13,7 +13,9 @@ from auditor.progress import emit_tool_call, emit_tool_result
 from auditor.workflows.helpers import _tool_result_looks_failed
 from auditor.workflows.protocols import AuditRuntime
 
-async def execute_tool_calls(runtime: AuditRuntime,
+
+async def execute_tool_calls(
+    runtime: AuditRuntime,
     tool_calls: list[dict[str, Any]],
     *,
     framework_id: str = "",
@@ -36,6 +38,7 @@ async def execute_tool_calls(runtime: AuditRuntime,
     Returns:
         ``ToolMessage`` list in call order for appending to chat history.
     """
+
     async def _one(tc: dict[str, Any]) -> ToolMessage:
         """Invoke a single tool call and return its ``ToolMessage``."""
         name = tc.get("name") or ""
@@ -105,4 +108,3 @@ async def execute_tool_calls(runtime: AuditRuntime,
         return ToolMessage(content=content, tool_call_id=call_id, name=name)
 
     return list(await asyncio.gather(*[_one(tc) for tc in tool_calls]))
-

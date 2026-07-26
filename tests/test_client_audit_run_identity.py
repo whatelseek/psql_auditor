@@ -113,10 +113,8 @@ def _list_runs(registry):
 @pytest.mark.asyncio
 async def test_resume_preserves_audit_run_id(tmp_path: Path):
     """Resume / continue keeps the same audit_run_id (no new run)."""
-    settings = _settings(tmp_path)
-    client = get_client_registry(tmp_path).ensure_client(
-        display_name="Beta", slug="beta"
-    )
+    _settings(tmp_path)
+    client = get_client_registry(tmp_path).ensure_client(display_name="Beta", slug="beta")
     registry = get_audit_registry(tmp_path)
     arun = registry.create_run(
         client_id=client.client_id,
@@ -168,9 +166,7 @@ def test_write_finding_rejects_missing_audit_run_id(tmp_path: Path):
 
 def test_results_isolated_across_runs(tmp_path: Path):
     """Findings for two runs of the same client stay in separate folders."""
-    client = get_client_registry(tmp_path).ensure_client(
-        display_name="Gamma", slug="gamma"
-    )
+    client = get_client_registry(tmp_path).ensure_client(display_name="Gamma", slug="gamma")
     registry = get_audit_registry(tmp_path)
     a = registry.create_run(client_id=client.client_id)
     b = registry.create_run(client_id=client.client_id)
@@ -205,9 +201,7 @@ def test_results_isolated_across_runs(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_concurrent_runs_cannot_cross_read_jobs(tmp_path: Path):
     """Jobs for run A are not visible under run B's registry listing."""
-    client = get_client_registry(tmp_path).ensure_client(
-        display_name="Delta", slug="delta"
-    )
+    client = get_client_registry(tmp_path).ensure_client(display_name="Delta", slug="delta")
     registry = get_audit_registry(tmp_path)
     a = registry.create_run(client_id=client.client_id)
     b = registry.create_run(client_id=client.client_id)

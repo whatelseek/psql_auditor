@@ -15,14 +15,10 @@ def _imports_graph(path: Path) -> bool:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == "auditor.graph" or alias.name.startswith(
-                    "auditor.graph."
-                ):
+                if alias.name == "auditor.graph" or alias.name.startswith("auditor.graph."):
                     return True
         elif isinstance(node, ast.ImportFrom):
-            if node.module == "auditor.graph" or (
-                node.module or ""
-            ).startswith("auditor.graph."):
+            if node.module == "auditor.graph" or (node.module or "").startswith("auditor.graph."):
                 return True
     return False
 

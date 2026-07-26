@@ -7,6 +7,16 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from auditor.evidence_store import EvidenceStore
+from auditor.followup import (
+    run_anonymize_report,
+    run_refill_finding,
+    run_revise_req,
+    run_update_report,
+)
+from auditor.intent import classify_intent
+from auditor.run_resolve import extract_run_id, latest_run_id
+from auditor.state import Finding
+
 
 def _seed_run_identity(store: EvidenceStore, **extra) -> dict:
     """CORE-001: seed durable client/audit ids on test evidence runs."""
@@ -19,16 +29,6 @@ def _seed_run_identity(store: EvidenceStore, **extra) -> dict:
     }
     store.write_run_meta(**meta)
     return meta
-
-from auditor.followup import (
-    run_anonymize_report,
-    run_refill_finding,
-    run_revise_req,
-    run_update_report,
-)
-from auditor.intent import classify_intent
-from auditor.run_resolve import extract_run_id, latest_run_id
-from auditor.state import Finding
 
 
 def test_intent_revise_and_update():
@@ -77,7 +77,10 @@ def test_extract_and_latest_client_named_run(tmp_path: Path):
     # Legacy flat client folder still uniquely resolvable for open_existing.
     rid = "TestCompany"
     EvidenceStore(tmp_path, run_id=rid).write_run_meta(frameworks=["postgres_cis"])
-    assert extract_run_id("see `artifacts/TestCompany` for evidence", evidence_dir=tmp_path) == "TestCompany"
+    assert (
+        extract_run_id("see `artifacts/TestCompany` for evidence", evidence_dir=tmp_path)
+        == "TestCompany"
+    )
     # Download URLs with bare client names are no longer accepted as run ids.
     assert extract_run_id("/v1/downloads/TestCompany_audit.zip") is None
     assert latest_run_id(tmp_path) == rid
@@ -86,14 +89,18 @@ def test_extract_and_latest_client_named_run(tmp_path: Path):
     EvidenceStore(tmp_path, run_id=nested).write_run_meta(
         frameworks=["postgres_cis"], audit_run_id="arun_abcd1234ef567890"
     )
-    assert extract_run_id(
-        "continue arun_abcd1234ef567890", evidence_dir=tmp_path
-    ) == "arun_abcd1234ef567890"
+    assert (
+        extract_run_id("continue arun_abcd1234ef567890", evidence_dir=tmp_path)
+        == "arun_abcd1234ef567890"
+    )
     # Bare arun_ wins over nested path when both appear (business id first).
-    assert extract_run_id(
-        "evidence: `artifacts/AlphaCo/arun_abcd1234ef567890`",
-        evidence_dir=tmp_path,
-    ) == "arun_abcd1234ef567890"
+    assert (
+        extract_run_id(
+            "evidence: `artifacts/AlphaCo/arun_abcd1234ef567890`",
+            evidence_dir=tmp_path,
+        )
+        == "arun_abcd1234ef567890"
+    )
     assert extract_run_id(
         "evidence: `artifacts/AlphaCo/arun_abcd1234ef567890`",
         evidence_dir=tmp_path,
@@ -138,9 +145,7 @@ async def test_revise_req_writes_into_existing_folder(tmp_path: Path):
         remediation="",
     )
 
-    async def fake_fill(
-        req_id, requirement, user_request, framework_id, store=None, **_kwargs
-    ):
+    async def fake_fill(req_id, requirement, user_request, framework_id, store=None, **_kwargs):
         assert store is not None
         assert store.run_id == rid
         # Append a new tool log like the real path would
@@ -151,7 +156,15 @@ async def test_revise_req_writes_into_existing_folder(tmp_path: Path):
             {"command": "grep PermitRootLogin"},
             "PermitRootLogin no",
         )
-        store.write_finding(framework_id, req_id, {**finding.model_dump(), "client_id": "client_test00000001", "audit_run_id": "arun_test0000000001"})
+        store.write_finding(
+            framework_id,
+            req_id,
+            {
+                **finding.model_dump(),
+                "client_id": "client_test00000001",
+                "audit_run_id": "arun_test0000000001",
+            },
+        )
         return finding
 
     graph._fill_requirement_cells = fake_fill  # type: ignore[method-assign]
@@ -213,9 +226,10 @@ async def test_evaluate_req_gathers_evidence_only(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_refill_without_req_requires_revised_or_named(tmp_path: Path):
+    from langchain_core.messages import AIMessage as AIM
+
     from auditor.config import Settings
     from auditor.graph import AuditorGraph
-    from langchain_core.messages import AIMessage as AIM
 
     rid = "20260720T131800Z_feedbeef"
     store = EvidenceStore(tmp_path, run_id=rid)
@@ -244,9 +258,10 @@ async def test_refill_without_req_requires_revised_or_named(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_refill_finding_from_stored_evidence(tmp_path: Path):
+    from langchain_core.messages import AIMessage as AIM
+
     from auditor.config import Settings
     from auditor.graph import AuditorGraph
-    from langchain_core.messages import AIMessage as AIM
 
     rid = "20260720T132000Z_feedbeef"
     store = EvidenceStore(tmp_path, run_id=rid)
@@ -326,9 +341,7 @@ async def test_update_report_from_disk_findings(tmp_path: Path):
     )
     graph = AuditorGraph(settings=settings)
     graph.fill_model = MagicMock()
-    graph.fill_model.ainvoke = AsyncMock(
-        return_value=AIMessage(content="Root login is disabled.")
-    )
+    graph.fill_model.ainvoke = AsyncMock(return_value=AIMessage(content="Root login is disabled."))
 
     result = await run_update_report(
         graph,
@@ -376,8 +389,7 @@ def test_resolve_multi_host_req_with_host_hint(tmp_path: Path):
 
     target = resolve_target(
         user_text=(
-            "Evaluate REQ-010 on ubuntu_cis_24_l2 for host 10.200.29.78 "
-            "arun_test0000000001"
+            "Evaluate REQ-010 on ubuntu_cis_24_l2 for host 10.200.29.78 arun_test0000000001"
         ),
         evidence_dir=tmp_path,
         agents_dir=Path("agents"),
@@ -450,7 +462,8 @@ async def test_anonymize_report_creates_anon_copy(tmp_path: Path):
 
     run_id = "TestCompany"
     store = EvidenceStore(tmp_path, run_id=run_id)
-    _seed_run_identity(store, 
+    _seed_run_identity(
+        store,
         frameworks=["ubuntu_cis_24_l2"],
         client_name="Test Company",
         results_session_number=3,

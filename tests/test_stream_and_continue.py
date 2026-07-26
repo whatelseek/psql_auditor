@@ -35,9 +35,7 @@ def test_chat_progress_emits_tool_calls():
         arguments={"command": "id"},
         requirement_id="REQ-001",
     )
-    chunks = chat_progress_chunks(
-        ev, model="auditor", completion_id="cmpl_1", tool_index=0
-    )
+    chunks = chat_progress_chunks(ev, model="auditor", completion_id="cmpl_1", tool_index=0)
     assert chunks
     payload = json.loads(chunks[0].removeprefix("data: ").strip())
     tc = payload["choices"][0]["delta"]["tool_calls"][0]
@@ -60,9 +58,7 @@ def test_chat_progress_tool_result_includes_requirement_title():
         requirement_id="REQ-002",
         requirement_title="OS release",
     )
-    chunks = chat_progress_chunks(
-        ev, model="auditor", completion_id="cmpl_1", tool_index=0
-    )
+    chunks = chat_progress_chunks(ev, model="auditor", completion_id="cmpl_1", tool_index=0)
     joined = "".join(chunks)
     assert "REQ-002: OS release" in joined
     assert "ssh_read_file" in joined
@@ -70,9 +66,7 @@ def test_chat_progress_tool_result_includes_requirement_title():
 
 def test_chat_progress_emits_reasoning():
     ev = ProgressEvent(kind="reasoning", text="Planning REQ-001")
-    chunks = chat_progress_chunks(
-        ev, model="auditor", completion_id="cmpl_1", tool_index=0
-    )
+    chunks = chat_progress_chunks(ev, model="auditor", completion_id="cmpl_1", tool_index=0)
     joined = "".join(chunks)
     assert "reasoning_content" in joined or "Planning REQ-001" in joined
 
@@ -90,9 +84,7 @@ def test_responses_progress_function_call():
         tool_call_id="fc_1",
         arguments={"sql": "select 1"},
     )
-    events = responses_progress_events(
-        ev, response_id="resp_1", seq_fn=_next, message_id="msg_1"
-    )
+    events = responses_progress_events(ev, response_id="resp_1", seq_fn=_next, message_id="msg_1")
     types = [e["type"] for e in events]
     assert "response.output_item.added" in types
     assert "response.function_call_arguments.delta" in types

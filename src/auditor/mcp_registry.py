@@ -163,9 +163,7 @@ def load_mcp_registry(
             env_from=str(entry.get("envFrom") or entry.get("env_from") or "").strip(),
             env_map={str(k): str(v) for k, v in env_map.items()},
             frameworks=tuple(str(x) for x in frameworks),
-            curated_tools=bool(
-                entry.get("curatedTools", entry.get("curated_tools", False))
-            ),
+            curated_tools=bool(entry.get("curatedTools", entry.get("curated_tools", False))),
             blocked_tools=tuple(str(x) for x in blocked),
             description=str(entry.get("description") or ""),
             extra_env={str(k): str(v) for k, v in extra_env.items() if v is not None},
@@ -185,9 +183,7 @@ def _credential_env_from_os(prefix: str, *, port_default: str) -> dict[str, str]
         mapping["MYSQL_DATABASE"] = os.environ.get("MYSQL_DATABASE") or ""
     elif prefix == "ORACLE":
         mapping["ORACLE_SERVICE"] = (
-            os.environ.get("ORACLE_SERVICE")
-            or os.environ.get("ORACLE_DATABASE")
-            or ""
+            os.environ.get("ORACLE_SERVICE") or os.environ.get("ORACLE_DATABASE") or ""
         )
     return {k: v for k, v in mapping.items() if v}
 
@@ -261,9 +257,7 @@ def credentials_ready(spec: McpServerSpec, settings: Settings) -> bool:
     env = resolve_server_env(spec, settings)
     host_keys = [k for k in env if k.endswith("_HOST") or k == "PG_HOST"]
     secret_keys = [
-        k
-        for k in env
-        if any(tok in k.upper() for tok in ("PASSWORD", "TOKEN", "SECRET"))
+        k for k in env if any(tok in k.upper() for tok in ("PASSWORD", "TOKEN", "SECRET"))
     ]
     has_host = any(env.get(k) for k in host_keys) or bool(env.get("DATABASE_URL"))
     has_secret = any(env.get(k) for k in secret_keys) or bool(env.get("DATABASE_URL"))
@@ -343,8 +337,7 @@ def build_http_connection(
     del settings
     if spec.transport not in {"streamable_http", "sse"}:
         raise ValueError(
-            f"MCP server {spec.name!r}: transport {spec.transport!r} "
-            "is not an HTTP transport"
+            f"MCP server {spec.name!r}: transport {spec.transport!r} is not an HTTP transport"
         )
     url = (spec.url or "").strip()
     if not url:
@@ -383,9 +376,7 @@ def format_registry_markdown(
         desc = (spec.description or "—").replace("|", "/")
         if spec.url:
             desc = f"{desc} ({spec.url})"
-        lines.append(
-            f"| `{name}` | {enabled} | {ready} | {fws} | {curated} | {desc} |"
-        )
+        lines.append(f"| `{name}` | {enabled} | {ready} | {fws} | {curated} | {desc} |")
     lines.append("")
     lines.append(
         "Credentials and IPs come from **inventory / secrets** "

@@ -8,7 +8,9 @@ def test_extract_req_ids_normalizes():
 
 
 def test_adhoc_run_command():
-    assert classify_intent("Run this command: `grep PermitRootLogin /etc/ssh/sshd_config`") == "adhoc"
+    assert (
+        classify_intent("Run this command: `grep PermitRootLogin /etc/ssh/sshd_config`") == "adhoc"
+    )
 
 
 def test_adhoc_execute_sql():
@@ -34,9 +36,7 @@ def test_refill_observation_intent():
 
 def test_refill_beats_update_report():
     assert (
-        classify_intent(
-            "Prepare new observation and recommendation then update the report"
-        )
+        classify_intent("Prepare new observation and recommendation then update the report")
         == "refill_finding"
     )
 

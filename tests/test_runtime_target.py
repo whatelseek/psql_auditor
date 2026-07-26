@@ -26,12 +26,14 @@ def test_bind_ssh_target_does_not_mutate_os_environ(monkeypatch):
     target = InventorySshTarget(host="10.0.0.9", port="22", user="auditor")
     with bind_ssh_target(target):
         assert os.environ.get("SSH_HOST") == before
-        assert effective_settings(
-            Settings(_env_file=None, ssh_host="baseline.example")
-        ).ssh_host == "10.0.0.9"
-        assert effective_settings(
-            Settings(_env_file=None, ssh_host="baseline.example")
-        ).ssh_user == "auditor"
+        assert (
+            effective_settings(Settings(_env_file=None, ssh_host="baseline.example")).ssh_host
+            == "10.0.0.9"
+        )
+        assert (
+            effective_settings(Settings(_env_file=None, ssh_host="baseline.example")).ssh_user
+            == "auditor"
+        )
     assert get_runtime_target() is None
     assert os.environ.get("SSH_HOST") == before
 

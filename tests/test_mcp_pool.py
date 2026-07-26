@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from auditor.config import Settings
-from auditor.tools.mcp_client import PostgresMcpPool, PostgresMcpSession
+from auditor.tools.mcp_client import PostgresMcpPool
 
 
 @pytest.mark.asyncio
@@ -46,9 +46,7 @@ async def test_pool_reconnect_all_workers():
     settings = Settings(_env_file=None, mcp_postgres_pool_size=2)
     await pool._ensure(settings)
     for session in pool._sessions:
-        session.reconnect = AsyncMock(
-            return_value="MCP session reconnected successfully"
-        )
+        session.reconnect = AsyncMock(return_value="MCP session reconnected successfully")
     status = await pool.reconnect(settings)
     assert "2 workers" in status
     for session in pool._sessions:

@@ -23,10 +23,11 @@ import json
 import re
 import shlex
 from contextlib import AsyncExitStack
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.sessions import StdioConnection
 
 from auditor.config import Settings
 from auditor.mcp_registry import (
@@ -172,7 +173,7 @@ class PostgresMcpSession:
             Client with ``handle_tool_errors=True``.
         """
         return MultiServerMCPClient(
-            {_SERVER_NAME: postgres_mcp_connection(settings)},
+            {_SERVER_NAME: cast(StdioConnection, postgres_mcp_connection(settings))},
             handle_tool_errors=True,
         )
 
@@ -423,10 +424,7 @@ class PostgresMcpPool:
                 f"MCP reconnect failed for {len(failures)}/{len(results)} "
                 f"pool workers: {failures[0]}"
             )
-        return (
-            f"MCP session pool reconnected successfully "
-            f"({len(results)} workers)"
-        )
+        return f"MCP session pool reconnected successfully ({len(results)} workers)"
 
 
 _POOL = PostgresMcpPool()
@@ -516,10 +514,7 @@ def rewrite_show_to_select(sql: str) -> str:
     match = _SHOW_ONE.match(text)
     if match:
         name = match.group(1).replace("'", "''")
-        return (
-            "SELECT name, setting, source FROM pg_settings "
-            f"WHERE name = '{name}'"
-        )
+        return f"SELECT name, setting, source FROM pg_settings WHERE name = '{name}'"
     return sql
 
 

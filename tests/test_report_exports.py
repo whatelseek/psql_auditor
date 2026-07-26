@@ -10,7 +10,6 @@ from auditor.report_exports import (
     write_xlsx_report,
 )
 
-
 SAMPLE = """# Audit Report: Demo CIS
 
 Executive summary: two findings.

@@ -11,7 +11,6 @@ from typing import Any, Iterable
 from auditor.domain.result_identity import (
     DuplicateLogicalKeyError,
     DuplicateResultIdError,
-    IncompleteResultIdentityError,
     ResultLogicalKey,
     logical_key_of,
     merge_result_maps,
@@ -78,9 +77,7 @@ class ResultStore:
     def as_map(self) -> dict[str, Finding]:
         return dict(self._by_id)
 
-    def merge_maps(
-        self, *maps: dict[str, Finding] | None
-    ) -> dict[str, Finding]:
+    def merge_maps(self, *maps: dict[str, Finding] | None) -> dict[str, Finding]:
         """Merge maps through conflict checks and replace store contents."""
         merged: dict[str, Any] = {}
         for m in maps:
@@ -90,7 +87,6 @@ class ResultStore:
             for rid, f in merged.items()
         }
         self._by_logical = {
-            logical_key_of(f).as_tuple(): result_id_of(f)
-            for f in self._by_id.values()
+            logical_key_of(f).as_tuple(): result_id_of(f) for f in self._by_id.values()
         }
         return self.as_map()

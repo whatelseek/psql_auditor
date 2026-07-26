@@ -97,10 +97,11 @@ def test_deterministic_it_audit_req006_without_cmdb(tmp_path: Path):
 
 
 def test_deterministic_it_audit_req007_from_probe():
+    from pathlib import Path
+
     from auditor.checklist import Requirement
     from auditor.config import Settings
     from auditor.graph import AuditorGraph
-    from pathlib import Path
 
     graph = AuditorGraph(
         settings=Settings(
@@ -145,7 +146,5 @@ def test_write_report_does_not_overwrite_root(tmp_path: Path):
     store = EvidenceStore(tmp_path, run_id="run_multi")
     store.write_root_report("# combined\n")
     store.write_report("it_audit", "# it only\n")
-    assert (store.root / "it_audit" / "report.md").read_text(encoding="utf-8").startswith(
-        "# it"
-    )
+    assert (store.root / "it_audit" / "report.md").read_text(encoding="utf-8").startswith("# it")
     assert (store.root / "report.md").read_text(encoding="utf-8").startswith("# combined")

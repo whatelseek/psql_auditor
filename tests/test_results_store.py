@@ -26,25 +26,19 @@ from auditor.state import Finding
 
 
 def test_parse_continue_session_request() -> None:
-    num, client = parse_continue_session_request(
-        "continue session 1 for TestCompany"
-    )
+    num, client = parse_continue_session_request("continue session 1 for TestCompany")
     assert num == 1
     assert client == "TestCompany"
 
 
 def test_parse_list_results_request() -> None:
-    client, num = parse_list_results_request(
-        "List results for AlphaCo session 2"
-    )
+    client, num = parse_list_results_request("List results for AlphaCo session 2")
     assert client == "AlphaCo"
     assert num == 2
     client, num = parse_list_results_request("list-results AlphaCo 2")
     assert client == "AlphaCo"
     assert num == 2
-    client, num = parse_list_results_request(
-        "Результаты для BetaCo сессия 1"
-    )
+    client, num = parse_list_results_request("Результаты для BetaCo сессия 1")
     assert client == "BetaCo"
     assert num == 1
 
@@ -67,9 +61,7 @@ def test_parse_list_status_and_host_request() -> None:
     assert host == "10.200.29.79"
     assert fw == "it_audit"
     assert client is None
-    host, fw, client = parse_list_host_request(
-        "list-host pg-db ubuntu_cis_24_l2 for AlphaCo"
-    )
+    host, fw, client = parse_list_host_request("list-host pg-db ubuntu_cis_24_l2 for AlphaCo")
     assert host == "pg-db"
     assert fw == "ubuntu_cis_24_l2"
     assert client == "AlphaCo"
@@ -430,9 +422,7 @@ async def test_record_host_framework_audit_tags_session_number() -> None:
         if c.args and "INSERT INTO host_results" in str(c.args[0])
     ]
     assert host_upsert
-    assert "ON CONFLICT (session_id, host_id, framework_id)" in str(
-        host_upsert[0].args[0]
-    )
+    assert "ON CONFLICT (session_id, host_id, framework_id)" in str(host_upsert[0].args[0])
 
 
 @pytest.mark.asyncio

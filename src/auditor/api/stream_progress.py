@@ -87,9 +87,7 @@ def chat_progress_chunks(
     if event.kind in ("reasoning", "phase", "req_status"):
         text = event.text or ""
         if event.kind == "req_status" and event.requirement_id:
-            req_label = format_requirement_label(
-                event.requirement_id, event.requirement_title
-            )
+            req_label = format_requirement_label(event.requirement_id, event.requirement_title)
             text = text or f"`{req_label}` → {event.status}"
         if text:
             # Prefer reasoning_content when clients support it; also send content.
@@ -136,9 +134,7 @@ def chat_progress_chunks(
         # Assistant-visible note + synthetic tool role content via content delta
         preview = event.result or ""
         label = event.tool_name or "tool"
-        req_label = format_requirement_label(
-            event.requirement_id, event.requirement_title
-        )
+        req_label = format_requirement_label(event.requirement_id, event.requirement_title)
         out.append(
             _chat_chunk(
                 model,
@@ -183,9 +179,7 @@ def responses_progress_events(
     if event.kind in ("reasoning", "phase", "req_status"):
         text = event.text or ""
         if event.kind == "req_status" and event.requirement_id:
-            req_label = format_requirement_label(
-                event.requirement_id, event.requirement_title
-            )
+            req_label = format_requirement_label(event.requirement_id, event.requirement_title)
             text = text or f"`{req_label}` → {event.status}"
         if not text:
             return events
@@ -252,9 +246,7 @@ def responses_progress_events(
     if event.kind == "tool_result":
         preview = event.result or ""
         label = event.tool_name or "tool"
-        req_label = format_requirement_label(
-            event.requirement_id, event.requirement_title
-        )
+        req_label = format_requirement_label(event.requirement_id, event.requirement_title)
         events.append(
             {
                 "type": "response.output_text.delta",
@@ -272,4 +264,3 @@ def responses_progress_events(
         return events
 
     return events
-

@@ -1,8 +1,9 @@
 # CORE-000 — Reproducible baseline, verification commands, project map
 
-This document is the **authoritative baseline** for comparing subsequent
-changes. Numbers below were measured on a clean virtualenv using
-`constraints.txt`; they are not copied from older notes.
+> **AUD-002 update:** Mandatory quality gates are now green and enforced
+> identically locally and in CI. The measurement tables below preserve the
+> CORE-000 historical baseline; see [`docs/quality-gates.md`](quality-gates.md)
+> for the current canonical command interface.
 
 ## Revisions
 
@@ -42,28 +43,23 @@ make lock
 
 | Gate | Command | Notes |
 |------|---------|-------|
-| Unit tests | `make test-unit` | `pytest -m unit` (default marker via `tests/conftest.py`) |
-| Integration tests | `make test-integration` | `pytest -m integration`; **0 collected** today (see below) |
-| Full suite | `make test` | Entire `tests/` tree |
-| Formatter check | `make format-check` | `ruff format --check src tests` |
-| Linter | `make lint` | `ruff check src tests` |
-| Type checker | `make typecheck` | `mypy -p auditor` |
-| Combined gates | `make check` | format + lint + typecheck + full suite |
-| Baseline compare | `make baseline-compare` | full suite vs `docs/baseline-failures.txt` |
+| Format (mutate) | `make format` | May modify files |
+| Formatter check | `make format-check` | Non-destructive; mandatory |
+| Linter | `make lint` | Mandatory |
+| Type checker | `make typecheck` | `mypy src/auditor`; mandatory |
+| Unit tests | `make test-unit` | `-m unit`; fails if zero collected |
+| Integration tests | `make test-integration` | `-m integration` + isolated PostgreSQL |
+| Full suite | `make test` | Entire `tests/`; fails if zero collected |
+| Combined gates | `make check` | All mandatory gates above |
+| Baseline compare | `make baseline-compare` | Optional historical tool only |
 
 ### Unit vs integration selection
 
-There is **no** reliable live-service integration suite today: warehouse, MCP,
-SSH, and WinRM tests use mocks/tmp paths. Introducing fake separation would be
-dishonest.
-
-Therefore:
-
-* markers `unit` / `integration` are registered in `pyproject.toml`;
-* `tests/conftest.py` auto-marks unmarked tests as `unit`;
-* `make test-integration` is expected to collect **zero** tests (exit code 5
-  treated as success) until real live-service tests are added and marked
-  `@pytest.mark.integration`.
+* markers `unit` / `integration` / `external_llm` are registered in `pyproject.toml`;
+* unregistered markers are rejected (`--strict-markers`);
+* `tests/conftest.py` auto-marks unmarked non-integration tests as `unit`;
+* `tests/integration/` holds genuine PostgreSQL warehouse tests;
+* empty discovery fails via `scripts/run_pytest_group.py`.
 
 ## Actual command results (clean venv, locked install)
 

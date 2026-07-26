@@ -2,7 +2,6 @@ from pathlib import Path
 
 from auditor.checklist import parse_checklist_markdown
 
-
 SAMPLE = """# Sample Checklist
 
 Intro text ignored for requirements.

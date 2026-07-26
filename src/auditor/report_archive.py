@@ -166,7 +166,7 @@ def format_archive_chat_section(
             lines.append(f"(Absolute Open WebUI URL: {abs_owui})")
             lines.append("")
     lines.append(
-        "<a href=\"{}\" download>Click here if the markdown link does not download</a>".format(
+        '<a href="{}" download>Click here if the markdown link does not download</a>'.format(
             download_url
         )
     )
@@ -293,9 +293,7 @@ async def package_and_publish_archive(
                 "zip_path": str(zip_path),
                 "download_url": download_url,
                 "open_webui_file_id": file_id,
-                "token": make_download_token(
-                    run_id, settings.api_key or "auditor-dev"
-                ),
+                "token": make_download_token(run_id, settings.api_key or "auditor-dev"),
             },
             indent=2,
         )

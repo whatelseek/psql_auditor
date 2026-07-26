@@ -79,9 +79,7 @@ def test_format_winrm_result():
 @pytest.mark.asyncio
 async def test_winrm_run_requires_host():
     settings = Settings(_env_file=None, winrm_host=None)
-    with patch(
-        "auditor.tools.winrm.effective_settings", return_value=settings
-    ):
+    with patch("auditor.tools.winrm.effective_settings", return_value=settings):
         out = await winrm_run.ainvoke({"command": "hostname"})
     assert out.lower().startswith("winrm error")
 

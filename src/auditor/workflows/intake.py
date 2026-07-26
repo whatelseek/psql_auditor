@@ -14,7 +14,7 @@ from auditor.audit_registry import get_audit_registry
 from auditor.client_registry import get_client_registry
 from auditor.evidence_store import client_artifacts_id
 from auditor.frameworks import get_framework, prefer_framework_ids, select_frameworks_for_host
-from auditor.host_facts import resolve_client_dir, resolve_client_inventory
+from auditor.host_facts import resolve_client_inventory
 from auditor.intake import (
     client_slug,
     enrich_facts_from_access_rows,
@@ -49,6 +49,7 @@ from auditor.state import AuditorState
 from auditor.workflows.helpers import _extract_json
 from auditor.workflows.protocols import AuditRuntime
 
+
 async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
     """Многошаговый предварительный опрос через последовательные interrupt."""
     if not runtime.settings.intake_enabled or state.get("intake_complete"):
@@ -58,15 +59,11 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
     base_prompts = prompts_for_language(lang.code)
     prompts = base_prompts
     thread_hint = str(state.get("thread_id") or "")
-    intake: dict[str, Any] = runtime._load_intake_progress(
-        state, thread_id=thread_hint
-    )
+    intake: dict[str, Any] = runtime._load_intake_progress(state, thread_id=thread_hint)
 
     # 1) Название клиента (LLM check + convention guard)
     while not intake.get("client_name"):
-        raw = interrupt(
-            intake_interrupt_payload(step="client_name", prompt=prompts.client)
-        )
+        raw = interrupt(intake_interrupt_payload(step="client_name", prompt=prompts.client))
         name, err = await runtime._intake_resolve_client_name(str(raw or ""))
         if name:
             intake["client_name"] = name
@@ -80,17 +77,14 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
             )
             # Inventory folder for credentials / PLAN.md (display slug only).
             if not client_dir.is_dir():
-                client_dir = (
-                    Path(runtime.settings.inventory_dir) / client_artifacts_id(name)
-                )
+                client_dir = Path(runtime.settings.inventory_dir) / client_artifacts_id(name)
             client_dir.mkdir(parents=True, exist_ok=True)
 
             # CORE-001: durable client_id + new AuditRun for this execution.
             client = get_client_registry(runtime.settings.evidence_dir).ensure_client(
                 display_name=name,
                 slug=intake["client_slug"],
-                client_id=str(intake.get("client_id") or state.get("client_id") or "")
-                or None,
+                client_id=str(intake.get("client_id") or state.get("client_id") or "") or None,
             )
             intake["client_id"] = client.client_id
             audit_run_id = str(
@@ -125,10 +119,10 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                         sess["run_id"] = store.run_id
                         sess["audit_run_id"] = audit_run_id
                 intake["artifacts_run_id"] = store.run_id
-                state["evidence_run_id"] = store.run_id  # type: ignore[typeddict-item]
-                state["evidence_run_dir"] = str(store.root)  # type: ignore[typeddict-item]
-                state["client_id"] = client.client_id  # type: ignore[typeddict-item]
-                state["audit_run_id"] = audit_run_id  # type: ignore[typeddict-item]
+                state["evidence_run_id"] = store.run_id
+                state["evidence_run_dir"] = str(store.root)
+                state["client_id"] = client.client_id
+                state["audit_run_id"] = audit_run_id
                 store.write_run_meta(
                     client_id=client.client_id,
                     client_name=name,
@@ -147,9 +141,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                 intake["client_slug"],
             )
             intake["credentials_loaded"] = sorted(applied.keys())
-            runtime._persist_intake_progress(
-                state, intake, thread_id=thread_hint
-            )
+            runtime._persist_intake_progress(state, intake, thread_id=thread_hint)
             break
         if lang.code.startswith("ru"):
             if err == "invalid_chars":
@@ -209,9 +201,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
     scope_block = f"\n\n### Client inventory check\n\n{status}\n"
     access_prompt = f"{prompts.access}{scope_block}"
     while "has_access" not in intake:
-        raw = interrupt(
-            intake_interrupt_payload(step="access", prompt=access_prompt)
-        )
+        raw = interrupt(intake_interrupt_payload(step="access", prompt=access_prompt))
         yn, clarification = await runtime._intake_resolve_yes_no(
             str(raw or ""),
             question_hint=(
@@ -229,23 +219,17 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                 hint = (
                     "\n\n_После пояснения опишите доступ своими словами._"
                     if lang.code.startswith("ru")
-                    else "\n\n_After this clarification, describe access in "
-                    "your own words._"
+                    else "\n\n_After this clarification, describe access in your own words._"
                 )
-                access_prompt = (
-                    f"{prompts.access}{scope_block}{clarify_block}{hint}"
-                )
+                access_prompt = f"{prompts.access}{scope_block}{clarify_block}{hint}"
             else:
                 hint = (
                     "\n\n_Could not interpret that. Please describe whether "
                     "live SSH/DB access is available, in your own words._"
                     if lang.code == "en"
-                    else "\n\n_Не понял ответ. Опишите своими словами, "
-                    "есть ли доступ по SSH/БД._"
+                    else "\n\n_Не понял ответ. Опишите своими словами, есть ли доступ по SSH/БД._"
                 )
-                access_prompt = (
-                    f"{prompts.access}{scope_block}{hint}"
-                )
+                access_prompt = f"{prompts.access}{scope_block}{hint}"
             continue
         intake["access_raw"] = str(raw or "").strip()
         intake["has_access"] = yn == "yes"
@@ -259,11 +243,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
     if intake.get("has_access") and not intake.get("discovery_complete"):
         slug = str(intake.get("client_slug") or "").strip()
         try:
-            creds = (
-                read_client_credentials(runtime.settings.inventory_dir, slug)
-                if slug
-                else {}
-            )
+            creds = read_client_credentials(runtime.settings.inventory_dir, slug) if slug else {}
         except (OSError, ValueError, FileNotFoundError):
             creds = {}
         if creds:
@@ -274,12 +254,10 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
         intake["access_probe"] = access
 
         endpoints = (
-            list_client_access_endpoints(runtime.settings.inventory_dir, slug)
-            if slug
-            else []
+            list_client_access_endpoints(runtime.settings.inventory_dir, slug) if slug else []
         )
         try:
-            host_access_rows = await probe_access_endpoints(endpoints)
+            host_access_rows: list[dict[str, Any]] = list(await probe_access_endpoints(endpoints))
         except Exception as exc:  # noqa: BLE001
             host_access_rows = []
             intake["access_list_error"] = f"{type(exc).__name__}: {exc}"
@@ -288,9 +266,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
         store = runtime._store_from_state(state)
         if store is not None:
             try:
-                discovered = await runtime._discover_inventory_hosts(
-                    intake=intake, store=store
-                )
+                discovered = await runtime._discover_inventory_hosts(intake=intake, store=store)
             except Exception as exc:  # noqa: BLE001
                 discovered = []
                 intake["discovery_error"] = f"{type(exc).__name__}: {exc}"
@@ -298,9 +274,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
             for target, facts in discovered:
                 llm_ids = [
                     x.strip()
-                    for x in str(
-                        (facts.raw or {}).get("_llm_framework_ids") or ""
-                    ).split(",")
+                    for x in str((facts.raw or {}).get("_llm_framework_ids") or "").split(",")
                     if x.strip()
                 ]
                 hl_pkgs = [
@@ -310,14 +284,10 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                     ).splitlines()
                     if x.strip()
                 ]
-                notes = str(
-                    (facts.raw or {}).get("_llm_software_notes") or ""
-                ).strip()
+                notes = str((facts.raw or {}).get("_llm_software_notes") or "").strip()
                 # Inventory access probe is authoritative for open ports
                 # (e.g. PG :5432) when checklist-filled facts missed them.
-                enrich_facts_from_access_rows(
-                    facts, target.host, host_access_rows
-                )
+                enrich_facts_from_access_rows(facts, target.host, host_access_rows)
                 inv_service_name = ""
                 # Prefer explicit service labels from INVENTORY.md (e.g. pg-server, 1c-server)
                 # when live hostname discovery is empty.
@@ -334,16 +304,11 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                         inv_service_name = svc
                         break
                 display_hostname = (
-                    (facts.hostname or "").strip()
-                    or inv_service_name
-                    or target.host
-                    or target.slug
+                    (facts.hostname or "").strip() or inv_service_name or target.host or target.slug
                 )
                 if facts.error:
                     matched_ids: list[str] = []
-                    it_fw = get_framework(
-                        "it_audit", runtime.settings.agents_dir
-                    )
+                    it_fw = get_framework("it_audit", runtime.settings.agents_dir)
                     if it_fw is not None:
                         matched_ids = [it_fw.id]
                     for fid in llm_ids:
@@ -444,8 +409,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
     proposed_jobs = list(intake.get("proposed_jobs") or [])
     # Prefer operator PLAN.md (host → frameworks) over auto-discovery when present.
     slug = str(
-        intake.get("client_slug")
-        or client_slug(str(intake.get("client_name") or ""))
+        intake.get("client_slug") or client_slug(str(intake.get("client_name") or ""))
     ).strip()
     plan_note = ""
     if slug and "plan_file_checked" not in intake:
@@ -465,21 +429,17 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                 intake["plan_source"] = "markdown"
                 rel = str(plan_path) if plan_path else "PLAN.md"
                 plan_note = (
-                    f"\n\n_Loaded audit plan from `{rel}` "
-                    "(overrides auto-detected frameworks)._\n"
+                    f"\n\n_Loaded audit plan from `{rel}` (overrides auto-detected frameworks)._\n"
                     if lang.code == "en"
                     else f"\n\n_Загружен план аудита из `{rel}` "
                     "(перекрывает автоопределение фреймворков)._\n"
                 )
-                runtime._persist_intake_progress(
-                    state, intake, thread_id=thread_hint
-                )
+                runtime._persist_intake_progress(state, intake, thread_id=thread_hint)
 
-    has_plan = bool(
-        proposed_jobs
-        and any((row.get("frameworks") or []) for row in proposed_jobs)
-    )
-    host_access_md = format_host_access_list_markdown(
+    has_plan = bool(proposed_jobs and any((row.get("frameworks") or []) for row in proposed_jobs))
+    # Host-access markdown is available via format_host_access_list_markdown when
+    # a future intake step surfaces it in the chat prompt.
+    _ = format_host_access_list_markdown(
         list(intake.get("host_access_rows") or []),
         language=lang.code,
         proposed_jobs=proposed_jobs,
@@ -490,19 +450,13 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
         working_jobs = [dict(r) for r in proposed_jobs]
         original_jobs = [dict(r) for r in proposed_jobs]
         plan_md = format_proposed_jobs_markdown(working_jobs)
-        scope_prompt = (
-            f"{prompts.scope}{plan_note}\n\n{plan_md}"
-        )
+        scope_prompt = f"{prompts.scope}{plan_note}\n\n{plan_md}"
         while "selected_jobs" not in intake:
-            raw = interrupt(
-                intake_interrupt_payload(step="scope", prompt=scope_prompt)
-            )
+            raw = interrupt(intake_interrupt_payload(step="scope", prompt=scope_prompt))
             reply = str(raw or "").strip()
             # Operator pasted a Host|Frameworks markdown plan → replace & re-confirm.
             pasted = parse_audit_plan_markdown(reply)
-            if pasted and (
-                "|" in reply or reply.lstrip().startswith(("-", "*", "•"))
-            ):
+            if pasted and ("|" in reply or reply.lstrip().startswith(("-", "*", "•"))):
                 working_jobs = pasted
                 intake["proposed_jobs"] = working_jobs
                 intake["plan_source"] = "markdown_paste"
@@ -521,12 +475,8 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                         "Reply **confirm** to run this plan, or exclude / "
                         "paste another table.\n"
                     )
-                scope_prompt = (
-                    f"{prompts.scope}{confirm_block}\n\n{plan_md}"
-                )
-                runtime._persist_intake_progress(
-                    state, intake, thread_id=thread_hint
-                )
+                scope_prompt = f"{prompts.scope}{confirm_block}\n\n{plan_md}"
+                runtime._persist_intake_progress(state, intake, thread_id=thread_hint)
                 continue
 
             # «положил PLAN.md» / put plan → re-read inventory file & re-confirm.
@@ -558,12 +508,8 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                             "Reloaded the plan file. Reply **confirm** to run "
                             "**this** plan, or exclude / paste another table.\n"
                         )
-                    scope_prompt = (
-                        f"{prompts.scope}{confirm_block}\n\n{plan_md}"
-                    )
-                    runtime._persist_intake_progress(
-                        state, intake, thread_id=thread_hint
-                    )
+                    scope_prompt = f"{prompts.scope}{confirm_block}\n\n{plan_md}"
+                    runtime._persist_intake_progress(state, intake, thread_id=thread_hint)
                     continue
                 hint = (
                     "\n\n_No parseable `PLAN.md` found under "
@@ -586,9 +532,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                 ),
             )
             action = str((payload or {}).get("action") or "").strip().lower()
-            selected = resolve_scope_decision(
-                reply, working_jobs, payload
-            )
+            selected = resolve_scope_decision(reply, working_jobs, payload)
             if selected is None:
                 hint = (
                     "\n\n_Could not parse that. Reply **confirm**, describe "
@@ -599,9 +543,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                     "**подтвердить**, что **исключить** / оставить **только**, "
                     "или вставьте таблицу Host | Frameworks._"
                 )
-                scope_prompt = (
-                    f"{prompts.scope}{hint}\n\n{plan_md}"
-                )
+                scope_prompt = f"{prompts.scope}{hint}\n\n{plan_md}"
                 continue
             if not selected:
                 hint = (
@@ -611,9 +553,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                     else "\n\n_После изменения нечего запускать. "
                     "Подтвердите предыдущий план или измените меньше._"
                 )
-                scope_prompt = (
-                    f"{prompts.scope}{hint}\n\n{plan_md}"
-                )
+                scope_prompt = f"{prompts.scope}{hint}\n\n{plan_md}"
                 continue
 
             if action in {"confirm", "all", "run_all", "accept"}:
@@ -654,12 +594,8 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                     "Plan updated. Reply **confirm** to run **this** plan, "
                     "or describe more exclusions/inclusions.\n"
                 )
-            scope_prompt = (
-                f"{prompts.scope}{confirm_block}\n\n{plan_md}"
-            )
-            runtime._persist_intake_progress(
-                state, intake, thread_id=thread_hint
-            )
+            scope_prompt = f"{prompts.scope}{confirm_block}\n\n{plan_md}"
+            runtime._persist_intake_progress(state, intake, thread_id=thread_hint)
             continue
     else:
         # No host/framework plan to confirm: skip domain-selection question.
@@ -681,10 +617,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
 
     client_note = ""
     if intake.get("selected_jobs"):
-        n_jobs = sum(
-            len(r.get("frameworks") or [])
-            for r in (intake.get("selected_jobs") or [])
-        )
+        n_jobs = sum(len(r.get("frameworks") or []) for r in (intake.get("selected_jobs") or []))
         client_note = (
             f" Selected **{n_jobs}** host/framework job(s) from the preaudit plan."
             if lang.code == "en"
@@ -714,8 +647,8 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
         out["evidence_run_dir"] = str(store.root)
     return out
 
-async def intake_llm_json(runtime: AuditRuntime, system: str, user: str
-) -> dict[str, Any] | None:
+
+async def intake_llm_json(runtime: AuditRuntime, system: str, user: str) -> dict[str, Any] | None:
     """Один вызов fill_model для интерпретации ответа intake."""
     try:
         response = await runtime.fill_model.ainvoke(
@@ -728,7 +661,9 @@ async def intake_llm_json(runtime: AuditRuntime, system: str, user: str
     except Exception:  # noqa: BLE001
         return None
 
-async def intake_resolve_yes_no(runtime: AuditRuntime, raw: str, *, question_hint: str
+
+async def intake_resolve_yes_no(
+    runtime: AuditRuntime, raw: str, *, question_hint: str
 ) -> tuple[str, str]:
     """Интерпретировать да/нет intake через LLM; вернуть ответ + уточнение.
 
@@ -752,6 +687,7 @@ async def intake_resolve_yes_no(runtime: AuditRuntime, raw: str, *, question_hin
     if answer == "unknown":
         clarification = intake_clarification_from_payload(payload)
     return answer, clarification
+
 
 async def intake_resolve_client_name(runtime: AuditRuntime, raw: str) -> tuple[str, str]:
     """Resolve client name with LLM check + deterministic convention guard.
@@ -783,6 +719,7 @@ async def intake_resolve_client_name(runtime: AuditRuntime, raw: str) -> tuple[s
         return "", "llm_invalid"
     return name, ""
 
+
 async def intake_resolve_audit_type(runtime: AuditRuntime, raw: str) -> str | None:
     """Сопоставить ответ intake с типом аудита только через JSON LLM (шаг 4).
 
@@ -800,7 +737,9 @@ async def intake_resolve_audit_type(runtime: AuditRuntime, raw: str) -> str | No
     )
     return resolve_audit_type(str(raw or ""), payload)
 
-def persist_intake_progress(runtime: AuditRuntime,
+
+def persist_intake_progress(
+    runtime: AuditRuntime,
     state: AuditorState,
     intake: dict[str, Any],
     *,
@@ -829,7 +768,9 @@ def persist_intake_progress(runtime: AuditRuntime,
     except OSError:
         pass
 
-def load_intake_progress(runtime: AuditRuntime,
+
+def load_intake_progress(
+    runtime: AuditRuntime,
     state: AuditorState,
     *,
     thread_id: str = "",
@@ -872,4 +813,3 @@ def load_intake_progress(runtime: AuditRuntime,
         if key in saved and key not in intake:
             intake[key] = saved[key]
     return intake
-

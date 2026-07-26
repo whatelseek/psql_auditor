@@ -49,9 +49,7 @@ def test_resolve_pause_resume_prefers_newest_hitl_over_old_intake():
 @pytest.mark.asyncio
 async def test_interpret_hitl_decision_uses_llm_when_unclear():
     mock_llm = AsyncMock()
-    mock_llm.ainvoke = AsyncMock(
-        return_value=AIMessage(content="skip_all")
-    )
+    mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content="skip_all"))
     decision = await interpret_hitl_decision(
         "продолжай без этих проверок",
         llm=mock_llm,
@@ -183,9 +181,7 @@ async def test_hitl_skip_then_finalize(tmp_path: Path):
         )
 
     mock_llm = AsyncMock()
-    mock_llm.ainvoke = AsyncMock(
-        return_value=AIMessage(content="Executive summary OK.")
-    )
+    mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content="Executive summary OK."))
     with (
         patch.object(graph, "_fill_requirement_cells", side_effect=fake_fill),
         patch.object(graph, "fill_model", mock_llm),

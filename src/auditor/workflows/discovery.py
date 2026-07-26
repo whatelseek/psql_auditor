@@ -16,6 +16,7 @@ from langchain_core.messages import (
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from auditor.context import count_tool_rounds, truncate_text
+from auditor.evidence_store import EvidenceStore
 from auditor.frameworks import (
     frameworks_catalog_text,
     frameworks_detect_catalog_text,
@@ -25,6 +26,7 @@ from auditor.frameworks import (
     route_framework,
 )
 from auditor.host_facts import (
+    DriftItem,
     HostFacts,
     format_host_facts_markdown,
     merge_facts_from_raw,
@@ -45,9 +47,10 @@ from auditor.prompts import (
 )
 from auditor.runtime_target import effective_settings
 from auditor.secrets_file import InventorySshTarget, list_client_ssh_targets
-from auditor.state import AuditorState
+from auditor.state import AuditorState, Finding
 from auditor.workflows.helpers import _as_finding, _extract_json
 from auditor.workflows.protocols import AuditRuntime
+
 
 async def route_framework_node(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
     """Node: choose ``agents/<framework>.md`` (honors pinned ``framework_id``)."""
@@ -69,9 +72,7 @@ async def route_framework_node(runtime: AuditRuntime, state: AuditorState) -> di
         if pinned:
             fw = get_framework(pinned, runtime.settings.agents_dir)
             if fw is None:
-                raise FileNotFoundError(
-                    f"Pinned framework `{pinned}` not found in agents/"
-                )
+                raise FileNotFoundError(f"Pinned framework `{pinned}` not found in agents/")
         else:
             fw = route_framework(
                 user_request,
@@ -112,6 +113,7 @@ async def route_framework_node(runtime: AuditRuntime, state: AuditorState) -> di
             ),
         ],
     }
+
 
 async def load_framework(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
     """Node: load the drop-in Markdown checklist for the selected framework."""
@@ -163,9 +165,8 @@ async def load_framework(runtime: AuditRuntime, state: AuditorState) -> dict[str
         pending.append(rid)
 
     reused = len(existing)
-    msg = (
-        f"Loaded {len(req_map)} requirements from {selected.path}"
-        + (f" ({reused} already assessed)." if reused else ".")
+    msg = f"Loaded {len(req_map)} requirements from {selected.path}" + (
+        f" ({reused} already assessed)." if reused else "."
     )
     return {
         "framework_id": selected.id,
@@ -184,6 +185,7 @@ async def load_framework(runtime: AuditRuntime, state: AuditorState) -> dict[str
         ],
     }
 
+
 async def collect_host_facts(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
     """Gather host facts and copy existing INVENTORY.md without rewriting it."""
     if state.get("error") and not (state.get("requirements") or {}):
@@ -191,14 +193,12 @@ async def collect_host_facts(runtime: AuditRuntime, state: AuditorState) -> dict
 
     intake = dict(state.get("intake") or {})
     has_access = bool(state.get("has_access") or intake.get("has_access"))
-    client_name = str(
-        state.get("client_name") or intake.get("client_name") or "client"
-    )
+    client_name = str(state.get("client_name") or intake.get("client_name") or "client")
     host_id = str(state.get("evidence_host_id") or "").strip()
     lang = runtime._report_language(state)
     facts_md = ""
     drift_md = ""
-    drift_items = []
+    drift_items: list[DriftItem] = []
     facts = None
 
     if has_access and effective_settings(runtime.settings).ssh_host:
@@ -213,17 +213,14 @@ async def collect_host_facts(runtime: AuditRuntime, state: AuditorState) -> dict
                     payload = json.loads(facts_path.read_text(encoding="utf-8"))
                     facts = parse_host_facts_json(
                         payload.get("facts") or payload,
-                        ssh_host=str(
-                            effective_settings(runtime.settings).ssh_host or ""
-                        ),
+                        ssh_host=str(effective_settings(runtime.settings).ssh_host or ""),
                     )
                     # Retry only when prior discovery failed with no identity.
                     if facts.error and not (facts.hostname or facts.os_id):
                         facts = None
                     elif facts is not None:
                         facts.raw["host_facts_source"] = str(
-                            (facts.raw or {}).get("host_facts_source")
-                            or "reuse"
+                            (facts.raw or {}).get("host_facts_source") or "reuse"
                         )
                 except Exception:  # noqa: BLE001
                     facts = None
@@ -233,24 +230,18 @@ async def collect_host_facts(runtime: AuditRuntime, state: AuditorState) -> dict
                 host_id=host_id,
                 user_request=str(state.get("user_request") or ""),
             )
-        facts_md = format_host_facts_markdown(
-            facts, None, language=lang.code
-        )
+        facts_md = format_host_facts_markdown(facts, None, language=lang.code)
 
         if store is not None and facts is not None:
             if host_id:
                 store.host_segment = host_id
             facts_base = store.host_root(host_id or None)
-            write_host_facts_json(
-                facts_base / "host_facts.json", facts, drift_items
-            )
+            write_host_facts_json(facts_base / "host_facts.json", facts, drift_items)
             (facts_base / "host_facts.md").write_text(facts_md, encoding="utf-8")
 
         if facts is not None:
             inv_path = (
-                Path(runtime.settings.inventory_dir)
-                / client_slug(client_name)
-                / "INVENTORY.md"
+                Path(runtime.settings.inventory_dir) / client_slug(client_name) / "INVENTORY.md"
             )
             if store is not None:
                 dest = store.root / "INVENTORY.md"
@@ -261,11 +252,7 @@ async def collect_host_facts(runtime: AuditRuntime, state: AuditorState) -> dict
                     )
     else:
         # No live access: reuse existing inventory only; do not auto-fill.
-        inv_path = (
-            Path(runtime.settings.inventory_dir)
-            / client_slug(client_name)
-            / "INVENTORY.md"
-        )
+        inv_path = Path(runtime.settings.inventory_dir) / client_slug(client_name) / "INVENTORY.md"
         store = runtime._store_from_state(state)
         if store is not None and inv_path.is_file():
             (store.root / "INVENTORY.md").write_text(
@@ -283,7 +270,9 @@ async def collect_host_facts(runtime: AuditRuntime, state: AuditorState) -> dict
         ],
     }
 
-async def collect_host_facts_dispatch(runtime: AuditRuntime,
+
+async def collect_host_facts_dispatch(
+    runtime: AuditRuntime,
     *,
     store: EvidenceStore | None = None,
     host_id: str = "",
@@ -298,7 +287,9 @@ async def collect_host_facts_dispatch(runtime: AuditRuntime,
         user_request=user_request,
     )
 
-async def collect_host_facts_llm(runtime: AuditRuntime,
+
+async def collect_host_facts_llm(
+    runtime: AuditRuntime,
     *,
     store: EvidenceStore | None = None,
     host_id: str = "",
@@ -340,8 +331,7 @@ async def collect_host_facts_llm(runtime: AuditRuntime,
     limit = max(1, runtime.settings.max_parallel_assessments)
     sem = asyncio.Semaphore(limit)
     emit_phase(
-        f"Discovery: assessing {len(pending)} `host_facts` requirement(s) "
-        f"(concurrency={limit})…",
+        f"Discovery: assessing {len(pending)} `host_facts` requirement(s) (concurrency={limit})…",
         framework_id="host_facts",
     )
 
@@ -377,6 +367,7 @@ async def collect_host_facts_llm(runtime: AuditRuntime,
                 )
                 if store is not None:
                     from auditor.result_identity_bind import attach_result_identity
+
                     meta = store.read_run_meta()
                     finding = attach_result_identity(
                         finding,
@@ -384,16 +375,12 @@ async def collect_host_facts_llm(runtime: AuditRuntime,
                             "client_id": str(meta.get("client_id") or ""),
                             "audit_run_id": str(meta.get("audit_run_id") or ""),
                             "asset_id": str(meta.get("asset_id") or ""),
-                            "framework_version": str(
-                                meta.get("framework_version") or "1"
-                            ),
+                            "framework_version": str(meta.get("framework_version") or "1"),
                         },
                         framework_id="host_facts",
                         framework_version=str(meta.get("framework_version") or "1"),
                     )
-                    store.write_finding(
-                        "host_facts", req_id, finding.model_dump()
-                    )
+                    store.write_finding("host_facts", req_id, finding.model_dump())
             emit_req_status(
                 req_id,
                 finding.status,
@@ -418,9 +405,7 @@ async def collect_host_facts_llm(runtime: AuditRuntime,
                 chunks.append(f"[{rid} tools]\n{tool_text}")
         obs = str(finding.evidence or "").strip()
         if obs:
-            chunks.append(
-                f"[{rid} {finding.status}] {finding.title}: {obs}"
-            )
+            chunks.append(f"[{rid} {finding.status}] {finding.title}: {obs}")
 
     evidence = "\n---\n".join(c.strip() for c in chunks if c and c.strip())
     evidence = truncate_text(
@@ -445,7 +430,9 @@ async def collect_host_facts_llm(runtime: AuditRuntime,
             facts.error = err_bits[0][:500]
     return facts
 
-async def collect_host_facts_compact(runtime: AuditRuntime,
+
+async def collect_host_facts_compact(
+    runtime: AuditRuntime,
     *,
     store: EvidenceStore | None = None,
     host_id: str = "",
@@ -517,7 +504,9 @@ async def collect_host_facts_compact(runtime: AuditRuntime,
         source="llm",
     )
 
-async def facts_from_host_facts_evidence(runtime: AuditRuntime,
+
+async def facts_from_host_facts_evidence(
+    runtime: AuditRuntime,
     *,
     evidence: str,
     raw: dict[str, str],
@@ -551,7 +540,9 @@ async def facts_from_host_facts_evidence(runtime: AuditRuntime,
     facts.raw["host_facts_source"] = source
     return facts
 
-async def discover_inventory_hosts(runtime: AuditRuntime,
+
+async def discover_inventory_hosts(
+    runtime: AuditRuntime,
     *,
     intake: dict[str, Any],
     store: EvidenceStore,
@@ -592,15 +583,9 @@ async def discover_inventory_hosts(runtime: AuditRuntime,
             facts.raw["software_inventory_source"] = "llm"
         facts.ssh_host = target.host
         # Stash LLM routing on facts.raw for proposed_jobs builder.
-        facts.raw["_llm_framework_ids"] = ",".join(
-            route.get("framework_ids") or []
-        )
-        facts.raw["_llm_highlight_packages"] = "\n".join(
-            route.get("highlight_packages") or []
-        )
-        facts.raw["_llm_highlight_binaries"] = "\n".join(
-            route.get("highlight_binaries") or []
-        )
+        facts.raw["_llm_framework_ids"] = ",".join(route.get("framework_ids") or [])
+        facts.raw["_llm_highlight_packages"] = "\n".join(route.get("highlight_packages") or [])
+        facts.raw["_llm_highlight_binaries"] = "\n".join(route.get("highlight_binaries") or [])
         facts.raw["_llm_software_notes"] = str(route.get("notes") or "")
         host_base = store.host_root(target.slug)
         write_host_facts_json(host_base / "host_facts.json", facts, [])
@@ -614,7 +599,9 @@ async def discover_inventory_hosts(runtime: AuditRuntime,
         discovered.append((target, facts))
     return discovered
 
-async def llm_route_frameworks_from_software(runtime: AuditRuntime,
+
+async def llm_route_frameworks_from_software(
+    runtime: AuditRuntime,
     facts: HostFacts,
 ) -> dict[str, Any]:
     """Ask the LLM which agents/ frameworks match collected software signals.
@@ -630,29 +617,21 @@ async def llm_route_frameworks_from_software(runtime: AuditRuntime,
     pkg_lines = "\n".join(f"PKG:{p}" for p in (facts.packages or []))
     bin_lines = "\n".join(f"BIN:{b}" for b in (facts.binaries or []))
     file_lines = "\n".join(f"FILE:{f}" for f in (facts.key_files or []))
-    inventory = "\n".join(
-        x for x in (bin_lines, file_lines, pkg_lines) if x
-    ) or "(empty inventory)"
+    inventory = "\n".join(x for x in (bin_lines, file_lines, pkg_lines) if x) or "(empty inventory)"
     # Keep routing prompt small — full dumps belong on disk, not in the LLM.
     inventory = truncate_text(
         inventory,
         min(runtime.settings.max_tool_output_chars * 4, 24_000),
         "software_inventory",
     )
-    os_line = (
-        facts.os_pretty_name
-        or f"{facts.os_id} {facts.os_version_id}".strip()
-        or "unknown"
-    )
+    os_line = facts.os_pretty_name or f"{facts.os_id} {facts.os_version_id}".strip() or "unknown"
     messages = [
         SystemMessage(content=SOFTWARE_FRAMEWORK_ROUTE_SYSTEM),
         HumanMessage(
             content=SOFTWARE_FRAMEWORK_ROUTE_PROMPT.format(
                 ssh_host=facts.ssh_host or "(unknown)",
                 os_line=os_line,
-                framework_catalog=frameworks_detect_catalog_text(
-                    runtime.settings.agents_dir
-                ),
+                framework_catalog=frameworks_detect_catalog_text(runtime.settings.agents_dir),
                 software_inventory=inventory,
             )
         ),
@@ -667,25 +646,16 @@ async def llm_route_frameworks_from_software(runtime: AuditRuntime,
             "highlight_binaries": [],
             "notes": f"LLM software routing failed: {type(exc).__name__}: {exc}",
         }
-    ids = [
-        str(x).strip()
-        for x in (payload.get("framework_ids") or [])
-        if str(x).strip() in known
-    ]
+    ids = [str(x).strip() for x in (payload.get("framework_ids") or []) if str(x).strip() in known]
     highlights = [
-        str(x).strip()
-        for x in (payload.get("highlight_packages") or [])
-        if str(x).strip()
+        str(x).strip() for x in (payload.get("highlight_packages") or []) if str(x).strip()
     ][:40]
-    hl_bins = [
-        str(x).strip()
-        for x in (payload.get("highlight_binaries") or [])
-        if str(x).strip()
-    ][:40]
+    hl_bins = [str(x).strip() for x in (payload.get("highlight_binaries") or []) if str(x).strip()][
+        :40
+    ]
     return {
         "framework_ids": ids,
         "highlight_packages": highlights,
         "highlight_binaries": hl_bins,
         "notes": str(payload.get("notes") or "").strip()[:500],
     }
-

@@ -15,7 +15,6 @@ from auditor.asset_registry import get_asset_registry
 from auditor.audit_registry import get_audit_registry
 from auditor.client_registry import get_client_registry, looks_like_audit_run_id
 from auditor.context import truncate_text
-from auditor.domain.result_identity import index_by_result_id
 from auditor.evidence_store import EvidenceStore, bind_host_segment, new_run_id
 from auditor.frameworks import get_framework
 from auditor.hitl import format_continue_assistant_message
@@ -35,7 +34,9 @@ try:
 except ImportError:  # pragma: no cover
     AsyncSqliteSaver = None  # type: ignore[misc, assignment]
 
-async def arun_one(runtime: AuditRuntime,
+
+async def arun_one(
+    runtime: AuditRuntime,
     user_text: str,
     *,
     framework_id: str | None = None,
@@ -73,14 +74,10 @@ async def arun_one(runtime: AuditRuntime,
         meta["client_name"] = intake_state.get("client_name")
         meta["audit_types"] = intake_state.get("audit_types")
         if intake_state.get("results_session_number") is not None:
-            meta["results_session_number"] = intake_state[
-                "results_session_number"
-            ]
+            meta["results_session_number"] = intake_state["results_session_number"]
         if intake_state.get("audit_run_id"):
             meta["audit_run_id"] = intake_state["audit_run_id"]
-    client_name = str(
-        (intake_state or {}).get("client_name") or meta.get("client_name") or ""
-    )
+    client_name = str((intake_state or {}).get("client_name") or meta.get("client_name") or "")
     slug = str(
         (intake_state or {}).get("client_slug")
         or (client_slug(client_name) if client_name else "")
@@ -197,9 +194,7 @@ async def arun_one(runtime: AuditRuntime,
             }
         )
         if intake_state.get("results_session_number") is not None:
-            initial["results_session_number"] = int(
-                intake_state["results_session_number"]
-            )
+            initial["results_session_number"] = int(intake_state["results_session_number"])
     if framework_id:
         initial["framework_id"] = framework_id
     if evidence_host_id:
@@ -219,16 +214,13 @@ async def arun_one(runtime: AuditRuntime,
         result = await runtime.graph.ainvoke(initial, config)
         return runtime._decorate_result(result, thread_id=tid, store=store)
 
-    intake_for_scope = (
-        (intake_state.get("intake") if intake_state else None)
-        or intake_state
-        or {}
-    )
+    intake_for_scope = (intake_state.get("intake") if intake_state else None) or intake_state or {}
     if not isinstance(intake_for_scope, dict):
         intake_for_scope = {}
     with runtime._target_scope(intake=intake_for_scope, ssh_target=ssh_target):
         with bind_host_segment(evidence_host_id):
             return await _invoke()
+
 
 async def aresume(runtime: AuditRuntime, thread_id: str, user_text: str) -> dict[str, Any]:
     """Resume a graph paused on intake or ``human_gate``."""
@@ -241,7 +233,10 @@ async def aresume(runtime: AuditRuntime, thread_id: str, user_text: str) -> dict
     except Exception:  # noqa: BLE001
         pre_values = {}
     slug = runtime._client_slug_from_values(pre_values)
-    with runtime._target_scope(client_slug=slug, intake=pre_values.get("intake") if isinstance(pre_values.get("intake"), dict) else None):
+    with runtime._target_scope(
+        client_slug=slug,
+        intake=pre_values.get("intake") if isinstance(pre_values.get("intake"), dict) else None,
+    ):
         result = await graph.ainvoke(Command(resume=user_text), config)
     snap = await graph.aget_state(config)
     values = snap.values or {}
@@ -253,9 +248,7 @@ async def aresume(runtime: AuditRuntime, thread_id: str, user_text: str) -> dict
             run_id=run_id or Path(str(values["evidence_run_dir"])).name,
         )
         runtime._evidence_by_run[store.run_id] = store
-    decorated = runtime._decorate_result(
-        result, thread_id=thread_id, store=store, intake=is_intake
-    )
+    decorated = runtime._decorate_result(result, thread_id=thread_id, store=store, intake=is_intake)
     if decorated.get("awaiting_hitl"):
         return decorated
 
@@ -264,11 +257,7 @@ async def aresume(runtime: AuditRuntime, thread_id: str, user_text: str) -> dict
         session = runtime._forget_multi_session(thread_id) or {}
         user_req = session.get("user_text") or values.get("user_request") or user_text
         base_thread = session.get("base_thread") or thread_id.replace(":intake", "")
-        run_id = (
-            values.get("evidence_run_id")
-            or session.get("run_id")
-            or run_id
-        )
+        run_id = values.get("evidence_run_id") or session.get("run_id") or run_id
         intake = values.get("intake") or {}
         return await runtime._start_frameworks_after_intake(
             user_text=str(user_req),
@@ -280,7 +269,10 @@ async def aresume(runtime: AuditRuntime, thread_id: str, user_text: str) -> dict
     # If this thread was part of a multi-framework run, continue the queue.
     return await runtime._continue_multi_after_resume(thread_id, decorated)
 
-async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None = None) -> dict[str, Any]:
+
+async def acontinue(
+    runtime: AuditRuntime, thread_id: str, *, run_id: str | None = None
+) -> dict[str, Any]:
     """Resume an interrupted mid-assess (or HITL) run after disconnect/restart.
 
     Active run identity must be explicit (``run_id`` / ``audit_run_id`` in meta)
@@ -309,7 +301,9 @@ async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None
             registry.resume_run(audit_run_id)
     if not rid:
         # Prefer in-memory multi-session bound to this thread.
-        sess = runtime._multi_sessions.get(thread_id) if hasattr(runtime, "_multi_sessions") else None
+        sess = (
+            runtime._multi_sessions.get(thread_id) if hasattr(runtime, "_multi_sessions") else None
+        )
         if isinstance(sess, dict) and sess.get("run_id"):
             rid = str(sess.get("run_id") or "")
             audit_run_id = str(sess.get("audit_run_id") or audit_run_id)
@@ -344,9 +338,10 @@ async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None
     except Exception:  # noqa: BLE001
         snap = None
 
-    if snap is not None and (snap.next or (snap.tasks and any(
-        getattr(t, "interrupts", None) for t in (snap.tasks or [])
-    ))):
+    if snap is not None and (
+        snap.next
+        or (snap.tasks and any(getattr(t, "interrupts", None) for t in (snap.tasks or [])))
+    ):
         # Pending interrupt → treat as resume with continue/skip-all friendly text
         interrupts = []
         for task in snap.tasks or []:
@@ -365,9 +360,7 @@ async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None
         run_id2 = values.get("evidence_run_id") or rid
         if store is None and run_id2:
             try:
-                store = EvidenceStore.open_existing(
-                    runtime.settings.evidence_dir, str(run_id2)
-                )
+                store = EvidenceStore.open_existing(runtime.settings.evidence_dir, str(run_id2))
                 runtime._evidence_by_run[store.run_id] = store
             except Exception:  # noqa: BLE001
                 pass
@@ -377,9 +370,7 @@ async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None
         if decorated.get("awaiting_hitl"):
             return decorated
         if rid:
-            write_run_status(
-                runtime.settings.evidence_dir, str(run_id2 or rid), status="running"
-            )
+            write_run_status(runtime.settings.evidence_dir, str(run_id2 or rid), status="running")
         return await runtime._continue_multi_after_resume(thread_id, decorated)
 
     # Evidence fallback: rebuild pending_ids from disk and re-enter assess.
@@ -402,8 +393,7 @@ async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None
 
     meta = store.read_run_meta()
     framework_id = str(
-        meta.get("framework_id")
-        or (thread_id.split(":")[-1] if ":" in thread_id else "")
+        meta.get("framework_id") or (thread_id.split(":")[-1] if ":" in thread_id else "")
     )
     host_id = str(meta.get("evidence_host_id") or "")
     if host_id:
@@ -445,16 +435,12 @@ async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None
                         "audit_run_id": str(meta.get("audit_run_id") or ""),
                         "asset_id": str(meta.get("asset_id") or ""),
                         "framework_version": str(
-                            meta.get("framework_version")
-                            or getattr(fw, "version", "")
-                            or ""
+                            meta.get("framework_version") or getattr(fw, "version", "") or ""
                         ),
                     },
                     framework_id=framework_id,
                     framework_version=str(
-                        meta.get("framework_version")
-                        or getattr(fw, "version", "")
-                        or ""
+                        meta.get("framework_version") or getattr(fw, "version", "") or ""
                     ),
                     existing=raw,
                 )
@@ -473,11 +459,14 @@ async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None
     )
 
     continue_intake = meta.get("intake") if isinstance(meta.get("intake"), dict) else None
-    continue_slug = str(
-        meta.get("client_slug")
-        or ((continue_intake or {}).get("client_slug") if continue_intake else "")
-        or ""
-    ).strip() or None
+    continue_slug = (
+        str(
+            meta.get("client_slug")
+            or ((continue_intake or {}).get("client_slug") if continue_intake else "")
+            or ""
+        ).strip()
+        or None
+    )
 
     if not pending:
         # All REQs done — finalize via graph update + finalize node path
@@ -502,9 +491,7 @@ async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None
         )
         with runtime._target_scope(client_slug=continue_slug, intake=continue_intake):
             result = await graph.ainvoke(None, config)
-        decorated = runtime._decorate_result(
-            result, thread_id=thread_id, store=store
-        )
+        decorated = runtime._decorate_result(result, thread_id=thread_id, store=store)
         return await runtime._continue_multi_after_resume(thread_id, decorated)
 
     await graph.aupdate_state(
@@ -536,7 +523,9 @@ async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None
     write_run_status(runtime.settings.evidence_dir, rid, status="completed")
     return await runtime._continue_multi_after_resume(thread_id, decorated)
 
-async def arun_intake(runtime: AuditRuntime,
+
+async def arun_intake(
+    runtime: AuditRuntime,
     user_text: str,
     *,
     run_id: str,
@@ -562,6 +551,7 @@ async def arun_intake(runtime: AuditRuntime,
     config = {"configurable": {"thread_id": thread_id}}
     result = await runtime.intake_graph.ainvoke(initial, config)
     return runtime._decorate_result(result, thread_id=thread_id, store=store, intake=True)
+
 
 def interrupted_continue_message(runtime: AuditRuntime, thread_id: str, run_id: str) -> str:
     """Build operator-facing interrupt message with continue marker."""
@@ -589,6 +579,7 @@ def interrupted_continue_message(runtime: AuditRuntime, thread_id: str, run_id: 
         thread_id,
     )
 
+
 async def ensure_async_checkpointer(runtime: AuditRuntime) -> None:
     """Upgrade to AsyncSqliteSaver (required for ``ainvoke`` durability)."""
     if runtime._async_cp_ready and runtime._checkpoint_conn is not None:
@@ -611,14 +602,17 @@ async def ensure_async_checkpointer(runtime: AuditRuntime) -> None:
         path = Path(runtime.settings.checkpoint_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         # Keep the async context manager open for the process lifetime.
-        if getattr(runtime, "_sqlite_cm", None) is not None:
+        sqlite_cm = getattr(runtime, "_sqlite_cm", None)
+        if sqlite_cm is not None:
             try:
-                await runtime._sqlite_cm.__aexit__(None, None, None)
+                await sqlite_cm.__aexit__(None, None, None)
             except Exception:  # noqa: BLE001
                 pass
             runtime._sqlite_cm = None
         runtime._sqlite_cm = AsyncSqliteSaver.from_conn_string(str(path))
-        runtime._checkpointer = await runtime._sqlite_cm.__aenter__()
+        sqlite_cm = runtime._sqlite_cm
+        assert sqlite_cm is not None
+        runtime._checkpointer = await sqlite_cm.__aenter__()
         runtime._checkpoint_conn = getattr(runtime._checkpointer, "conn", None)
         runtime.graph = runtime._build()
         runtime.intake_graph = runtime._build_intake()
@@ -631,7 +625,9 @@ async def ensure_async_checkpointer(runtime: AuditRuntime) -> None:
         runtime._async_cp_ready = True
         runtime._checkpoint_conn = None
 
-def target_scope(runtime: AuditRuntime,
+
+def target_scope(
+    runtime: AuditRuntime,
     *,
     client_slug: str | None = None,
     ssh_target: InventorySshTarget | None = None,
@@ -657,15 +653,11 @@ def target_scope(runtime: AuditRuntime,
             stack.enter_context(bind_host_target(ssh_target))
         yield
 
+
 def client_slug_from_values(runtime: AuditRuntime, values: dict[str, Any] | None) -> str | None:
     """Extract client slug from checkpoint/intake state when present."""
     if not values:
         return None
     intake = values.get("intake") if isinstance(values.get("intake"), dict) else {}
-    slug = str(
-        values.get("client_slug")
-        or (intake or {}).get("client_slug")
-        or ""
-    ).strip()
+    slug = str(values.get("client_slug") or (intake or {}).get("client_slug") or "").strip()
     return slug or None
-

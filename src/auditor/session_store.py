@@ -59,7 +59,8 @@ def save_multi_session(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = _load(path)
     safe = _sanitize_session(session)
-    sessions = payload.get("sessions") if isinstance(payload.get("sessions"), dict) else {}
+    raw_sessions = payload.get("sessions")
+    sessions: dict[str, Any] = raw_sessions if isinstance(raw_sessions, dict) else {}
     sessions[thread_id] = safe
     payload["sessions"] = sessions
     payload["run_id"] = run_id
@@ -188,9 +189,7 @@ def find_interrupted_run(evidence_dir: Path) -> tuple[str, dict[str, Any]] | Non
     return run_id, meta
 
 
-def find_run_for_thread(
-    evidence_dir: Path, thread_id: str
-) -> tuple[str, dict[str, Any]] | None:
+def find_run_for_thread(evidence_dir: Path, thread_id: str) -> tuple[str, dict[str, Any]] | None:
     """Locate evidence run whose meta/session is bound to ``thread_id``.
 
     Explicit thread binding — never falls back to "latest interrupted".

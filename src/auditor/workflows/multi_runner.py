@@ -19,7 +19,6 @@ from auditor.domain import (
     AuditJobType,
     JobErrorInfo,
 )
-from auditor.legacy_compat import MissingAuditRunIdError, require_audit_run_id
 from auditor.evidence_store import EvidenceStore, new_run_id
 from auditor.followup import followup_footer
 from auditor.frameworks import get_framework, route_frameworks, select_frameworks_for_host
@@ -31,14 +30,16 @@ from auditor.intake import (
     frameworks_for_audit_type,
 )
 from auditor.language import detect_report_language
+from auditor.legacy_compat import MissingAuditRunIdError, require_audit_run_id
 from auditor.report_archive import package_and_publish_archive
 from auditor.results_store import start_session_safe
 from auditor.secrets_file import InventorySshTarget, list_client_ssh_targets
 from auditor.session_store import drop_multi_session, load_all_multi_sessions, save_multi_session
-from auditor.state import AuditorState
 from auditor.workflows.protocols import AuditRuntime
 
-async def schedule_framework_jobs(runtime: AuditRuntime,
+
+async def schedule_framework_jobs(
+    runtime: AuditRuntime,
     *,
     user_text: str,
     base_thread: str,
@@ -60,8 +61,7 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
             completed,
             run_id=run_id,
             base_thread=base_thread,
-            audit_run_id=str((intake_state or {}).get("audit_run_id") or "")
-            or None,
+            audit_run_id=str((intake_state or {}).get("audit_run_id") or "") or None,
         )
         return merged
 
@@ -84,23 +84,17 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
             "base_thread": base_thread,
             "run_id": run_id,
             "audit_run_id": str(
-                (intake_state or {}).get("audit_run_id")
-                or job.get("audit_run_id")
-                or ""
+                (intake_state or {}).get("audit_run_id") or job.get("audit_run_id") or ""
             ),
             "job_id": str(job.get("job_id") or ""),
             "user_text": user_text,
             "framework_id": str(job.get("framework_id") or ""),
-            "framework_title": str(
-                job.get("framework_title") or job.get("framework_id") or ""
-            ),
+            "framework_title": str(job.get("framework_title") or job.get("framework_id") or ""),
             "job_key": _job_dict_key(job),
             "evidence_host_id": str(job.get("evidence_host_id") or ""),
             "ssh_target": _target_from_job_dict(job),
             "remaining_jobs": list(remaining),
-            "remaining": [
-                str(j.get("framework_id") or "") for j in remaining
-            ],
+            "remaining": [str(j.get("framework_id") or "") for j in remaining],
             "completed": list(completed_list),
             "intake_state": intake_state,
             "plan_md": plan_md,
@@ -191,11 +185,7 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
         return result
 
     while pending or in_flight:
-        while (
-            not stop_starting
-            and len(in_flight) < limit
-            and pending
-        ):
+        while not stop_starting and len(in_flight) < limit and pending:
             started = False
             for index, job in enumerate(pending):
                 host_key = _host_lock_key_from_job(job)
@@ -239,17 +229,13 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
                 result = task.result()
             except Exception as exc:  # noqa: BLE001
                 result = {
-                    "report": (
-                        f"Host/framework job `{key}` failed: "
-                        f"{type(exc).__name__}: {exc}"
-                    ),
+                    "report": (f"Host/framework job `{key}` failed: {type(exc).__name__}: {exc}"),
                     "awaiting_hitl": False,
                     "thread_id": tid,
                     "messages": [
                         AIMessage(
                             content=(
-                                f"Host/framework job `{key}` failed: "
-                                f"{type(exc).__name__}: {exc}"
+                                f"Host/framework job `{key}` failed: {type(exc).__name__}: {exc}"
                             )
                         )
                     ],
@@ -268,9 +254,7 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
                 continue
 
             runtime._forget_multi_session(tid)
-            completed_list.append(
-                (key, _job_display_title(job), result.get("report") or "")
-            )
+            completed_list.append((key, _job_display_title(job), result.get("report") or ""))
 
     if hitl_paused:
         siblings = [
@@ -279,22 +263,14 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
                 "job_key": item["job_key"],
                 "framework_id": str(item["job"].get("framework_id") or ""),
                 "framework_title": str(
-                    item["job"].get("framework_title")
-                    or item["job"].get("framework_id")
-                    or ""
+                    item["job"].get("framework_title") or item["job"].get("framework_id") or ""
                 ),
-                "evidence_host_id": str(
-                    item["job"].get("evidence_host_id") or ""
-                ),
+                "evidence_host_id": str(item["job"].get("evidence_host_id") or ""),
             }
             for item in hitl_paused
         ]
         for item in hitl_paused:
-            others = [
-                s
-                for s in siblings
-                if s["thread_id"] != item["thread_id"]
-            ]
+            others = [s for s in siblings if s["thread_id"] != item["thread_id"]]
             report = str(item["result"].get("report") or "")
             runtime._remember_multi_session(
                 str(item["thread_id"]),
@@ -309,9 +285,7 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
         prefix = runtime._multi_progress_preamble(
             completed_list,
             str(primary["job_key"]),
-            in_flight_keys=[
-                str(p["job_key"]) for p in hitl_paused[1:]
-            ],
+            in_flight_keys=[str(p["job_key"]) for p in hitl_paused[1:]],
             queued_keys=[_job_dict_key(j) for j in pending],
         )
         preamble = f"{plan_md}\n{prefix}" if plan_md else prefix
@@ -334,6 +308,7 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
         merged["report"] = f"{plan_md}\n{merged.get('report') or ''}"
     return merged
 
+
 def _bootstrap_audit_run(
     runtime: AuditRuntime,
     *,
@@ -348,21 +323,16 @@ def _bootstrap_audit_run(
     Never derives a run id from client name/slug.
     """
     updated = dict(intake_state)
-    intake = (
-        updated.get("intake") if isinstance(updated.get("intake"), dict) else {}
-    )
+    raw_intake = updated.get("intake")
+    intake: dict[str, Any] = raw_intake if isinstance(raw_intake, dict) else {}
     display = str(updated.get("client_name") or intake.get("client_name") or "")
     slug = str(
-        updated.get("client_slug")
-        or intake.get("client_slug")
-        or client_slug(display)
-        or "client"
+        updated.get("client_slug") or intake.get("client_slug") or client_slug(display) or "client"
     )
     client = get_client_registry(runtime.settings.evidence_dir).ensure_client(
         display_name=display or slug,
         slug=slug,
-        client_id=str(updated.get("client_id") or intake.get("client_id") or "")
-        or None,
+        client_id=str(updated.get("client_id") or intake.get("client_id") or "") or None,
     )
     updated["client_id"] = client.client_id
     updated["client_slug"] = client.slug
@@ -373,9 +343,7 @@ def _bootstrap_audit_run(
         require_audit_run_id(audit_run_id, context="_bootstrap_audit_run")
         arun = registry.get_run(audit_run_id)
         if arun is None:
-            raise MissingAuditRunIdError(
-                f"unknown audit_run_id {audit_run_id!r} in bootstrap"
-            )
+            raise MissingAuditRunIdError(f"unknown audit_run_id {audit_run_id!r} in bootstrap")
         if arun.client_id and arun.client_id != client.client_id:
             raise MissingAuditRunIdError(
                 f"audit_run_id {audit_run_id!r} belongs to a different client"
@@ -399,9 +367,7 @@ def _bootstrap_audit_run(
             scope=scope,
             evidence_run_id=run_id,
             base_thread_id=base_thread,
-            results_session_number=(
-                int(session_number) if session_number is not None else None
-            ),
+            results_session_number=(int(session_number) if session_number is not None else None),
         )
         registry.mark_run_started(arun.audit_run_id)
         audit_run_id = arun.audit_run_id
@@ -461,7 +427,9 @@ def _bootstrap_audit_run(
         )
     return updated
 
-async def run_framework_jobs(runtime: AuditRuntime,
+
+async def run_framework_jobs(
+    runtime: AuditRuntime,
     *,
     user_text: str,
     base_thread: str,
@@ -496,7 +464,9 @@ async def run_framework_jobs(runtime: AuditRuntime,
         plan_md=plan_md,
     )
 
-async def merge_multi_reports(runtime: AuditRuntime,
+
+async def merge_multi_reports(
+    runtime: AuditRuntime,
     completed: list[tuple[str, str, str]],
     *,
     run_id: str,
@@ -598,9 +568,7 @@ async def merge_multi_reports(runtime: AuditRuntime,
     assessed = max(0, total - status_counts["skipped"])
     passed = status_counts["pass"]
     compliance_pct = (100.0 * passed / assessed) if assessed else 0.0
-    audited_hosts = len(host_ids) if host_ids else (
-        1 if ordered_reports else 0
-    )
+    audited_hosts = len(host_ids) if host_ids else (1 if ordered_reports else 0)
 
     sev_rank = {
         "critical": 0,
@@ -611,9 +579,7 @@ async def merge_multi_reports(runtime: AuditRuntime,
         "unknown": 5,
     }
     status_rank = {"fail": 0, "error": 1, "partial": 2}
-    top_findings = [
-        row for row in ranked_rows if row[4] in {"fail", "error", "partial"}
-    ]
+    top_findings = [row for row in ranked_rows if row[4] in {"fail", "error", "partial"}]
     top_findings.sort(
         key=lambda item: (
             sev_rank.get(item[3].lower(), 99),
@@ -657,9 +623,7 @@ async def merge_multi_reports(runtime: AuditRuntime,
     if store is not None:
         summary_sections.extend([f"Evidence directory: `{store.root}`", ""])
     for fw_id, req_id, title, severity, status in top_findings[:10]:
-        summary_sections.append(
-            f"- [{severity}/{status}] `{req_id}` {title} (`{fw_id}`)"
-        )
+        summary_sections.append(f"- [{severity}/{status}] `{req_id}` {title} (`{fw_id}`)")
     if not top_findings:
         summary_sections.append("- No critical/high non-pass findings detected.")
     combined_full = "\n".join(full_sections).strip() + "\n"
@@ -670,14 +634,10 @@ async def merge_multi_reports(runtime: AuditRuntime,
         store.write_root_report(combined_full)
         if runtime.settings.archive_enabled:
             try:
-                packaged = await package_and_publish_archive(
-                    store.root, runtime.settings
-                )
+                packaged = await package_and_publish_archive(store.root, runtime.settings)
                 archive_path = str(packaged.get("zip_path") or "")
                 archive_url = str(packaged.get("download_url") or "")
-                chat_text = (
-                    f"{chat_text.rstrip()}\n{packaged.get('chat_section') or ''}"
-                )
+                chat_text = f"{chat_text.rstrip()}\n{packaged.get('chat_section') or ''}"
             except Exception as exc:  # noqa: BLE001
                 chat_text = (
                     f"{chat_text.rstrip()}\n\n---\n\n"
@@ -710,7 +670,9 @@ async def merge_multi_reports(runtime: AuditRuntime,
         "findings": {},
     }
 
-async def continue_multi_after_resume(runtime: AuditRuntime,
+
+async def continue_multi_after_resume(
+    runtime: AuditRuntime,
     thread_id: str,
     finished: dict[str, Any],
 ) -> dict[str, Any]:
@@ -776,8 +738,7 @@ async def continue_multi_after_resume(runtime: AuditRuntime,
     paused_siblings = [
         s
         for s in list(session.get("paused_siblings") or [])
-        if isinstance(s, dict)
-        and str(s.get("thread_id") or "") in runtime._multi_sessions
+        if isinstance(s, dict) and str(s.get("thread_id") or "") in runtime._multi_sessions
     ]
     if paused_siblings:
         for sib in paused_siblings:
@@ -785,17 +746,11 @@ async def continue_multi_after_resume(runtime: AuditRuntime,
             sib_sess = runtime._multi_sessions.get(sib_tid)
             if not sib_sess:
                 continue
-            others = [
-                s
-                for s in paused_siblings
-                if str(s.get("thread_id") or "") != sib_tid
-            ]
+            others = [s for s in paused_siblings if str(s.get("thread_id") or "") != sib_tid]
             sib_sess = dict(sib_sess)
             sib_sess["completed"] = list(completed)
             sib_sess["remaining_jobs"] = list(remaining_jobs)
-            sib_sess["remaining"] = [
-                str(j.get("framework_id") or "") for j in remaining_jobs
-            ]
+            sib_sess["remaining"] = [str(j.get("framework_id") or "") for j in remaining_jobs]
             sib_sess["paused_siblings"] = others
             runtime._remember_multi_session(sib_tid, sib_sess)
 
@@ -805,17 +760,11 @@ async def continue_multi_after_resume(runtime: AuditRuntime,
         sib_sess = runtime._multi_sessions.get(nxt_tid) or {}
         body = str(sib_sess.get("hitl_report") or "")
         if not body:
-            body = (
-                f"Continue human review for `{nxt_key}` "
-                f"(thread `{nxt_tid}`)."
-            )
+            body = f"Continue human review for `{nxt_key}` (thread `{nxt_tid}`)."
         prefix = runtime._multi_progress_preamble(
             completed,
             nxt_key,
-            in_flight_keys=[
-                str(s.get("job_key") or "")
-                for s in paused_siblings[1:]
-            ],
+            in_flight_keys=[str(s.get("job_key") or "") for s in paused_siblings[1:]],
             queued_keys=[_job_dict_key(j) for j in remaining_jobs],
         )
         preamble = f"{plan_md}\n{prefix}" if plan_md else prefix
@@ -877,7 +826,9 @@ async def continue_multi_after_resume(runtime: AuditRuntime,
     )
     return merged
 
-async def start_frameworks_after_intake(runtime: AuditRuntime,
+
+async def start_frameworks_after_intake(
+    runtime: AuditRuntime,
     *,
     user_text: str,
     base_thread: str,
@@ -954,9 +905,7 @@ async def start_frameworks_after_intake(runtime: AuditRuntime,
             intake=intake, store=store, selected_rows=selected_rows
         )
     elif has_access:
-        discovered = await runtime._discover_inventory_hosts(
-            intake=intake, store=store
-        )
+        discovered = await runtime._discover_inventory_hosts(intake=intake, store=store)
         for target, facts in discovered:
             if facts.error:
                 # Still allow it_audit if domain includes IT
@@ -984,9 +933,9 @@ async def start_frameworks_after_intake(runtime: AuditRuntime,
         )
         selected = []
         for fid in fw_ids:
-            fw = get_framework(fid, runtime.settings.agents_dir)
-            if fw is not None:
-                selected.append(fw)
+            framework = get_framework(fid, runtime.settings.agents_dir)
+            if framework is not None:
+                selected.append(framework)
         if not selected:
             selected = route_frameworks(
                 user_text,
@@ -1029,7 +978,9 @@ async def start_frameworks_after_intake(runtime: AuditRuntime,
         plan_md=plan_md,
     )
 
-def multi_progress_preamble(runtime: AuditRuntime,
+
+def multi_progress_preamble(
+    runtime: AuditRuntime,
     completed: list[tuple[str, str, str]],
     current_id: str,
     *,
@@ -1054,22 +1005,15 @@ def multi_progress_preamble(runtime: AuditRuntime,
         "",
     ]
     if completed:
-        lines.append(
-            "Completed before pause: "
-            + ", ".join(f"`{c[0]}`" for c in completed)
-        )
+        lines.append("Completed before pause: " + ", ".join(f"`{c[0]}`" for c in completed))
     lines.append(f"Now waiting on: `{current_id}`")
     if in_flight_keys:
-        lines.append(
-            "Also paused / in flight: "
-            + ", ".join(f"`{k}`" for k in in_flight_keys if k)
-        )
+        lines.append("Also paused / in flight: " + ", ".join(f"`{k}`" for k in in_flight_keys if k))
     if queued_keys:
-        lines.append(
-            "Queued: " + ", ".join(f"`{k}`" for k in queued_keys if k)
-        )
+        lines.append("Queued: " + ", ".join(f"`{k}`" for k in queued_keys if k))
     lines.extend(["", "---", ""])
     return "\n".join(lines)
+
 
 def _host_lock_key_from_target(target: InventorySshTarget | None) -> str:
     """Return same-host lock key for an inventory SSH target."""
@@ -1077,10 +1021,12 @@ def _host_lock_key_from_target(target: InventorySshTarget | None) -> str:
         return "_none_"
     return target.slug or target.host or "_none_"
 
+
 def _host_lock_key_from_job(job: dict[str, Any]) -> str:
     """Return same-host lock key for a serialized job dict."""
     host = str(job.get("evidence_host_id") or "").strip()
     return host or "_none_"
+
 
 def _serialize_host_job(
     target: InventorySshTarget | None,
@@ -1106,17 +1052,20 @@ def _serialize_host_job(
         "winrm_verify_ssl": target.winrm_verify_ssl if target else "",
     }
 
+
 def _job_dict_key(job: dict[str, Any]) -> str:
     """Stable key for a serialized host/framework job."""
     host = str(job.get("evidence_host_id") or "").strip()
     fw = str(job.get("framework_id") or "")
     return f"{host}/{fw}" if host else fw
 
+
 def _job_dict_thread_id(base_thread: str, job: dict[str, Any]) -> str:
     """Derive LangGraph thread id for a serialized job."""
     host = str(job.get("evidence_host_id") or "").strip()
     fw = str(job.get("framework_id") or "")
     return f"{base_thread}:{host}:{fw}" if host else f"{base_thread}:{fw}"
+
 
 def _target_from_job_dict(job: dict[str, Any]) -> InventorySshTarget | None:
     """Rebuild ``InventorySshTarget`` from a serialized multi-session job."""
@@ -1137,13 +1086,16 @@ def _target_from_job_dict(job: dict[str, Any]) -> InventorySshTarget | None:
         winrm_verify_ssl=str(job.get("winrm_verify_ssl") or ""),
     )
 
+
 def _job_display_title(job: dict[str, Any]) -> str:
     """Human-readable title for progress / merge sections."""
     host = str(job.get("ssh_host") or job.get("evidence_host_id") or "").strip()
     title = str(job.get("framework_title") or job.get("framework_id") or "")
     return f"{host} — {title}" if host else title
 
-def jobs_from_selected_intake(runtime: AuditRuntime,
+
+def jobs_from_selected_intake(
+    runtime: AuditRuntime,
     *,
     intake: dict[str, Any],
     store: EvidenceStore,
@@ -1154,10 +1106,7 @@ def jobs_from_selected_intake(runtime: AuditRuntime,
     Prefers host_facts.json written during stage-3 discovery so SSH is not
     repeated. Falls back to empty facts when the artifact is missing.
     """
-    slug = str(
-        intake.get("client_slug")
-        or client_slug(str(intake.get("client_name") or ""))
-    )
+    slug = str(intake.get("client_slug") or client_slug(str(intake.get("client_name") or "")))
     targets = list_client_ssh_targets(runtime.settings.inventory_dir, slug)
     if not targets and runtime.settings.ssh_host:
         targets = [
@@ -1189,15 +1138,15 @@ def jobs_from_selected_intake(runtime: AuditRuntime,
                 )
             except Exception:  # noqa: BLE001
                 facts = HostFacts(ssh_host=target.host)
-        for fw_id in filter_scope_framework_ids(
-            [str(x) for x in (row.get("frameworks") or [])]
-        ):
+        for fw_id in filter_scope_framework_ids([str(x) for x in (row.get("frameworks") or [])]):
             fw = get_framework(str(fw_id), runtime.settings.agents_dir)
             if fw is not None:
                 jobs.append((target, facts, fw))
     return jobs
 
-def format_host_framework_plan(runtime: AuditRuntime,
+
+def format_host_framework_plan(
+    runtime: AuditRuntime,
     jobs: list[tuple[InventorySshTarget, HostFacts, Any]],
 ) -> str:
     """Build markdown summary of host → framework routing plan.
@@ -1213,23 +1162,19 @@ def format_host_framework_plan(runtime: AuditRuntime,
         "",
     ]
     if not jobs:
-        lines.append(
-            "_No hosts discovered — falling back to NLP framework routing._"
-        )
+        lines.append("_No hosts discovered — falling back to NLP framework routing._")
         return "\n".join(lines)
     by_host: dict[str, list[str]] = {}
     labels: dict[str, str] = {}
     for target, facts, fw in jobs:
         key = target.slug
-        labels[key] = (
-            f"`{target.host}` "
-            f"({facts.hostname or '—'}, {facts.os_id or 'os?'})"
-        )
+        labels[key] = f"`{target.host}` ({facts.hostname or '—'}, {facts.os_id or 'os?'})"
         by_host.setdefault(key, []).append(fw.id)
     for key, fws in by_host.items():
         lines.append(f"- {labels[key]} → {', '.join(f'`{x}`' for x in fws)}")
     lines.append("")
     return "\n".join(lines)
+
 
 def remember_multi_session(runtime: AuditRuntime, thread_id: str, session: dict[str, Any]) -> None:
     """Store multi-framework orchestration state in memory and on disk.
@@ -1242,11 +1187,10 @@ def remember_multi_session(runtime: AuditRuntime, thread_id: str, session: dict[
     run_id = str(session.get("run_id") or "")
     if run_id:
         try:
-            save_multi_session(
-                runtime.settings.evidence_dir, run_id, thread_id, session
-            )
+            save_multi_session(runtime.settings.evidence_dir, run_id, thread_id, session)
         except OSError:
             pass
+
 
 def forget_multi_session(runtime: AuditRuntime, thread_id: str) -> dict[str, Any] | None:
     """Remove multi-session state for ``thread_id`` and delete disk copy.
@@ -1268,6 +1212,7 @@ def forget_multi_session(runtime: AuditRuntime, thread_id: str) -> dict[str, Any
             pass
     return session
 
+
 def reload_multi_sessions(runtime: AuditRuntime, run_id: str) -> None:
     """Load persisted multi-session records for ``run_id`` into memory.
 
@@ -1284,7 +1229,9 @@ def reload_multi_sessions(runtime: AuditRuntime, run_id: str) -> None:
         if tid not in runtime._multi_sessions:
             runtime._multi_sessions[tid] = sess
 
-async def arun(runtime: AuditRuntime,
+
+async def arun(
+    runtime: AuditRuntime,
     user_text: str,
     *,
     thread_id: str | None = None,
@@ -1310,11 +1257,14 @@ async def arun(runtime: AuditRuntime,
 
     if runtime.settings.intake_enabled:
         intake_tid = f"{base_thread}:intake"
-        runtime._remember_multi_session(intake_tid, {
-            "base_thread": base_thread,
-            "run_id": run_id,
-            "user_text": user_text,
-        })
+        runtime._remember_multi_session(
+            intake_tid,
+            {
+                "base_thread": base_thread,
+                "run_id": run_id,
+                "user_text": user_text,
+            },
+        )
         intake_result = await runtime.arun_intake(
             user_text,
             run_id=run_id,
@@ -1324,9 +1274,7 @@ async def arun(runtime: AuditRuntime,
         if intake_result.get("awaiting_hitl"):
             return intake_result
         # Intake finished in one shot (should be rare without interrupts)
-        snap = await runtime.intake_graph.aget_state(
-            {"configurable": {"thread_id": intake_tid}}
-        )
+        snap = await runtime.intake_graph.aget_state({"configurable": {"thread_id": intake_tid}})
         intake = (snap.values or {}).get("intake") or {}
         runtime._forget_multi_session(intake_tid)
         return await runtime._start_frameworks_after_intake(
@@ -1361,15 +1309,18 @@ async def arun(runtime: AuditRuntime,
         for index, fw in enumerate(selected):
             fw_tid = f"{base_thread}:{fw.id}"
             remaining = [f.id for f in selected[index + 1 :]]
-            runtime._remember_multi_session(fw_tid, {
-                "base_thread": base_thread,
-                "run_id": run_id,
-                "user_text": user_text,
-                "framework_id": fw.id,
-                "framework_title": fw.title,
-                "remaining": remaining,
-                "completed": list(completed),
-            })
+            runtime._remember_multi_session(
+                fw_tid,
+                {
+                    "base_thread": base_thread,
+                    "run_id": run_id,
+                    "user_text": user_text,
+                    "framework_id": fw.id,
+                    "framework_title": fw.title,
+                    "remaining": remaining,
+                    "completed": list(completed),
+                },
+            )
             result = await runtime.arun_one(
                 user_text,
                 framework_id=fw.id,
@@ -1409,6 +1360,7 @@ async def arun(runtime: AuditRuntime,
         base_thread=base_thread,
     )
 
+
 # Public aliases for façade wrappers / callers
 host_lock_key_from_target = _host_lock_key_from_target
 host_lock_key_from_job = _host_lock_key_from_job
@@ -1417,4 +1369,3 @@ job_dict_key = _job_dict_key
 job_dict_thread_id = _job_dict_thread_id
 target_from_job_dict = _target_from_job_dict
 job_display_title = _job_display_title
-

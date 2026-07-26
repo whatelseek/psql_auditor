@@ -25,13 +25,7 @@ _TITLE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 
 def _unescape_md_cell(text: str) -> str:
     """Undo light Markdown cell escaping used in reports."""
-    return (
-        (text or "")
-        .replace("\\|", "|")
-        .replace("<br>", "\n")
-        .replace("<br/>", "\n")
-        .strip()
-    )
+    return (text or "").replace("\\|", "|").replace("<br>", "\n").replace("<br/>", "\n").strip()
 
 
 def parse_report_rows(markdown: str) -> list[dict[str, str]]:
@@ -91,9 +85,7 @@ def write_docx_report(path: Path, markdown: str) -> Path:
     if "\n## " in prose:
         head = prose.split("\n## ", 1)[0]
         # Drop the H1 line already used as heading
-        head_lines = [
-            ln for ln in head.splitlines() if not ln.startswith("# ")
-        ]
+        head_lines = [ln for ln in head.splitlines() if not ln.startswith("# ")]
         excerpt = "\n".join(head_lines).strip()
         if excerpt:
             for para in excerpt.split("\n\n"):
@@ -130,9 +122,7 @@ def write_docx_report(path: Path, markdown: str) -> Path:
     for row in rows:
         doc.add_heading(f"{row['req_id']}: {row['title']}", level=2)
         p = doc.add_paragraph()
-        run = p.add_run(
-            f"Severity: {row['severity']}  |  Status: {row['status']}"
-        )
+        run = p.add_run(f"Severity: {row['severity']}  |  Status: {row['status']}")
         run.bold = True
         run.font.size = Pt(10)
         if row["observation"]:

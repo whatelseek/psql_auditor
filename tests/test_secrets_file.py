@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from auditor.secrets_file import load_connection_secrets, _parse_env_text
+from auditor.secrets_file import _parse_env_text, load_connection_secrets
 
 
 def test_parse_env_fence():

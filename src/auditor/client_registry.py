@@ -111,10 +111,12 @@ class ClientRegistry:
                             (name, now, client_id),
                         )
                         conn.commit()
-                        return self._row(conn.execute(
-                            "SELECT * FROM clients WHERE client_id = ?",
-                            (client_id,),
-                        ).fetchone())
+                        return self._row(
+                            conn.execute(
+                                "SELECT * FROM clients WHERE client_id = ?",
+                                (client_id,),
+                            ).fetchone()
+                        )
                 row = conn.execute(
                     "SELECT * FROM clients WHERE slug = ?",
                     (slug_key,),
@@ -130,10 +132,12 @@ class ClientRegistry:
                         (name, now, slug_key),
                     )
                     conn.commit()
-                    return self._row(conn.execute(
-                        "SELECT * FROM clients WHERE slug = ?",
-                        (slug_key,),
-                    ).fetchone())
+                    return self._row(
+                        conn.execute(
+                            "SELECT * FROM clients WHERE slug = ?",
+                            (slug_key,),
+                        ).fetchone()
+                    )
                 cid = (client_id or "").strip() or new_client_id()
                 conn.execute(
                     """

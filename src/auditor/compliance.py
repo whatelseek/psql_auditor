@@ -31,12 +31,12 @@ _STATUS_PARTIAL = {"partial", "warning", "warn"}
 class FindingRow:
     """One parsed row from an audit report summary or detail block.
 
-  Attributes:
-      req_id: Requirement id (``REQ-NNN``).
-      title: Requirement title from the report table.
-      severity: Normalized severity bucket (Critical, High, …).
-      status: Normalized status token (pass, fail, partial, error, skipped).
-  """
+    Attributes:
+        req_id: Requirement id (``REQ-NNN``).
+        title: Requirement title from the report table.
+        severity: Normalized severity bucket (Critical, High, …).
+        status: Normalized status token (pass, fail, partial, error, skipped).
+    """
 
     req_id: str
     title: str
@@ -48,16 +48,16 @@ class FindingRow:
 class SeverityCompliance:
     """Aggregated compliance statistics for one severity bucket.
 
-  Attributes:
-      severity: Severity label or ``Overall`` for the rollup row.
-      total: Total findings in this bucket (including skipped).
-      passed: Count with status ``pass``.
-      partial: Count with status ``partial``.
-      failed: Count with status ``fail``.
-      errors: Count with status ``error``.
-      skipped: Count with status ``skipped``.
-      percent: Compliance percentage 0–100 based on assessed (non-skipped) rows.
-  """
+    Attributes:
+        severity: Severity label or ``Overall`` for the rollup row.
+        total: Total findings in this bucket (including skipped).
+        passed: Count with status ``pass``.
+        partial: Count with status ``partial``.
+        failed: Count with status ``fail``.
+        errors: Count with status ``error``.
+        skipped: Count with status ``skipped``.
+        percent: Compliance percentage 0–100 based on assessed (non-skipped) rows.
+    """
 
     severity: str
     total: int
@@ -109,12 +109,12 @@ def findings_to_compliance_metrics(
 def normalize_severity(raw: str) -> str:
     """Map free-form severity text to a canonical bucket name.
 
-  Args:
-      raw: Severity string from a report table cell.
+    Args:
+        raw: Severity string from a report table cell.
 
-  Returns:
-      One of Critical, High, Medium, Low, Info, Unknown, or title-cased input.
-  """
+    Returns:
+        One of Critical, High, Medium, Low, Info, Unknown, or title-cased input.
+    """
     text = (raw or "").strip()
     if not text:
         return "Unknown"
@@ -138,16 +138,16 @@ def normalize_severity(raw: str) -> str:
 def normalize_status(raw: str) -> str:
     """Map free-form status text to a canonical assessment token.
 
-  Strips Markdown bold markers and recognizes common synonyms (e.g. ``ok`` →
-  ``pass``, ``non-compliant`` → ``fail``).
+    Strips Markdown bold markers and recognizes common synonyms (e.g. ``ok`` →
+    ``pass``, ``non-compliant`` → ``fail``).
 
-  Args:
-      raw: Status string from a report table or detail block.
+    Args:
+        raw: Status string from a report table or detail block.
 
-  Returns:
-      One of ``pass``, ``partial``, ``fail``, ``error``, ``skipped``, or the
-      lowercased input (defaulting empty to ``error``).
-  """
+    Returns:
+        One of ``pass``, ``partial``, ``fail``, ``error``, ``skipped``, or the
+        lowercased input (defaulting empty to ``error``).
+    """
     text = (raw or "").strip().lower()
     text = text.replace("**", "").strip()
     if text in _STATUS_PASS:
@@ -172,16 +172,16 @@ _SUMMARY_ROW = re.compile(
 def parse_report_findings(markdown: str) -> list[FindingRow]:
     """Extract finding rows from an auditor Markdown report summary table.
 
-  Primary path: regex-scan the summary table pipe rows. Fallback: parse per-
-  requirement detail blocks (``### REQ-NNN``) when the summary table is absent
-  or unparsable. Supports English and Russian column headers in detail blocks.
+    Primary path: regex-scan the summary table pipe rows. Fallback: parse per-
+    requirement detail blocks (``### REQ-NNN``) when the summary table is absent
+    or unparsable. Supports English and Russian column headers in detail blocks.
 
-  Args:
-      markdown: Full audit report Markdown from :func:`render_report`.
+    Args:
+        markdown: Full audit report Markdown from :func:`render_report`.
 
-  Returns:
-      Deduplicated list of :class:`FindingRow` in document order.
-  """
+    Returns:
+        Deduplicated list of :class:`FindingRow` in document order.
+    """
     text = markdown or ""
     rows: list[FindingRow] = []
     seen: set[str] = set()
@@ -239,17 +239,17 @@ def parse_report_findings(markdown: str) -> list[FindingRow]:
 def _compliance_percent(passed: int, partial: int, assessed: int) -> float:
     """Compute weighted compliance percentage for one bucket.
 
-  Partial findings contribute half a point. Returns ``0.0`` when ``assessed`` is
-  zero to avoid division by zero.
+    Partial findings contribute half a point. Returns ``0.0`` when ``assessed`` is
+    zero to avoid division by zero.
 
-  Args:
-      passed: Count of passing requirements.
-      partial: Count of partially compliant requirements.
-      assessed: Denominator (total minus skipped).
+    Args:
+        passed: Count of passing requirements.
+        partial: Count of partially compliant requirements.
+        assessed: Denominator (total minus skipped).
 
-  Returns:
-      Rounded percentage in the range 0.0–100.0.
-  """
+    Returns:
+        Rounded percentage in the range 0.0–100.0.
+    """
     if assessed <= 0:
         return 0.0
     # partial counts as half-compliant
@@ -262,16 +262,16 @@ def compliance_by_severity(
 ) -> list[SeverityCompliance]:
     """Aggregate compliance percentage per severity bucket.
 
-  Buckets are emitted in canonical severity order (Critical → Info), then any
-  unknown severities alphabetically. Skipped rows are counted but excluded from
-  the percent denominator.
+    Buckets are emitted in canonical severity order (Critical → Info), then any
+    unknown severities alphabetically. Skipped rows are counted but excluded from
+    the percent denominator.
 
-  Args:
-      rows: Parsed finding rows from :func:`parse_report_findings`.
+    Args:
+        rows: Parsed finding rows from :func:`parse_report_findings`.
 
-  Returns:
-      Ordered list of :class:`SeverityCompliance` statistics.
-  """
+    Returns:
+        Ordered list of :class:`SeverityCompliance` statistics.
+    """
     buckets: dict[str, dict[str, int]] = defaultdict(
         lambda: {
             "total": 0,
@@ -338,20 +338,18 @@ def compliance_by_severity(
 def overall_compliance(rows: list[FindingRow]) -> SeverityCompliance:
     """Compute a single overall compliance metric across all severities.
 
-  Reuses :func:`compliance_by_severity` by assigning every row the synthetic
-  severity label ``Overall``.
+    Reuses :func:`compliance_by_severity` by assigning every row the synthetic
+    severity label ``Overall``.
 
-  Args:
-      rows: All parsed finding rows for the report.
+    Args:
+        rows: All parsed finding rows for the report.
 
-  Returns:
-      One :class:`SeverityCompliance` rollup, or zeros when ``rows`` is empty.
-  """
+    Returns:
+        One :class:`SeverityCompliance` rollup, or zeros when ``rows`` is empty.
+    """
     fake = [FindingRow(r.req_id, r.title, "Overall", r.status) for r in rows]
     stats = compliance_by_severity(fake)
-    return stats[0] if stats else SeverityCompliance(
-        "Overall", 0, 0, 0, 0, 0, 0, 0.0
-    )
+    return stats[0] if stats else SeverityCompliance("Overall", 0, 0, 0, 0, 0, 0, 0.0)
 
 
 _COLORS = {
@@ -375,19 +373,19 @@ def render_compliance_bar_chart_svg(
 ) -> str:
     """Render a horizontal SVG bar chart (0–100%) for compliance stats.
 
-  Produces a dark-theme chart with grid lines at 25% intervals and per-row
-  labels showing percent and pass/partial/assessed counts.
+    Produces a dark-theme chart with grid lines at 25% intervals and per-row
+    labels showing percent and pass/partial/assessed counts.
 
-  Args:
-      stats: Rows to chart (typically Overall plus each severity).
-      title: Chart heading embedded in the SVG.
-      width: Total SVG width in pixels.
-      bar_height: Height of each horizontal bar.
-      gap: Vertical gap between bars.
+    Args:
+        stats: Rows to chart (typically Overall plus each severity).
+        title: Chart heading embedded in the SVG.
+        width: Total SVG width in pixels.
+        bar_height: Height of each horizontal bar.
+        gap: Vertical gap between bars.
 
-  Returns:
-      Complete SVG document as a string. Empty input yields a placeholder SVG.
-  """
+    Returns:
+        Complete SVG document as a string. Empty input yields a placeholder SVG.
+    """
     if not stats:
         return (
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="80">'
@@ -403,7 +401,7 @@ def render_compliance_bar_chart_svg(
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}" role="img" aria-label="{_xml(title)}">',
-        f'<rect width="100%" height="100%" fill="#0b1220"/>',
+        '<rect width="100%" height="100%" fill="#0b1220"/>',
         f'<text x="16" y="28" fill="#e2e8f0" font-size="16" font-family="system-ui,sans-serif">'
         f"{_xml(title)}</text>",
     ]
@@ -438,8 +436,7 @@ def render_compliance_bar_chart_svg(
             f'rx="6" fill="{color}"/>'
         )
         label = (
-            f"{row.percent:.1f}%  "
-            f"({row.passed}+½·{row.partial}/{row.total - row.skipped} assessed)"
+            f"{row.percent:.1f}%  ({row.passed}+½·{row.partial}/{row.total - row.skipped} assessed)"
         )
         parts.append(
             f'<text x="{left + 8}" y="{y + bar_height * 0.7:.1f}" fill="#f8fafc" '
@@ -453,13 +450,13 @@ def render_compliance_bar_chart_svg(
 def svg_as_markdown_image(svg: str, *, alt: str = "CIS compliance chart") -> str:
     """Embed SVG as a base64 Markdown image for Open WebUI and viewers.
 
-  Args:
-      svg: Raw SVG markup.
-      alt: Image alt text for accessibility.
+    Args:
+        svg: Raw SVG markup.
+        alt: Image alt text for accessibility.
 
-  Returns:
-      Markdown ``![alt](data:image/svg+xml;base64,…)`` string.
-  """
+    Returns:
+        Markdown ``![alt](data:image/svg+xml;base64,…)`` string.
+    """
     b64 = base64.b64encode(svg.encode("utf-8")).decode("ascii")
     return f"![{alt}](data:image/svg+xml;base64,{b64})"
 
@@ -524,7 +521,7 @@ def format_status_mermaid_pie(status_counts: Mapping[str, int]) -> str:
     active = [(label, n) for label, n in slices if n > 0]
     if not active:
         return ""
-    lines = ["```mermaid", "pie showData", '    title Pass / Fail statistics']
+    lines = ["```mermaid", "pie showData", "    title Pass / Fail statistics"]
     for label, n in active:
         lines.append(f'    "{label}" : {n}')
     lines.extend(["```", ""])
@@ -575,7 +572,8 @@ def format_owui_viz_dashboard(
 
     svg = f"""
 <svg xmlns="http://www.w3.org/2000/svg" width="360" height="150" viewBox="0 0 360 150">
-  <text x="0" y="14" fill="#e2e8f0" font-size="13" font-family="system-ui,sans-serif">Status distribution</text>
+  <text x="0" y="14" fill="#e2e8f0" font-size="13"
+        font-family="system-ui,sans-serif">Status distribution</text>
   <g transform="translate(0,28)">
     <text x="0" y="11" fill="#94a3b8" font-size="11">Pass</text>{_bar(passed, "#16a34a")}
   </g>
@@ -592,7 +590,8 @@ def format_owui_viz_dashboard(
 """.strip()
 
     html = f"""
-<div style="font-family:system-ui,sans-serif;color:#e2e8f0;background:#0b1220;padding:16px;border-radius:12px;">
+<div style="font-family:system-ui,sans-serif;color:#e2e8f0;
+background:#0b1220;padding:16px;border-radius:12px;">
   <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
     <div style="background:#111827;padding:10px 14px;border-radius:10px;min-width:110px;">
       <div style="color:#94a3b8;font-size:12px;">Hosts</div>
@@ -684,12 +683,12 @@ def format_chat_summary_visuals(
 def _xml(text: str) -> str:
     """Escape a string for safe inclusion in SVG/XML text nodes.
 
-  Args:
-      text: Raw user- or data-derived string.
+    Args:
+        text: Raw user- or data-derived string.
 
-  Returns:
-      XML-escaped string (`&`, `<`, `>`, `"` replaced).
-  """
+    Returns:
+        XML-escaped string (`&`, `<`, `>`, `"` replaced).
+    """
     return (
         (text or "")
         .replace("&", "&amp;")
@@ -707,25 +706,22 @@ def format_compliance_markdown(
 ) -> str:
     """Append a compliance section (table + SVG chart) to an audit report.
 
-  End-to-end helper: parse findings, compute per-severity and overall stats,
-  render chart, and return Markdown to concatenate after the main report body.
+    End-to-end helper: parse findings, compute per-severity and overall stats,
+    render chart, and return Markdown to concatenate after the main report body.
 
-  Args:
-      markdown_report: Existing report Markdown from :func:`render_report`.
-      title: Optional chart title override; defaults to localized UI string.
-      language: Report language for table/chart labels.
+    Args:
+        markdown_report: Existing report Markdown from :func:`render_report`.
+        title: Optional chart title override; defaults to localized UI string.
+        language: Report language for table/chart labels.
 
-  Returns:
-      Markdown fragment (leading ``---`` separator) or a parse-failure message.
-  """
+    Returns:
+        Markdown fragment (leading ``---`` separator) or a parse-failure message.
+    """
     ui = report_ui(language)
     chart_title = title or ui["chart_title"]
     rows = parse_report_findings(markdown_report)
     if not rows:
-        return (
-            f"\n\n---\n\n## {ui['chart_heading']}\n\n"
-            f"{ui['chart_parse_fail']}\n"
-        )
+        return f"\n\n---\n\n## {ui['chart_heading']}\n\n{ui['chart_parse_fail']}\n"
 
     by_sev = compliance_by_severity(rows)
     overall = overall_compliance(rows)
@@ -752,8 +748,7 @@ def format_compliance_markdown(
         "",
         f"## {ui['chart_heading']}",
         "",
-        f"**{ui['chart_overall']}:** **{overall.percent:.1f}%** "
-        f"{ui['chart_formula']}",
+        f"**{ui['chart_overall']}:** **{overall.percent:.1f}%** {ui['chart_formula']}",
         "",
         f"| {ui['chart_sev']} | {ui['chart_pct']} | Pass | Partial | Fail | "
         f"Error | Skip | {ui['chart_total']} |",

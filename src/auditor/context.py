@@ -31,9 +31,7 @@ def truncate_text(text: str, max_chars: int, label: str = "output") -> str:
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     keep = max(max_chars - 80, 32)
-    return (
-        f"{text[:keep]}\n\n…[truncated {label}: kept {keep} of {len(text)} chars]"
-    )
+    return f"{text[:keep]}\n\n…[truncated {label}: kept {keep} of {len(text)} chars]"
 
 
 def count_tool_rounds(messages: list[BaseMessage]) -> int:
@@ -75,17 +73,13 @@ def compact_findings_for_summary(
     ordered = sorted(
         findings.values(),
         key=lambda raw: (
-            (raw.requirement_id if isinstance(raw, Finding) else str(raw.get("requirement_id") or ""))
+            raw.requirement_id if isinstance(raw, Finding) else str(raw.get("requirement_id") or "")
         ),
     )
     for raw in ordered:
         f = raw if isinstance(raw, Finding) else Finding.model_validate(raw)
-        obs = truncate_text(
-            (f.evidence or "").replace("\n", " "), evidence_chars, "obs"
-        )
-        rec = truncate_text(
-            (f.remediation or "").replace("\n", " "), evidence_chars, "rec"
-        )
+        obs = truncate_text((f.evidence or "").replace("\n", " "), evidence_chars, "obs")
+        rec = truncate_text((f.remediation or "").replace("\n", " "), evidence_chars, "rec")
         lines.append(
             f"| {f.requirement_id} | {f.status} | {f.severity or '-'} | "
             f"{(f.title or '').replace('|', '/')} | "

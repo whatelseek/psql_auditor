@@ -26,10 +26,9 @@ def identity_from_state(
     :mod:`auditor.client_registry` before binding.
     """
     st = state or {}
-    intake = st.get("intake") if isinstance(st.get("intake"), dict) else {}
-    client_id = str(
-        st.get("client_id") or intake.get("client_id") or ""
-    ).strip()
+    raw_intake = st.get("intake")
+    intake: dict[str, Any] = raw_intake if isinstance(raw_intake, dict) else {}
+    client_id = str(st.get("client_id") or intake.get("client_id") or "").strip()
     audit_run_id = str(st.get("audit_run_id") or intake.get("audit_run_id") or "").strip()
     intake_state = st.get("intake_state")
     if not audit_run_id and isinstance(intake_state, dict):
@@ -40,10 +39,7 @@ def identity_from_state(
     fw = (framework_id or str(st.get("framework_id") or "")).strip()
     if "/" in fw:
         fw = fw.split("/", 1)[-1]
-    ver = (
-        framework_version
-        or str(st.get("framework_version") or "")
-    ).strip()
+    ver = (framework_version or str(st.get("framework_version") or "")).strip()
     return {
         "client_id": client_id,
         "audit_run_id": audit_run_id,

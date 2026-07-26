@@ -11,13 +11,16 @@ import json
 import re
 import shutil
 from collections import defaultdict
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Iterable
 
+# Lookahead omits '.' so a sentence-ending period after the TLD does not
+# prevent a match (e.g. "admin@example.com. Next").
 _EMAIL_RE = re.compile(
     r"(?<![A-Za-z0-9._%+-])"
     r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"
-    r"(?![A-Za-z0-9._%+-])"
+    r"(?![A-Za-z0-9_%+-])"
 )
 _IPV4_CANDIDATE_RE = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?![\w.])")
 _IPV6_CANDIDATE_RE = re.compile(r"(?<![0-9A-Fa-f:])([0-9A-Fa-f:]{2,})(?![0-9A-Fa-f:])")
@@ -128,7 +131,7 @@ class ReversibleAnonymizer:
         self,
         text: str,
         *,
-        literal_groups: dict[str, Iterable[str]] | None = None,
+        literal_groups: Mapping[str, Iterable[str]] | None = None,
     ) -> str:
         """Anonymize text with regex-first passes, then explicit literals."""
         masked = text
@@ -188,7 +191,7 @@ def _anonymize_relpath(
     *,
     src_is_dir: bool,
     anonymizer: ReversibleAnonymizer,
-    literal_groups: dict[str, Iterable[str]] | None = None,
+    literal_groups: Mapping[str, Iterable[str]] | None = None,
 ) -> Path:
     """Anonymize each relative path segment while preserving file suffixes."""
     if not rel.parts:
@@ -220,7 +223,7 @@ def anonymize_directory_tree(
     destination_root: Path,
     *,
     anonymizer: ReversibleAnonymizer,
-    literal_groups: dict[str, Iterable[str]] | None = None,
+    literal_groups: Mapping[str, Iterable[str]] | None = None,
 ) -> None:
     """Copy source tree and anonymize text files in destination."""
     if destination_root.exists():

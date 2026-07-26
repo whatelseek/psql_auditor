@@ -216,7 +216,8 @@ Return JSON only with the HostFacts keys listed in the system prompt.
 
 # --- Prerun: LLM collects FULL package inventory (deb / rpm / Windows / …) ---
 
-SOFTWARE_INVENTORY_SYSTEM_PROMPT = """You collect the COMPLETE installed-software inventory on the SSH target.
+SOFTWARE_INVENTORY_SYSTEM_PROMPT = """You collect the COMPLETE
+installed-software inventory on the SSH target.
 
 Rules:
 - Use ONLY ssh_run / ssh_read_file (Linux) or winrm_run / winrm_read_file (Windows WinRM).
@@ -256,7 +257,8 @@ emit PKG:/BIN:/FILE:/OS* lines only. Do not call more tools. Do not invent names
 
 # --- Prerun: LLM maps full installed software → frameworks in agents/ ---
 
-SOFTWARE_FRAMEWORK_ROUTE_SYSTEM = """You select audit frameworks from a FULL installed-software inventory.
+SOFTWARE_FRAMEWORK_ROUTE_SYSTEM = """You select audit frameworks from a FULL
+installed-software inventory.
 
 You receive:
 1) Complete package/product list (and binaries/files/OS) collected by an LLM tool pass
@@ -299,7 +301,8 @@ Return JSON only as specified in the system prompt.
 
 # --- Интерпретация ответов intake (без tools; свободный текст → структура) ---
 
-INTAKE_INTERPRET_YES_NO_SYSTEM = """You assess the operator's INTENT for a pre-audit availability question.
+INTAKE_INTERPRET_YES_NO_SYSTEM = """You assess the operator's INTENT for a
+pre-audit availability question.
 
 Judge meaning only. The operator answers in free form; do not expect any
 particular vocabulary from them.
@@ -352,7 +355,8 @@ agent can reach servers — not whether the human operator can.
 Return JSON with answer = yes|no|unknown (optional clarification).
 """
 
-INTAKE_INTERPRET_CLIENT_SYSTEM = """You extract the client / organization name from an operator reply.
+INTAKE_INTERPRET_CLIENT_SYSTEM = """You extract the client / organization name
+from an operator reply.
 
 Output ONLY JSON:
 {{"client_name":"...","is_compliant":true,"reason":""}}

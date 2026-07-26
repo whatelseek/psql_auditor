@@ -55,9 +55,11 @@ include = ["src/auditor", "agents", "mcps", "README.md"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = ["--strict-markers"]
 markers = [
   "unit: fast in-process tests (default; no external services)",
-  "integration: tests that require live services / Docker (opt-in)",
+  "integration: PostgreSQL / live-service tests (isolated disposable resources)",
+  "external_llm: optional real-provider tests; require AUDITOR_ALLOW_EXTERNAL_LLM=1",
 ]
 
 [tool.ruff]
@@ -75,5 +77,4 @@ mypy_path = "src"
 ignore_missing_imports = true
 warn_unused_ignores = true
 check_untyped_defs = false
-# Baseline: type checking is a documented gate; current codebase has many
-# gradual-typing gaps recorded in docs/baseline.md (do not silence silently).
+# AUD-002: type checking is a mandatory green gate.

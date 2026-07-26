@@ -24,8 +24,6 @@ from auditor.domain.audit_models import (
     new_audit_run_id,
     new_job_id,
     resolve_terminal_run_status,
-    validate_job_transition,
-    validate_run_transition,
 )
 
 _SCHEMA = """
@@ -141,8 +139,7 @@ class AuditRegistry:
         with self._lock:
             with self._connect() as conn:
                 rows = conn.execute(
-                    "SELECT * FROM audit_runs WHERE evidence_run_id = ? "
-                    "ORDER BY created_at DESC",
+                    "SELECT * FROM audit_runs WHERE evidence_run_id = ? ORDER BY created_at DESC",
                     (evidence_run_id,),
                 ).fetchall()
         if not rows:
@@ -186,9 +183,7 @@ class AuditRegistry:
                 )
                 conn.commit()
 
-    def transition_run(
-        self, audit_run_id: str, new_status: AuditRunStatus
-    ) -> AuditRun:
+    def transition_run(self, audit_run_id: str, new_status: AuditRunStatus) -> AuditRun:
         """Load, validate transition, persist. Raises on invalid transition."""
         run = self.get_run(audit_run_id)
         if run is None:
@@ -197,9 +192,7 @@ class AuditRegistry:
             jobs = self.list_jobs(audit_run_id)
             ok, reason = can_complete_run(jobs)
             if not ok:
-                raise InvalidStatusTransition(
-                    f"cannot complete AuditRun {audit_run_id}: {reason}"
-                )
+                raise InvalidStatusTransition(f"cannot complete AuditRun {audit_run_id}: {reason}")
         run.transition_to(new_status)
         self.save_run(run)
         return run
@@ -244,9 +237,7 @@ class AuditRegistry:
         if terminal == AuditRunStatus.COMPLETED:
             ok, reason = can_complete_run(jobs)
             if not ok:
-                raise InvalidStatusTransition(
-                    f"cannot complete AuditRun {audit_run_id}: {reason}"
-                )
+                raise InvalidStatusTransition(f"cannot complete AuditRun {audit_run_id}: {reason}")
         run.transition_to(terminal)
         self.save_run(run)
         return run
@@ -322,9 +313,7 @@ class AuditRegistry:
                 ).fetchall()
         return [self._row_to_job(r) for r in rows]
 
-    def latest_job_for_task(
-        self, audit_run_id: str, logical_task_id: str
-    ) -> AuditJob | None:
+    def latest_job_for_task(self, audit_run_id: str, logical_task_id: str) -> AuditJob | None:
         with self._lock:
             with self._connect() as conn:
                 row = conn.execute(
@@ -357,9 +346,7 @@ class AuditRegistry:
                         job.status.value,
                         job.started_at.isoformat() if job.started_at else None,
                         job.finished_at.isoformat() if job.finished_at else None,
-                        json.dumps(job.error.to_dict(), ensure_ascii=False)
-                        if job.error
-                        else None,
+                        json.dumps(job.error.to_dict(), ensure_ascii=False) if job.error else None,
                         job.thread_id,
                         job.framework_id,
                         job.host_id,
@@ -397,9 +384,14 @@ class AuditRegistry:
     ) -> AuditJob:
         """Mark latest pending job running, or create a new attempt (retry)."""
         latest = self.latest_job_for_task(audit_run_id, logical_task_id)
-        if new_attempt or latest is None or latest.status not in {
-            AuditJobStatus.PENDING,
-        }:
+        if (
+            new_attempt
+            or latest is None
+            or latest.status
+            not in {
+                AuditJobStatus.PENDING,
+            }
+        ):
             # Retry / first create
             if latest is not None and latest.status == AuditJobStatus.RUNNING:
                 # Cancel previous running attempt before retrying
@@ -428,14 +420,8 @@ class AuditRegistry:
         return self.transition_job(job_id, AuditJobStatus.COMPLETED)
 
     def fail_job(self, job_id: str, error: JobErrorInfo | BaseException) -> AuditJob:
-        info = (
-            error
-            if isinstance(error, JobErrorInfo)
-            else JobErrorInfo.from_exception(error)
-        )
-        return self.transition_job(
-            job_id, AuditJobStatus.FAILED, error=info
-        )
+        info = error if isinstance(error, JobErrorInfo) else JobErrorInfo.from_exception(error)
+        return self.transition_job(job_id, AuditJobStatus.FAILED, error=info)
 
     def retry_job(
         self,
@@ -502,9 +488,7 @@ class AuditRegistry:
                 1 if job.mandatory else 0,
                 job.started_at.isoformat() if job.started_at else None,
                 job.finished_at.isoformat() if job.finished_at else None,
-                json.dumps(job.error.to_dict(), ensure_ascii=False)
-                if job.error
-                else None,
+                json.dumps(job.error.to_dict(), ensure_ascii=False) if job.error else None,
                 job.thread_id,
                 job.framework_id,
                 job.host_id,

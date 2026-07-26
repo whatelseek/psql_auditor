@@ -132,9 +132,7 @@ class Settings(BaseSettings):
     # Per-requirement command execution artifacts
     evidence_dir: Path = Field(default=Path("artifacts"))
     # Durable LangGraph checkpointer (Sqlite) — survives agent restarts
-    checkpoint_path: Path = Field(
-        default=Path("artifacts/.checkpoints/auditor.sqlite")
-    )
+    checkpoint_path: Path = Field(default=Path("artifacts/.checkpoints/auditor.sqlite"))
     # Human-in-the-loop pause on failed REQs (skip / retry)
     hitl_enabled: bool = True
     # Zip report+evidence and link it in Open WebUI chat
@@ -267,6 +265,7 @@ class Settings(BaseSettings):
         if fields["database"]:
             env["PG_DATABASE"] = str(fields["database"])
         return env
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -165,9 +165,7 @@ def intake_clarification_from_payload(
     return ""
 
 
-def resolve_client_name(
-    text: str, llm_payload: dict[str, Any] | None = None
-) -> str:
+def resolve_client_name(text: str, llm_payload: dict[str, Any] | None = None) -> str:
     """Определить имя клиента детерминированно (шаг 1 intake — без LLM).
 
     ``llm_payload`` игнорируется; оставлен для совместимости вызовов.
@@ -183,9 +181,7 @@ def resolve_client_name(
     return parse_client_name(text)
 
 
-def resolve_audit_type(
-    text: str, llm_payload: dict[str, Any] | None = None
-) -> AuditType | None:
+def resolve_audit_type(text: str, llm_payload: dict[str, Any] | None = None) -> AuditType | None:
     """Определить домен аудита только из JSON LLM (шаг 4 intake).
 
     Без regex-fallback. Алиасы ``cis`` / ``cyber`` → ``cybersecurity``.
@@ -247,9 +243,7 @@ def resolve_scope_decision(
         return normalize_scope_jobs([dict(r) for r in proposed_jobs])
     if action in {"exclude", "trim"}:
         excl_fw = {
-            str(x).strip()
-            for x in (llm_payload.get("exclude_frameworks") or [])
-            if str(x).strip()
+            str(x).strip() for x in (llm_payload.get("exclude_frameworks") or []) if str(x).strip()
         }
         excl_pairs: set[tuple[str, str]] = set()
         for pair in llm_payload.get("exclude_pairs") or []:
@@ -258,9 +252,7 @@ def resolve_scope_decision(
             elif isinstance(pair, str) and "/" in pair:
                 h, f = pair.split("/", 1)
                 excl_pairs.add((h.strip().lower(), f.strip().lower()))
-        return normalize_scope_jobs(
-            apply_scope_exclusions(proposed_jobs, excl_fw, excl_pairs)
-        )
+        return normalize_scope_jobs(apply_scope_exclusions(proposed_jobs, excl_fw, excl_pairs))
     if action in {"include", "only", "keep"}:
         incl_fw = {
             str(x).strip().lower()
@@ -301,8 +293,7 @@ def is_enumeration_framework_id(framework_id: str) -> bool:
     if not low:
         return False
     return any(
-        low == prefix or low.startswith(prefix + "_")
-        for prefix in _ENUMERATION_FRAMEWORK_PREFIXES
+        low == prefix or low.startswith(prefix + "_") for prefix in _ENUMERATION_FRAMEWORK_PREFIXES
     )
 
 
@@ -326,9 +317,7 @@ def normalize_scope_jobs(proposed_jobs: list[dict[str, Any]]) -> list[dict[str, 
     """Normalize scope rows by removing discovery-only frameworks and empty rows."""
     out: list[dict[str, Any]] = []
     for row in proposed_jobs or []:
-        kept = filter_scope_framework_ids(
-            [str(x) for x in (row.get("frameworks") or [])]
-        )
+        kept = filter_scope_framework_ids([str(x) for x in (row.get("frameworks") or [])])
         if not kept:
             continue
         out.append({**row, "frameworks": kept})
@@ -369,9 +358,7 @@ _FW_HEADER_TOKENS = frozenset(
         "проверка",
     }
 )
-_BULLET_PLAN = re.compile(
-    r"^\s*[-*•]\s*`?(?P<host>[A-Za-z0-9._:-]+)`?\s*[=:→\-]+\s*(?P<rest>.+)$"
-)
+_BULLET_PLAN = re.compile(r"^\s*[-*•]\s*`?(?P<host>[A-Za-z0-9._:-]+)`?\s*[=:→\-]+\s*(?P<rest>.+)$")
 _TABLE_ROW = re.compile(r"^\|(.+)\|$")
 
 
@@ -438,11 +425,7 @@ def parse_audit_plan_markdown(
         Job rows compatible with intake ``proposed_jobs`` / ``selected_jobs``.
         Empty list when no plan rows are found.
     """
-    known = (
-        {x.lower() for x in known_framework_ids}
-        if known_framework_ids is not None
-        else None
-    )
+    known = {x.lower() for x in known_framework_ids} if known_framework_ids is not None else None
     lines = (text or "").splitlines()
     by_host: dict[str, list[str]] = {}
     host_labels: dict[str, str] = {}
@@ -479,9 +462,7 @@ def parse_audit_plan_markdown(
             (
                 j
                 for j, h in enumerate(norms)
-                if h in _HOST_HEADER_TOKENS
-                or "host" in h
-                or h in {"ip", "ips"}
+                if h in _HOST_HEADER_TOKENS or "host" in h or h in {"ip", "ips"}
             ),
             None,
         )
@@ -489,10 +470,7 @@ def parse_audit_plan_markdown(
             (
                 j
                 for j, h in enumerate(norms)
-                if h in _FW_HEADER_TOKENS
-                or "framework" in h
-                or "check" in h
-                or "фрейм" in h
+                if h in _FW_HEADER_TOKENS or "framework" in h or "check" in h or "фрейм" in h
             ),
             None,
         )
@@ -539,13 +517,11 @@ def looks_like_plan_file_notice(text: str) -> bool:
         return True
     if re.fullmatch(r"полож\w*", t):
         return True
-    if re.search(r"полож\w*.*\b(план|plan)\b", t) or re.search(
-        r"\b(план|plan)\b.*полож\w*", t
-    ):
+    if re.search(r"полож\w*.*\b(план|plan)\b", t) or re.search(r"\b(план|plan)\b.*полож\w*", t):
         return True
-    if re.search(
-        r"\b(put|placed|added|uploaded|dropped)\b.*\b(plan|план)\b", t
-    ) or re.search(r"\b(plan|план)\b.*\b(put|placed|added|uploaded|dropped)\b", t):
+    if re.search(r"\b(put|placed|added|uploaded|dropped)\b.*\b(plan|план)\b", t) or re.search(
+        r"\b(plan|план)\b.*\b(put|placed|added|uploaded|dropped)\b", t
+    ):
         return True
     return False
 
@@ -746,7 +722,7 @@ def prompts_for_language(code: str) -> IntakePrompts:
             "- **Exclude** items — describe in your own words; we will show "
             "the updated plan and ask you to confirm before starting.\n"
             "- **Only** some frameworks — also OK "
-            "(e.g. \"postgres_cis only\").\n"
+            '(e.g. "postgres_cis only").\n'
             "- Or paste / place ``PLAN.md`` in the client inventory: "
             "Host | Frameworks table.\n"
         ),
@@ -755,7 +731,7 @@ def prompts_for_language(code: str) -> IntakePrompts:
             "No live host plan is available (no access / no inventory hosts).\n\n"
             "Which audit **domain** should I run?\n\n"
             "Describe it in your own words "
-            "(e.g. \"IT only\", \"cybersecurity / CIS\", \"both\"), "
+            '(e.g. "IT only", "cybersecurity / CIS", "both"), '
             "or paste a Markdown Host | Frameworks table / put ``PLAN.md`` "
             "under ``inventory/<client>/`` (or ``inventory/``) and say you placed it."
         ),
@@ -800,14 +776,10 @@ def format_discovered_software_markdown(
             lines.append(f"- **OS:** {os_name}")
         bins = [str(x) for x in (row.get("binaries") or []) if str(x).strip()]
         pkgs = [str(x) for x in (row.get("packages") or []) if str(x).strip()]
-        highlights = [
-            str(x) for x in (row.get("highlight_packages") or []) if str(x).strip()
-        ]
+        highlights = [str(x) for x in (row.get("highlight_packages") or []) if str(x).strip()]
         files = [str(x) for x in (row.get("key_files") or []) if str(x).strip()]
         notes = str(row.get("software_notes") or "").strip()
-        lines.append(
-            "- **Binaries:** " + (", ".join(f"`{b}`" for b in bins) if bins else "—")
-        )
+        lines.append("- **Binaries:** " + (", ".join(f"`{b}`" for b in bins) if bins else "—"))
         if highlights:
             lines.append(
                 "- **Packages (LLM highlights for frameworks):** "
@@ -815,19 +787,14 @@ def format_discovered_software_markdown(
             )
         if pkgs:
             if len(pkgs) <= 60:
-                lines.append(
-                    "- **Packages (full):** " + ", ".join(f"`{p}`" for p in pkgs)
-                )
+                lines.append("- **Packages (full):** " + ", ".join(f"`{p}`" for p in pkgs))
             else:
                 preview = ", ".join(f"`{p}`" for p in pkgs[:40])
-                lines.append(
-                    f"- **Packages (full list: {len(pkgs)}):** {preview}, …"
-                )
+                lines.append(f"- **Packages (full list: {len(pkgs)}):** {preview}, …")
         else:
             lines.append("- **Packages:** —")
         lines.append(
-            "- **Files / paths:** "
-            + (", ".join(f"`{f}`" for f in files) if files else "—")
+            "- **Files / paths:** " + (", ".join(f"`{f}`" for f in files) if files else "—")
         )
         if notes:
             lines.append(f"- **Routing notes:** {notes[:300]}")
@@ -864,11 +831,7 @@ def enrich_facts_from_access_rows(
             ports.add(int(p))
         except (TypeError, ValueError):
             continue
-    binaries = [
-        str(b).strip()
-        for b in (getattr(facts, "binaries", None) or [])
-        if str(b).strip()
-    ]
+    binaries = [str(b).strip() for b in (getattr(facts, "binaries", None) or []) if str(b).strip()]
     bins_l = {b.lower() for b in binaries}
     want = str(host).strip()
     for row in access_rows or []:
@@ -1084,9 +1047,6 @@ def format_intake_assistant_message(prompt: str, thread_id: str) -> str:
     return f"{prompt.strip()}\n\n[//]: # (AUDIT_INTAKE:{thread_id})\n"
 
 
-
-
-
 def intake_interrupt_payload(*, step: str, prompt: str, **extra: Any) -> dict[str, Any]:
     """Собрать dict payload interrupt LangGraph для шага intake.
 
@@ -1121,8 +1081,7 @@ def summarize_access_probe(probe: dict[str, Any], *, language: str = "en") -> st
         lines.append("|---|---|---|")
         for svc in services:
             lines.append(
-                f"| {svc.get('name')} | {svc.get('status')} | "
-                f"{svc.get('detail') or '—'} |"
+                f"| {svc.get('name')} | {svc.get('status')} | {svc.get('detail') or '—'} |"
             )
         return "\n".join(lines)
 
@@ -1133,9 +1092,7 @@ def summarize_access_probe(probe: dict[str, Any], *, language: str = "en") -> st
     lines.append("| Service | Status | Detail |")
     lines.append("|---|---|---|")
     for svc in services:
-        lines.append(
-            f"| {svc.get('name')} | {svc.get('status')} | {svc.get('detail') or '—'} |"
-        )
+        lines.append(f"| {svc.get('name')} | {svc.get('status')} | {svc.get('detail') or '—'} |")
     return "\n".join(lines)
 
 

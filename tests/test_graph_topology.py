@@ -10,9 +10,7 @@ from auditor.state import Finding
 
 
 def _graph() -> AuditorGraph:
-    return AuditorGraph(
-        settings=Settings(_env_file=None, agents_dir=Path("agents"))
-    )
+    return AuditorGraph(settings=Settings(_env_file=None, agents_dir=Path("agents")))
 
 
 def test_main_graph_node_names_frozen():
@@ -38,13 +36,10 @@ def test_intake_graph_node_names_frozen():
 def test_route_after_assess_contract():
     g = _graph()
     assert (
-        g.route_after_assess({"pending_ids": ["REQ-001"], "retry_count": 0})
-        == "reconnect_session"
+        g.route_after_assess({"pending_ids": ["REQ-001"], "retry_count": 0}) == "reconnect_session"
     )
     assert (
-        g.route_after_assess(
-            {"pending_ids": ["REQ-001"], "retry_count": 99, "findings": {}}
-        )
+        g.route_after_assess({"pending_ids": ["REQ-001"], "retry_count": 99, "findings": {}})
         == "finalize"
     )
 
@@ -59,6 +54,8 @@ def test_public_helpers_reexported():
     from auditor.graph import _hitl_candidates, _is_recoverable_finding
     from auditor.workflows.helpers import (
         _hitl_candidates as hc,
+    )
+    from auditor.workflows.helpers import (
         _is_recoverable_finding as ir,
     )
 

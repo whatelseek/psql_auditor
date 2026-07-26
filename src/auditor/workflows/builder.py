@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from langgraph.graph import END, START, StateGraph
 
 from auditor.state import AuditorState
 from auditor.workflows.protocols import AuditRuntime
+
 
 def build_main_graph(runtime: AuditRuntime):
     """Compile the main audit StateGraph with reconnect and HITL cycles.
@@ -51,6 +50,7 @@ def build_main_graph(runtime: AuditRuntime):
     graph.add_edge("finalize", END)
     return graph.compile(checkpointer=runtime._checkpointer)
 
+
 def build_intake_graph(runtime: AuditRuntime):
     """Compile the pre-audit intake questionnaire subgraph.
 
@@ -62,4 +62,3 @@ def build_intake_graph(runtime: AuditRuntime):
     graph.add_edge(START, "intake_gate")
     graph.add_edge("intake_gate", END)
     return graph.compile(checkpointer=runtime._checkpointer)
-

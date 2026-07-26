@@ -100,9 +100,7 @@ def test_remember_persists_via_results_postgres(tmp_path: Path, monkeypatch):
             return dict(saved.get("frameworks") or {})
 
         async def save_learned_playbooks(self, frameworks):
-            saved["frameworks"] = {
-                fw: dict(entries) for fw, entries in frameworks.items()
-            }
+            saved["frameworks"] = {fw: dict(entries) for fw, entries in frameworks.items()}
             return sum(len(v) for v in saved["frameworks"].values())
 
     settings = Settings(

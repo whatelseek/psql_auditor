@@ -42,8 +42,7 @@ class DuplicateLogicalKeyError(ValueError):
             "duplicate logical result key: "
             f"{parts}"
             + (
-                f" (existing result_id={existing_result_id!r}, "
-                f"new result_id={new_result_id!r})"
+                f" (existing result_id={existing_result_id!r}, new result_id={new_result_id!r})"
                 if existing_result_id or new_result_id
                 else ""
             )
@@ -89,9 +88,7 @@ class ResultLogicalKey:
             asset_id=str(data.get("asset_id") or "").strip(),
             framework_id=str(data.get("framework_id") or "").strip(),
             framework_version=str(data.get("framework_version") or "").strip(),
-            requirement_id=str(
-                data.get("requirement_id") or data.get("req_id") or ""
-            ).strip(),
+            requirement_id=str(data.get("requirement_id") or data.get("req_id") or "").strip(),
         )
 
 
@@ -193,11 +190,7 @@ def merge_result_maps(
             prev = out[rid]
             prev_key = logical_key_of(prev)
             prev_complete = all(bool(part) for part in prev_key.as_tuple())
-            if (
-                complete
-                and prev_complete
-                and prev_key.as_tuple() != key_t
-            ):
+            if complete and prev_complete and prev_key.as_tuple() != key_t:
                 raise DuplicateResultIdError(
                     f"duplicate result_id {rid!r} with conflicting logical keys: "
                     f"{prev_key.as_dict()} vs {key.as_dict()}"
@@ -229,9 +222,7 @@ def index_by_result_id(findings: Iterable[Any]) -> dict[str, Any]:
     return merge_result_maps({}, {result_id_of(f): f for f in findings if result_id_of(f)})
 
 
-def finding_for_requirement(
-    findings: Mapping[str, Any] | None, requirement_id: str
-) -> Any | None:
+def finding_for_requirement(findings: Mapping[str, Any] | None, requirement_id: str) -> Any | None:
     """Return the finding for ``requirement_id`` within a scoped map.
 
     This is a field lookup, not an identity index. Raises if more than one

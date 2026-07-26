@@ -134,10 +134,7 @@ def parse_checklist_markdown(text: str, source_path: str | None = None) -> Check
         start = match.start()
         end = headings[idx + 1].start() if idx + 1 < len(headings) else len(text)
         block = text[start:end].strip()
-        meta = {
-            key.lower(): value.strip()
-            for key, value in _META.findall(block)
-        }
+        meta = {key.lower(): value.strip() for key, value in _META.findall(block)}
         requirements.append(
             Requirement(
                 id=match.group(1),

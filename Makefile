@@ -1,27 +1,28 @@
-# Canonical verification commands (CORE-000).
-# Prefer these over ad-hoc pytest invocations in CI and local review.
+# Canonical verification commands (AUD-002).
+# Local developers, Cursor, and GitHub Actions must use these same targets.
 
 PYTHON ?= python
 PIP ?= $(PYTHON) -m pip
-PYTEST ?= $(PYTHON) -m pytest
+PYTEST_GROUP ?= $(PYTHON) scripts/run_pytest_group.py
 RUFF ?= $(PYTHON) -m ruff
 MYPY ?= $(PYTHON) -m mypy
 
-.PHONY: help install install-locked lock format-check lint typecheck \
+.PHONY: help install install-locked lock format format-check lint typecheck \
 	test-unit test-integration test check baseline-compare
 
 help:
 	@echo "Targets:"
 	@echo "  install-locked   Clean-checkout install using constraints.txt"
 	@echo "  lock             Regenerate constraints.txt (pip-compile)"
-	@echo "  test-unit        Unit tests (-m unit)"
-	@echo "  test-integration Integration tests (-m integration)"
-	@echo "  test             Full pytest suite"
-	@echo "  format-check     Ruff format --check"
+	@echo "  format           Apply ruff formatter (may modify files)"
+	@echo "  format-check     Ruff format --check (non-destructive)"
 	@echo "  lint             Ruff check"
 	@echo "  typecheck        mypy on src/auditor"
-	@echo "  check            format-check + lint + typecheck + test"
-	@echo "  baseline-compare Full suite vs docs/baseline-failures.txt"
+	@echo "  test-unit        Unit tests (-m unit); fails if zero collected"
+	@echo "  test-integration Integration tests (-m integration); fails if zero collected"
+	@echo "  test             Full pytest suite; fails if zero collected"
+	@echo "  check            format-check + lint + typecheck + test-unit + test-integration + test"
+	@echo "  baseline-compare Optional: full suite vs docs/baseline-failures.txt"
 
 install:
 	$(PIP) install --upgrade pip
@@ -40,6 +41,9 @@ lock:
 		-o constraints.txt \
 		pyproject.toml
 
+format:
+	$(RUFF) format src tests
+
 format-check:
 	$(RUFF) format --check src tests
 
@@ -47,27 +51,20 @@ lint:
 	$(RUFF) check src tests
 
 typecheck:
-	$(MYPY) -p auditor
+	# Path form avoids shell wrappers that reject ``python -m mypy -p``.
+	$(MYPY) src/auditor
 
 test-unit:
-	$(PYTEST) -m unit -q
+	$(PYTEST_GROUP) -- -m unit -q
 
 test-integration:
-	@# Exit code 5 = no tests collected (expected until live-service tests exist).
-	@$(PYTEST) -m integration -q; \
-	code=$$?; \
-	if [ $$code -eq 5 ]; then \
-		echo "No integration tests collected (documented in docs/baseline.md)."; \
-		exit 0; \
-	fi; \
-	exit $$code
+	$(PYTEST_GROUP) -- -m integration -q
 
 test:
-	$(PYTEST) -q
+	$(PYTEST_GROUP) -- -q
 
-# Mandatory non-destructive gates. Quality tools may be red at baseline;
-# use ``make baseline-compare`` in CI to fail only on new test regressions.
-check: format-check lint typecheck test
+# Mandatory non-destructive gates (identical locally and in CI).
+check: format-check lint typecheck test-unit test-integration test
 
 baseline-compare:
 	$(PYTHON) scripts/baseline_compare.py

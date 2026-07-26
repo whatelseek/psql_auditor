@@ -50,9 +50,7 @@ class AuditJobType(str, Enum):
 
 # Allowed status transitions (from → frozenset of to).
 AUDIT_RUN_TRANSITIONS: dict[AuditRunStatus, frozenset[AuditRunStatus]] = {
-    AuditRunStatus.PENDING: frozenset(
-        {AuditRunStatus.RUNNING, AuditRunStatus.CANCELLED}
-    ),
+    AuditRunStatus.PENDING: frozenset({AuditRunStatus.RUNNING, AuditRunStatus.CANCELLED}),
     AuditRunStatus.RUNNING: frozenset(
         {
             AuditRunStatus.COMPLETED,
@@ -104,9 +102,7 @@ class InvalidStatusTransition(ValueError):
     """Raised when a run/job status change is not allowed."""
 
 
-def validate_run_transition(
-    current: AuditRunStatus, new: AuditRunStatus
-) -> None:
+def validate_run_transition(current: AuditRunStatus, new: AuditRunStatus) -> None:
     """Raise :class:`InvalidStatusTransition` when ``current → new`` is illegal."""
     if current == new:
         return
@@ -117,9 +113,7 @@ def validate_run_transition(
         )
 
 
-def validate_job_transition(
-    current: AuditJobStatus, new: AuditJobStatus
-) -> None:
+def validate_job_transition(current: AuditJobStatus, new: AuditJobStatus) -> None:
     """Raise :class:`InvalidStatusTransition` when ``current → new`` is illegal."""
     if current == new:
         return
@@ -212,9 +206,7 @@ class AuditRun:
             "status": self.status.value,
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
-            "finished_at": (
-                self.finished_at.isoformat() if self.finished_at else None
-            ),
+            "finished_at": (self.finished_at.isoformat() if self.finished_at else None),
             "evidence_run_id": self.evidence_run_id,
             "results_session_number": self.results_session_number,
             "base_thread_id": self.base_thread_id,
@@ -296,9 +288,7 @@ class AuditJob:
             "status": self.status.value,
             "mandatory": self.mandatory,
             "started_at": self.started_at.isoformat() if self.started_at else None,
-            "finished_at": (
-                self.finished_at.isoformat() if self.finished_at else None
-            ),
+            "finished_at": (self.finished_at.isoformat() if self.finished_at else None),
             "error": self.error.to_dict() if self.error else None,
             "thread_id": self.thread_id,
             "framework_id": self.framework_id,
@@ -355,8 +345,7 @@ def can_complete_run(jobs: list[AuditJob]) -> tuple[bool, str]:
         if job.status in _JOB_BLOCKS_RUN_COMPLETED:
             return (
                 False,
-                f"mandatory job {job.logical_task_id!r} "
-                f"is {job.status.value}",
+                f"mandatory job {job.logical_task_id!r} is {job.status.value}",
             )
         if job.status not in {
             AuditJobStatus.COMPLETED,
@@ -364,8 +353,7 @@ def can_complete_run(jobs: list[AuditJob]) -> tuple[bool, str]:
         }:
             return (
                 False,
-                f"mandatory job {job.logical_task_id!r} "
-                f"has unexpected status {job.status.value}",
+                f"mandatory job {job.logical_task_id!r} has unexpected status {job.status.value}",
             )
     return True, ""
 
@@ -389,8 +377,7 @@ def resolve_terminal_run_status(jobs: list[AuditJob]) -> AuditRunStatus:
         }:
             return AuditRunStatus.FAILED
     optional_bad = any(
-        j.status in {AuditJobStatus.FAILED, AuditJobStatus.CANCELLED}
-        for j in optional
+        j.status in {AuditJobStatus.FAILED, AuditJobStatus.CANCELLED} for j in optional
     )
     if optional_bad:
         return AuditRunStatus.PARTIAL

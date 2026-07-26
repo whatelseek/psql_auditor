@@ -91,25 +91,25 @@ async def probe_access_endpoints(
 async def probe_access_services(settings: Settings | None = None) -> dict[str, Any]:
     """Probe configured access channels and return structured reachability results.
 
-  Checks, in order:
+    Checks, in order:
 
-  * **SSH** — runs ``echo auditor_access_ok && hostname`` via :mod:`auditor.tools.ssh`.
-  * **PostgreSQL (MCP)** — runs ``SELECT current_database(), current_user`` via MCP.
-  * **WinRM** — runs a PowerShell hostname probe via :mod:`auditor.tools.winrm`.
+    * **SSH** — runs ``echo auditor_access_ok && hostname`` via :mod:`auditor.tools.ssh`.
+    * **PostgreSQL (MCP)** — runs ``SELECT current_database(), current_user`` via MCP.
+    * **WinRM** — runs a PowerShell hostname probe via :mod:`auditor.tools.winrm`.
 
-  Each service entry includes ``name``, ``status`` (``ok``, ``failed``,
-  ``not_configured``), and a truncated ``detail`` string.
+    Each service entry includes ``name``, ``status`` (``ok``, ``failed``,
+    ``not_configured``), and a truncated ``detail`` string.
 
-  Args:
-      settings: Optional settings override; defaults to
-          :func:`~auditor.runtime_target.effective_settings`.
+    Args:
+        settings: Optional settings override; defaults to
+            :func:`~auditor.runtime_target.effective_settings`.
 
-  Returns:
-      Dict with keys:
+    Returns:
+        Dict with keys:
 
-      * ``services``: list of per-service status dicts.
-      * ``any_ok``: ``True`` if at least one service returned ``ok``.
-  """
+        * ``services``: list of per-service status dicts.
+        * ``any_ok``: ``True`` if at least one service returned ``ok``.
+    """
     settings = settings or effective_settings()
     services: list[dict[str, Any]] = []
 
@@ -123,9 +123,7 @@ async def probe_access_services(settings: Settings | None = None) -> dict[str, A
         try:
             from auditor.tools.ssh import ssh_run
 
-            result = str(
-                await ssh_run.ainvoke({"command": "echo auditor_access_ok && hostname"})
-            )
+            result = str(await ssh_run.ainvoke({"command": "echo auditor_access_ok && hostname"}))
             if result.lower().startswith("ssh error"):
                 ssh_status = "failed"
                 ssh_detail = result[:500]
@@ -175,9 +173,7 @@ async def probe_access_services(settings: Settings | None = None) -> dict[str, A
             from auditor.tools.winrm import winrm_run
 
             result = str(
-                await winrm_run.ainvoke(
-                    {"command": "Write-Output 'auditor_access_ok'; hostname"}
-                )
+                await winrm_run.ainvoke({"command": "Write-Output 'auditor_access_ok'; hostname"})
             )
             if result.lower().startswith("winrm error"):
                 winrm_status = "failed"

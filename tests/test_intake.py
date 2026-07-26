@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from auditor.host_facts import HostFacts, parse_host_facts_json
 from auditor.frameworks import select_frameworks_for_host
 from auditor.hitl import resolve_pause_resume
+from auditor.host_facts import HostFacts, parse_host_facts_json
 from auditor.intake import (
     apply_scope_exclusions,
     client_slug,
@@ -42,9 +42,7 @@ def test_resolve_yes_no_llm_payload():
     assert resolve_yes_no("ага", {"answer": "ага"}) == "yes"
     assert resolve_yes_no("угу", {"answer": "yes"}) == "yes"
     assert resolve_yes_no("неа", {"answer": "no"}) == "no"
-    assert (
-        resolve_yes_no("ну ты можешь попасть, я нет", {"answer": "yes"}) == "yes"
-    )
+    assert resolve_yes_no("ну ты можешь попасть, я нет", {"answer": "yes"}) == "yes"
     assert resolve_yes_no("ну ты можешь попасть, я нет", None) == "unknown"
 
 
@@ -172,9 +170,7 @@ def test_parse_audit_plan_markdown_table_and_bullets():
         "10.0.0.10",
         "10.0.0.20",
     ]
-    filtered = parse_audit_plan_markdown(
-        table, known_framework_ids={"postgres_cis", "it_audit"}
-    )
+    filtered = parse_audit_plan_markdown(table, known_framework_ids={"postgres_cis", "it_audit"})
     assert filtered[0]["frameworks"] == ["postgres_cis"]
     assert parse_audit_plan_markdown("no plan here") == []
 
@@ -234,12 +230,10 @@ def test_frameworks_for_audit_type_it(tmp_path: Path):
     agents = Path("agents")
     if not (agents / "it_audit.md").is_file():
         return
-    assert frameworks_for_audit_type(
-        "it", user_request="start it audit", agents_dir=agents
-    ) == ["it_audit"]
-    both = frameworks_for_audit_type(
-        "both", user_request="postgres cis", agents_dir=agents
-    )
+    assert frameworks_for_audit_type("it", user_request="start it audit", agents_dir=agents) == [
+        "it_audit"
+    ]
+    both = frameworks_for_audit_type("both", user_request="postgres cis", agents_dir=agents)
     assert both[0] == "it_audit"
     assert "it_audit" not in both[1:]
 
@@ -259,9 +253,7 @@ def test_scope_exclusions_via_llm_resolve():
             "frameworks": ["it_audit", "ubuntu_cis_24_l2"],
         },
     ]
-    selected = resolve_scope_decision(
-        "confirm", proposed, {"action": "confirm"}
-    )
+    selected = resolve_scope_decision("confirm", proposed, {"action": "confirm"})
     assert selected is not None
     assert len(selected) == 2
     assert selected[0]["frameworks"] == proposed[0]["frameworks"]

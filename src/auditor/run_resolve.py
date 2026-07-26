@@ -297,11 +297,7 @@ def _resolve_unique_client_evidence(root: Path, folder: str) -> str | None:
     path = root / folder
     if not path.is_dir():
         return None
-    nested = [
-        p
-        for p in path.iterdir()
-        if p.is_dir() and looks_like_audit_run_id(p.name)
-    ]
+    nested = [p for p in path.iterdir() if p.is_dir() and looks_like_audit_run_id(p.name)]
     if len(nested) == 1:
         return f"{folder}/{nested[0].name}"
     if len(nested) > 1:
@@ -412,9 +408,7 @@ def _disambiguate_framework_matches(
     preferred_hosts = [h for h in host_hints if _IPV4.fullmatch(h)] or host_hints
     if preferred_hosts:
         by_host = [
-            m
-            for m in narrowed
-            if any(_key_matches_host(m, hint) for hint in preferred_hosts)
+            m for m in narrowed if any(_key_matches_host(m, hint) for hint in preferred_hosts)
         ]
         if len(by_host) == 1:
             return by_host[0]
@@ -473,9 +467,7 @@ def resolve_framework_for_req(
     frameworks = store.list_framework_ids()
     if not frameworks:
         meta = store.read_run_meta()
-        frameworks = [
-            str(x) for x in (meta.get("frameworks") or []) if x and x != "adhoc"
-        ]
+        frameworks = [str(x) for x in (meta.get("frameworks") or []) if x and x != "adhoc"]
 
     # Prefer on-disk evidence that already contains this REQ.
     if req_id:

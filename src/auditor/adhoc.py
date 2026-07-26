@@ -118,13 +118,13 @@ async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, A
 
     # CORE-001: attach only when the operator names an explicit audit_run_id /
     # evidence path — never the newest folder on disk.
-    from auditor.client_registry import get_client_registry, looks_like_audit_run_id
-    from auditor.run_resolve import extract_run_id
     from auditor.audit_registry import get_audit_registry
+    from auditor.client_registry import get_client_registry
+    from auditor.run_resolve import extract_run_id
 
     attached_to_prior = False
     prior_run = extract_run_id(user_request, evidence_dir=settings.evidence_dir)
-    store = None  # type: ignore[assignment]
+    store = None
     if prior_run:
         try:
             store = EvidenceStore.open_existing(settings.evidence_dir, prior_run)
@@ -144,9 +144,9 @@ async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, A
                     report_language=meta.get("report_language") or report_lang.code,
                 )
             else:
-                store = None  # type: ignore[assignment]
+                store = None
         except FileNotFoundError:
-            store = None  # type: ignore[assignment]
+            store = None
 
     if not attached_to_prior or store is None:
         run_id = new_run_id()
@@ -195,11 +195,11 @@ async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, A
         req_label = req_ids[0]
     elif attached_to_prior:
         # Store freeform post-audit commands under a dedicated CMD bucket.
-        existing = [
-            p.name
-            for p in (store.root / framework_id).glob("CMD-*")
-            if p.is_dir()
-        ] if (store.root / framework_id).is_dir() else []
+        existing = (
+            [p.name for p in (store.root / framework_id).glob("CMD-*") if p.is_dir()]
+            if (store.root / framework_id).is_dir()
+            else []
+        )
         next_n = len(existing) + 1
         req_label = f"CMD-{next_n:03d}"
     else:
@@ -270,25 +270,15 @@ async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, A
         meta_ids = store.read_run_meta()
 
         store.write_finding(
-
             framework_id,
-
             req_label,
-
             {
-
                 "status": "executed",
-
                 "observation": body[:2000],
-
                 "mode": "playbook",
-
                 "client_id": str(meta_ids.get("client_id") or ""),
-
                 "audit_run_id": str(meta_ids.get("audit_run_id") or ""),
-
             },
-
         )
         return {
             "report": report,
@@ -324,9 +314,7 @@ async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, A
         rounds = count_tool_rounds(messages)
         if rounds >= max_rounds:
             messages.append(
-                HumanMessage(
-                    content=ADHOC_FORCE_PROMPT.format(language_instruction=lang_instr)
-                )
+                HumanMessage(content=ADHOC_FORCE_PROMPT.format(language_instruction=lang_instr))
             )
             response = await graph.fill_model.ainvoke(messages)
             chunks.append(str(response.content or ""))
@@ -372,25 +360,15 @@ async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, A
     meta_ids = store.read_run_meta()
 
     store.write_finding(
-
         framework_id,
-
         req_label,
-
         {
-
             "status": "executed",
-
             "observation": body[:2000],
-
             "mode": "freeform",
-
             "client_id": str(meta_ids.get("client_id") or ""),
-
             "audit_run_id": str(meta_ids.get("audit_run_id") or ""),
-
         },
-
     )
     return {
         "report": report,
@@ -427,8 +405,7 @@ def _format_adhoc_report(
         Markdown string with heading, request echo, body, and evidence location.
     """
     where = (
-        f"Appended to prior audit run `{run_id}` → "
-        f"`{framework_id}/{req_label}/`"
+        f"Appended to prior audit run `{run_id}` → `{framework_id}/{req_label}/`"
         if attached_to_prior
         else f"Evidence run: `{run_id}`"
     )

@@ -25,13 +25,13 @@ _ALLOWED = frozenset({"en", "ru"})
 class ReportLanguage:
     """Resolved language for narrative report cells and localized UI labels.
 
-  Immutable value object produced by :func:`detect_report_language` and carried
-  through LangGraph state as ``report_language``.
+    Immutable value object produced by :func:`detect_report_language` and carried
+    through LangGraph state as ``report_language``.
 
-  Attributes:
-      code: Short code used for UI packs (``en`` or ``ru``).
-      name: Human language name for LLM instructions (``English`` or ``Russian``).
-  """
+    Attributes:
+        code: Short code used for UI packs (``en`` or ``ru``).
+        name: Human language name for LLM instructions (``English`` or ``Russian``).
+    """
 
     code: str
     """Short code used for UI packs (``en`` or ``ru``)."""
@@ -109,9 +109,7 @@ _REPORT_UI: dict[str, dict[str, str]] = {
         "chart_title": "CIS compliance by severity (%)",
         "chart_heading": "CIS compliance visualization",
         "chart_overall": "Overall compliance",
-        "chart_formula": (
-            "(pass + ½·partial / assessed; skipped excluded from denominator)."
-        ),
+        "chart_formula": ("(pass + ½·partial / assessed; skipped excluded from denominator)."),
         "chart_parse_fail": "Could not parse findings from the report markdown.",
         "chart_sev": "Severity",
         "chart_pct": "Compliance %",
@@ -149,9 +147,7 @@ _REPORT_UI: dict[str, dict[str, str]] = {
         "chart_title": "Соответствие CIS по критичности (%)",
         "chart_heading": "Визуализация соответствия CIS",
         "chart_overall": "Общий уровень соответствия",
-        "chart_formula": (
-            "(pass + ½·partial / оценённые; skipped не входят в знаменатель)."
-        ),
+        "chart_formula": ("(pass + ½·partial / оценённые; skipped не входят в знаменатель)."),
         "chart_parse_fail": "Не удалось разобрать таблицу результатов в отчёте.",
         "chart_sev": "Критичность",
         "chart_pct": "Соответствие %",
@@ -164,16 +160,16 @@ _REPORT_UI: dict[str, dict[str, str]] = {
 def normalize_language_code(value: str) -> str:
     """Normalize arbitrary language input to a supported report code.
 
-  Accepts ISO-style codes (``en``, ``ru``), full names (``English``, ``русский``),
-  and BCP-47 tags (``en-US`` → ``en``). Unknown or empty values default to
-  ``en``.
+    Accepts ISO-style codes (``en``, ``ru``), full names (``English``, ``русский``),
+    and BCP-47 tags (``en-US`` → ``en``). Unknown or empty values default to
+    ``en``.
 
-  Args:
-      value: Raw language string from settings, frontmatter, or operator text.
+    Args:
+        value: Raw language string from settings, frontmatter, or operator text.
 
-  Returns:
-      ``"en"`` or ``"ru"``.
-  """
+    Returns:
+        ``"en"`` or ``"ru"``.
+    """
     text = (value or "").strip().lower().replace("_", "-")
     if not text:
         return "en"
@@ -190,12 +186,12 @@ def normalize_language_code(value: str) -> str:
 def language_name(code: str) -> str:
     """Map a language code to its English display name for LLM prompts.
 
-  Args:
-      code: Language code or alias accepted by :func:`normalize_language_code`.
+    Args:
+        code: Language code or alias accepted by :func:`normalize_language_code`.
 
-  Returns:
-      ``"English"`` or ``"Russian"``. Unrecognized codes fall back to English.
-  """
+    Returns:
+        ``"English"`` or ``"Russian"``. Unrecognized codes fall back to English.
+    """
     code = normalize_language_code(code)
     return _CODE_TO_NAME.get(code, "English")
 
@@ -203,17 +199,17 @@ def language_name(code: str) -> str:
 def report_ui(language: str | ReportLanguage | None) -> dict[str, str]:
     """Return localized fixed-report chrome strings for a language.
 
-  Used by :func:`auditor.state.render_report` and compliance chart formatters
-  to label section headings, table columns, and chart text without hard-coding
-  English in the template.
+    Used by :func:`auditor.state.render_report` and compliance chart formatters
+    to label section headings, table columns, and chart text without hard-coding
+    English in the template.
 
-  Args:
-      language: Language code, :class:`ReportLanguage`, or ``None`` (→ English).
+    Args:
+        language: Language code, :class:`ReportLanguage`, or ``None`` (→ English).
 
-  Returns:
-      Dict of UI label keys to localized strings. Always returns a full pack;
-      unknown codes fall back to the English pack.
-  """
+    Returns:
+        Dict of UI label keys to localized strings. Always returns a full pack;
+        unknown codes fall back to the English pack.
+    """
     code = (
         language.code
         if isinstance(language, ReportLanguage)
@@ -226,16 +222,16 @@ def report_ui(language: str | ReportLanguage | None) -> dict[str, str]:
 def detect_report_language(user_request: str) -> ReportLanguage:
     """Pick English or Russian from an explicit request or Cyrillic wording.
 
-  Checks explicit patterns first (e.g. "report in Russian", "на русском").
-  If no explicit hint is found, any Cyrillic characters in the request imply
-  Russian; otherwise English is assumed.
+    Checks explicit patterns first (e.g. "report in Russian", "на русском").
+    If no explicit hint is found, any Cyrillic characters in the request imply
+    Russian; otherwise English is assumed.
 
-  Args:
-      user_request: Full operator chat message or audit request text.
+    Args:
+        user_request: Full operator chat message or audit request text.
 
-  Returns:
-      A :class:`ReportLanguage` with normalized ``code`` and display ``name``.
-  """
+    Returns:
+        A :class:`ReportLanguage` with normalized ``code`` and display ``name``.
+    """
     text = user_request or ""
 
     for pattern, code, name in _EXPLICIT_PATTERNS:
@@ -259,16 +255,16 @@ def detect_report_language(user_request: str) -> ReportLanguage:
 def language_instruction(language: str | ReportLanguage | None) -> str:
     """Build a prompt fragment forcing narrative cells into one language.
 
-  Injected into assessment and finalize LLM prompts so observation,
-  recommendation, and executive summary text match the operator's language
-  while technical identifiers and status tokens stay unchanged.
+    Injected into assessment and finalize LLM prompts so observation,
+    recommendation, and executive summary text match the operator's language
+    while technical identifiers and status tokens stay unchanged.
 
-  Args:
-      language: Resolved language code, :class:`ReportLanguage`, or ``None``.
+    Args:
+        language: Resolved language code, :class:`ReportLanguage`, or ``None``.
 
-  Returns:
-      Markdown instruction paragraph suitable for appending to system prompts.
-  """
+    Returns:
+        Markdown instruction paragraph suitable for appending to system prompts.
+    """
     if isinstance(language, ReportLanguage):
         code = normalize_language_code(language.code)
         name = language_name(code)

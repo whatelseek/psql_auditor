@@ -50,8 +50,8 @@ from urllib.parse import urlparse, urlunparse
 
 import asyncpg
 
-from auditor.compliance import findings_to_compliance_metrics
 from auditor.checklist import Requirement
+from auditor.compliance import findings_to_compliance_metrics
 from auditor.config import Settings, get_settings
 from auditor.domain.result_identity import (
     DuplicateLogicalKeyError,
@@ -65,9 +65,7 @@ from auditor.state import Finding
 logger = logging.getLogger(__name__)
 
 _SAFE_DB = re.compile(r"[^a-z0-9_]+")
-_IP_LIKE = re.compile(
-    r"^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]+)$"
-)
+_IP_LIKE = re.compile(r"^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]+)$")
 
 
 def _looks_like_ip(value: str) -> bool:
@@ -76,6 +74,7 @@ def _looks_like_ip(value: str) -> bool:
     if not text or text == "_default":
         return False
     return bool(_IP_LIKE.match(text))
+
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS audit_sessions (
@@ -339,8 +338,7 @@ class ResultsStore:
     def enabled(self) -> bool:
         """Return True when results DB is configured and enabled."""
         return bool(
-            self.settings.results_db_enabled
-            and (self.settings.results_database_url or "").strip()
+            self.settings.results_db_enabled and (self.settings.results_database_url or "").strip()
         )
 
     def client_database_name(self, client_name: str) -> str:
@@ -490,9 +488,7 @@ class ResultsStore:
         try:
             await self._ensure_schema(conn)
             finished = (
-                datetime.now(timezone.utc)
-                if status in {"completed", "interrupted"}
-                else None
+                datetime.now(timezone.utc) if status in {"completed", "interrupted"} else None
             )
             await conn.execute(
                 """
@@ -566,9 +562,7 @@ class ResultsStore:
             return None
         from auditor.legacy_compat import require_audit_run_id
 
-        arun = require_audit_run_id(
-            audit_run_id, context="ResultsStore.get_session_by_audit_run"
-        )
+        arun = require_audit_run_id(audit_run_id, context="ResultsStore.get_session_by_audit_run")
         # Prefer client DSN when hint provided; otherwise scan known client DBs
         # is out of scope — require client_name for per-client DB mode.
         slug = make_client_slug(client_name) if client_name else ""
@@ -601,9 +595,7 @@ class ResultsStore:
         Not for run-scoped resume/write paths (CORE-001). Prefer an explicit
         session number or ``audit_run_id``.
         """
-        sessions = await self.list_sessions(
-            client_name=client_name, status=status, limit=1
-        )
+        sessions = await self.list_sessions(client_name=client_name, status=status, limit=1)
         return sessions[0] if sessions else None
 
     async def list_session_requirement_results(
@@ -623,9 +615,7 @@ class ResultsStore:
         """
         if not self.enabled:
             return None, [], []
-        info = await self.get_session(
-            client_name=client_name, session_number=session_number
-        )
+        info = await self.get_session(client_name=client_name, session_number=session_number)
         if info is None:
             return None, [], []
         slug = make_client_slug(client_name) or "client"
@@ -690,9 +680,7 @@ class ResultsStore:
         """
         if not self.enabled:
             return None, []
-        info = await self.get_session(
-            client_name=client_name, session_number=session_number
-        )
+        info = await self.get_session(client_name=client_name, session_number=session_number)
         if info is None:
             return None, []
         slug = make_client_slug(client_name) or "client"
@@ -909,9 +897,7 @@ class ResultsStore:
         client = (client_name or "").strip() or "client"
         run_id = (evidence_run_id or "").strip()
         if not run_id:
-            raise ValueError(
-                "evidence_run_id is required (client name/slug is not a run id)"
-            )
+            raise ValueError("evidence_run_id is required (client name/slug is not a run id)")
         fw = (framework_id or "").strip() or "framework"
         if "/" in fw:
             host_from_key, bare = fw.split("/", 1)
@@ -1152,21 +1138,17 @@ class ResultsStore:
         sample_arun = (audit_run_id or "").strip()
         sample_cid = (client_id or "").strip()
         for f in findings.values():
-            if not sample_arun and getattr(f, "audit_run_id", ""):
+            if not sample_arun and f.audit_run_id:
                 sample_arun = str(f.audit_run_id)
-            if not sample_cid and getattr(f, "client_id", ""):
+            if not sample_cid and f.client_id:
                 sample_cid = str(f.client_id)
             if sample_arun and sample_cid:
                 break
-        arun = require_audit_run_id(
-            sample_arun, context="ResultsStore.record_host_framework_audit"
-        )
+        arun = require_audit_run_id(sample_arun, context="ResultsStore.record_host_framework_audit")
         client = (client_name or "").strip() or "client"
         run_id = (evidence_run_id or "").strip()
         if not run_id:
-            raise ValueError(
-                "evidence_run_id is required (client name/slug is not a run id)"
-            )
+            raise ValueError("evidence_run_id is required (client name/slug is not a run id)")
         fw = (framework_id or "").strip() or "framework"
         if "/" in fw:
             host_from_key, bare = fw.split("/", 1)
@@ -1177,15 +1159,19 @@ class ResultsStore:
         slug = make_client_slug(client)
 
         dsn = await self._connect_dsn_for_client(slug)
-        metrics = findings_to_compliance_metrics(findings) if findings else {
-            "pass": 0,
-            "fail": 0,
-            "partial": 0,
-            "error": 0,
-            "skipped": 0,
-            "assessed": 0,
-            "compliance_pct": 0.0,
-        }
+        metrics = (
+            findings_to_compliance_metrics(findings)
+            if findings
+            else {
+                "pass": 0,
+                "fail": 0,
+                "partial": 0,
+                "error": 0,
+                "skipped": 0,
+                "assessed": 0,
+                "compliance_pct": 0.0,
+            }
+        )
         report_rel = ""
         if evidence_relpath:
             if host_key != "_default":
@@ -1264,14 +1250,14 @@ class ResultsStore:
                 req_map = requirements or {}
                 for finding in findings.values():
                     f = finding if isinstance(finding, Finding) else Finding.model_validate(finding)
-                    req = req_map.get(f.requirement_id) if req_map else None
+                    req_cell = req_map.get(f.requirement_id) if req_map else None
                     await self._upsert_requirement_cell(
                         conn,
                         host_result_id=hr_pk,
                         session_pk=session_pk,
                         sess_num=sess_num,
                         finding=f,
-                        requirement=req,
+                        requirement=req_cell,
                     )
                 # Mark completed when finalize/update_report writes results.
                 if source in {"finalize", "update_report"}:
@@ -1338,16 +1324,11 @@ class ResultsStore:
             audit_run_id or getattr(finding, "audit_run_id", "") or "",
             context="ResultsStore.upsert_requirement_result",
         )
-        cid = (
-            (client_id or "").strip()
-            or str(getattr(finding, "client_id", "") or "").strip()
-        )
+        cid = (client_id or "").strip() or str(getattr(finding, "client_id", "") or "").strip()
         client = (client_name or "").strip() or "client"
         run_id = (evidence_run_id or "").strip()
         if not run_id:
-            raise ValueError(
-                "evidence_run_id is required (client name/slug is not a run id)"
-            )
+            raise ValueError("evidence_run_id is required (client name/slug is not a run id)")
         fw = (framework_id or "").strip() or "framework"
         if "/" in fw:
             host_from_key, bare = fw.split("/", 1)
@@ -1692,8 +1673,7 @@ class ResultsStore:
             finding.category or (requirement.category if requirement else ""),
             finding.severity or (requirement.severity if requirement else ""),
             finding.status,
-            finding.pass_criteria
-            or (requirement.pass_criteria if requirement else ""),
+            finding.pass_criteria or (requirement.pass_criteria if requirement else ""),
             (requirement.how_to_verify if requirement else ""),
             finding.evidence or "",
             finding.remediation or "",
@@ -1741,15 +1721,19 @@ class ResultsStore:
                 framework_id=str(r["framework_id"] or ""),
                 framework_version=str(r["framework_version"] or ""),
             )
-        metrics = findings_to_compliance_metrics(findings) if findings else {
-            "pass": 0,
-            "fail": 0,
-            "partial": 0,
-            "error": 0,
-            "skipped": 0,
-            "assessed": 0,
-            "compliance_pct": 0.0,
-        }
+        metrics = (
+            findings_to_compliance_metrics(findings)
+            if findings
+            else {
+                "pass": 0,
+                "fail": 0,
+                "partial": 0,
+                "error": 0,
+                "skipped": 0,
+                "assessed": 0,
+                "compliance_pct": 0.0,
+            }
+        )
         await conn.execute(
             """
             UPDATE host_results SET
@@ -1809,9 +1793,7 @@ class ResultsStore:
         """
         from auditor.legacy_compat import MissingAuditRunIdError, require_audit_run_id
 
-        arun = require_audit_run_id(
-            audit_run_id, context="ResultsStore._resolve_session_row"
-        )
+        arun = require_audit_run_id(audit_run_id, context="ResultsStore._resolve_session_row")
         row = await conn.fetchrow(
             """
             SELECT * FROM audit_sessions
@@ -1923,9 +1905,7 @@ class ResultsStore:
         maint = _maintenance_dsn(admin_dsn)
         conn = await asyncpg.connect(maint)
         try:
-            exists = await conn.fetchval(
-                "SELECT 1 FROM pg_database WHERE datname = $1", db_name
-            )
+            exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", db_name)
             if not exists:
                 await conn.execute(f'CREATE DATABASE "{db_name}"')
                 logger.info("Created results database %s", db_name)
@@ -1984,8 +1964,14 @@ class ResultsStore:
             "ALTER TABLE requirement_results ADD COLUMN IF NOT EXISTS framework_id text",
             "ALTER TABLE requirement_results ADD COLUMN IF NOT EXISTS framework_version text",
             "ALTER TABLE hosts ADD COLUMN IF NOT EXISTS asset_id text",
-            "ALTER TABLE audit_sessions ADD COLUMN IF NOT EXISTS client_id text NOT NULL DEFAULT ''",
-            "ALTER TABLE audit_sessions ADD COLUMN IF NOT EXISTS audit_run_id text NOT NULL DEFAULT ''",
+            (
+                "ALTER TABLE audit_sessions ADD COLUMN IF NOT EXISTS "
+                "client_id text NOT NULL DEFAULT ''"
+            ),
+            (
+                "ALTER TABLE audit_sessions ADD COLUMN IF NOT EXISTS "
+                "audit_run_id text NOT NULL DEFAULT ''"
+            ),
             """
             CREATE INDEX IF NOT EXISTS audit_sessions_audit_run_idx
                 ON audit_sessions (audit_run_id)
@@ -2077,9 +2063,7 @@ class ResultsStore:
             out.setdefault(fw, {})[key] = value
         return out
 
-    async def save_learned_playbooks(
-        self, frameworks: Mapping[str, Mapping[str, Any]]
-    ) -> int:
+    async def save_learned_playbooks(self, frameworks: Mapping[str, Mapping[str, Any]]) -> int:
         """Replace learned playbook rows in Postgres with ``frameworks``.
 
         Deletes previous ``source='learned'`` rows, then upserts the provided
@@ -2101,9 +2085,7 @@ class ResultsStore:
             try:
                 await self._ensure_playbook_schema(conn)
                 async with conn.transaction():
-                    await conn.execute(
-                        "DELETE FROM playbook_memory WHERE source = 'learned'"
-                    )
+                    await conn.execute("DELETE FROM playbook_memory WHERE source = 'learned'")
                     count = 0
                     for framework_id, entries in frameworks.items():
                         if not isinstance(entries, Mapping):
@@ -2180,8 +2162,6 @@ async def start_session_safe(settings: Settings, **kwargs: Any) -> AuditSessionI
     except Exception as exc:  # noqa: BLE001
         logger.warning("Results session start failed: %s", exc)
         return None
-
-
 
 
 async def record_results_safe(
@@ -2316,9 +2296,7 @@ async def list_sessions_report(
     want_status = "interrupted" if interrupted_only else status
     sessions: list[AuditSessionInfo] = []
     if client_name:
-        sessions = await store.list_sessions(
-            client_name=client_name, status=want_status, limit=50
-        )
+        sessions = await store.list_sessions(client_name=client_name, status=want_status, limit=50)
     else:
         clients = discover_evidence_client_names(settings.evidence_dir)
         if want_status == "interrupted":
@@ -2326,13 +2304,10 @@ async def list_sessions_report(
         else:
             for name in clients:
                 sessions.extend(
-                    await store.list_sessions(
-                        client_name=name, status=want_status, limit=10
-                    )
+                    await store.list_sessions(client_name=name, status=want_status, limit=10)
                 )
             sessions.sort(
-                key=lambda s: s.started_at
-                or datetime.min.replace(tzinfo=timezone.utc),
+                key=lambda s: s.started_at or datetime.min.replace(tzinfo=timezone.utc),
                 reverse=True,
             )
     return format_sessions_markdown(sessions)
@@ -2403,11 +2378,7 @@ def resolve_session_evidence(
         # Legacy flat client folder — only when a single unambiguous root.
         flat = evidence_dir / slug
         if flat.is_dir() and (flat / "meta.json").is_file():
-            nested = [
-                p
-                for p in flat.iterdir()
-                if p.is_dir() and looks_like_audit_run_id(p.name)
-            ]
+            nested = [p for p in flat.iterdir() if p.is_dir() and looks_like_audit_run_id(p.name)]
             if nested:
                 raise AmbiguousLegacyRunError(
                     f"client folder {slug!r} has nested audit runs; "
@@ -2422,10 +2393,7 @@ def resolve_session_evidence(
         meta = _disk_meta_for_run(evidence_dir, chosen_run) if chosen_run else {}
 
     tid = str(
-        meta.get("continue_thread_id")
-        or meta.get("thread_id")
-        or info.continue_thread_id
-        or ""
+        meta.get("continue_thread_id") or meta.get("thread_id") or info.continue_thread_id or ""
     ).strip()
     if chosen_run and (":" not in tid or tid.count(":") < 2):
         from auditor.session_store import load_all_multi_sessions
@@ -2709,15 +2677,12 @@ async def list_results_report(
         )
     if not client_name:
         return (
-            "Specify a client, e.g. `List results for AlphaCo session 2` "
-            "or slash `/list-results`."
+            "Specify a client, e.g. `List results for AlphaCo session 2` or slash `/list-results`."
         )
 
     info: AuditSessionInfo | None = None
     if session_number is not None:
-        info = await store.get_session(
-            client_name=client_name, session_number=session_number
-        )
+        info = await store.get_session(client_name=client_name, session_number=session_number)
         if info is None:
             return (
                 f"No warehouse session **#{session_number}** for "
@@ -2737,10 +2702,7 @@ async def list_results_report(
         session_number=info.session_number,
     )
     if sess is None:
-        return (
-            f"Could not load session **#{info.session_number}** for "
-            f"**{client_name}**."
-        )
+        return f"Could not load session **#{info.session_number}** for **{client_name}**."
     return format_session_results_markdown(sess, hosts, reqs)
 
 
@@ -2780,8 +2742,7 @@ def format_session_status_markdown(
         )
     lines.append("")
     lines.append(
-        "Next: `/list-results` for REQ cells, or `/list-host <hostname> "
-        "<framework>` for one host."
+        "Next: `/list-results` for REQ cells, or `/list-host <hostname> <framework>` for one host."
     )
     return "\n".join(lines)
 
@@ -2843,16 +2804,11 @@ async def list_status_report(
             "`RESULTS_DATABASE_URL` to track host progress in PostgreSQL."
         )
     if not client_name:
-        return (
-            "Specify a client, e.g. `List status for AlphaCo session 2` "
-            "or slash `/list-status`."
-        )
+        return "Specify a client, e.g. `List status for AlphaCo session 2` or slash `/list-status`."
 
     info: AuditSessionInfo | None = None
     if session_number is not None:
-        info = await store.get_session(
-            client_name=client_name, session_number=session_number
-        )
+        info = await store.get_session(client_name=client_name, session_number=session_number)
         if info is None:
             return (
                 f"No warehouse session **#{session_number}** for "
@@ -2872,10 +2828,7 @@ async def list_status_report(
         session_number=info.session_number,
     )
     if sess is None:
-        return (
-            f"Could not load session **#{info.session_number}** for "
-            f"**{client_name}**."
-        )
+        return f"Could not load session **#{info.session_number}** for **{client_name}**."
     return format_session_status_markdown(sess, rows)
 
 
@@ -2900,9 +2853,7 @@ async def list_host_report(
         )
 
     clients = (
-        [client_name]
-        if client_name
-        else discover_evidence_client_names(settings.evidence_dir)
+        [client_name] if client_name else discover_evidence_client_names(settings.evidence_dir)
     )
     meta, reqs = await store.list_host_framework_results(
         hostname=hostname,
@@ -2942,9 +2893,7 @@ async def resolve_continue_target(
     session_num, client_hint = parse_continue_session_request(user_text)
 
     if store is not None and session_num is not None and client_hint:
-        info = await store.get_session(
-            client_name=client_hint, session_number=session_num
-        )
+        info = await store.get_session(client_name=client_hint, session_number=session_num)
         if info is not None:
             tid, run_id = resolve_session_evidence(settings, info)
             if tid and run_id:
@@ -2969,9 +2918,7 @@ async def resolve_continue_target(
             hit = None
         if hit is not None:
             meta = _disk_meta_for_run(settings.evidence_dir, hit.evidence_run_id)
-            tid = str(
-                meta.get("continue_thread_id") or meta.get("thread_id") or ""
-            ).strip()
+            tid = str(meta.get("continue_thread_id") or meta.get("thread_id") or "").strip()
             if tid:
                 info = None
                 if store is not None:

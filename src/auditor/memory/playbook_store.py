@@ -431,12 +431,16 @@ class PlaybookMemory:
         with self._lock:
             self._track_framework(framework_id)
             item = self._store.get(_ns(framework_id), req_id)
-            existing = dict(item.value or {}) if item else {
-                "framework_id": _memory_framework_id(framework_id),
-                "requirement_id": req_id,
-                "tools": [],
-                "notes": "",
-            }
+            existing = (
+                dict(item.value or {})
+                if item
+                else {
+                    "framework_id": _memory_framework_id(framework_id),
+                    "requirement_id": req_id,
+                    "tools": [],
+                    "notes": "",
+                }
+            )
             tools = list(existing.get("tools") or [])
             recipe = {"name": tool_name, "arguments": args}
             sig = json.dumps(recipe, sort_keys=True, ensure_ascii=False)

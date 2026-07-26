@@ -237,12 +237,8 @@ def _parse_credentials_table(text: str) -> dict[str, str]:
         host = cells[i_host] if i_host < len(cells) else ""
         port = cells[i_port] if i_port is not None and i_port < len(cells) else ""
         user = cells[i_user] if i_user is not None and i_user < len(cells) else ""
-        secret = (
-            cells[i_secret] if i_secret is not None and i_secret < len(cells) else ""
-        )
-        extra_raw = (
-            cells[i_extra] if i_extra is not None and i_extra < len(cells) else ""
-        )
+        secret = cells[i_secret] if i_secret is not None and i_secret < len(cells) else ""
+        extra_raw = cells[i_extra] if i_extra is not None and i_extra < len(cells) else ""
         extra = _parse_extra(extra_raw)
 
         if kind == "ssh":
@@ -259,10 +255,7 @@ def _parse_credentials_table(text: str) -> dict[str, str]:
             key_path = extra.get("key")
             if key_path and "SSH_PRIVATE_KEY_PATH" not in out:
                 out["SSH_PRIVATE_KEY_PATH"] = key_path
-            if (
-                extra.get("strict_host_key") is not None
-                and "SSH_STRICT_HOST_KEY" not in out
-            ):
+            if extra.get("strict_host_key") is not None and "SSH_STRICT_HOST_KEY" not in out:
                 out["SSH_STRICT_HOST_KEY"] = extra["strict_host_key"]
         elif kind == "pg":
             if host:
@@ -274,10 +267,15 @@ def _parse_credentials_table(text: str) -> dict[str, str]:
             if secret:
                 out["PG_PASSWORD"] = secret
             db = extra.get("database") or ""
-            if not db and i_extra is not None and headers[i_extra] in {
-                "database",
-                "db",
-            }:
+            if (
+                not db
+                and i_extra is not None
+                and headers[i_extra]
+                in {
+                    "database",
+                    "db",
+                }
+            ):
                 db = extra_raw
             if not db:
                 db = extra.get("bare") or ""
@@ -293,10 +291,15 @@ def _parse_credentials_table(text: str) -> dict[str, str]:
             if secret:
                 out["MYSQL_PASSWORD"] = secret
             db = extra.get("database") or extra.get("bare") or ""
-            if not db and i_extra is not None and headers[i_extra] in {
-                "database",
-                "db",
-            }:
+            if (
+                not db
+                and i_extra is not None
+                and headers[i_extra]
+                in {
+                    "database",
+                    "db",
+                }
+            ):
                 db = extra_raw
             if db:
                 out["MYSQL_DATABASE"] = db
@@ -309,12 +312,7 @@ def _parse_credentials_table(text: str) -> dict[str, str]:
                 out["ORACLE_USER"] = user
             if secret:
                 out["ORACLE_PASSWORD"] = secret
-            svc = (
-                extra.get("service")
-                or extra.get("database")
-                or extra.get("bare")
-                or ""
-            )
+            svc = extra.get("service") or extra.get("database") or extra.get("bare") or ""
             if svc:
                 out["ORACLE_SERVICE"] = svc
         elif kind == "winrm":
@@ -476,12 +474,8 @@ def _iter_credential_rows(text: str) -> list[dict[str, str]]:
         host = cells[i_host] if i_host < len(cells) else ""
         port = cells[i_port] if i_port is not None and i_port < len(cells) else ""
         user = cells[i_user] if i_user is not None and i_user < len(cells) else ""
-        secret = (
-            cells[i_secret] if i_secret is not None and i_secret < len(cells) else ""
-        )
-        extra_raw = (
-            cells[i_extra] if i_extra is not None and i_extra < len(cells) else ""
-        )
+        secret = cells[i_secret] if i_secret is not None and i_secret < len(cells) else ""
+        extra_raw = cells[i_extra] if i_extra is not None and i_extra < len(cells) else ""
         rows.append(
             {
                 "access": access,
@@ -813,8 +807,7 @@ def connection_secrets_path(secrets_dir: Path) -> Path | None:
     candidates = sorted(
         p
         for p in secrets_dir.glob("*.md")
-        if p.name.lower() not in {"readme.md"}
-        and not p.name.endswith(".example.md")
+        if p.name.lower() not in {"readme.md"} and not p.name.endswith(".example.md")
     )
     return candidates[0] if len(candidates) == 1 else None
 

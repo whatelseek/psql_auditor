@@ -33,9 +33,7 @@ async def test_microsoft_docs_search_calls_remote_tool():
         ),
         patch.object(mslearn_mcp, "MultiServerMCPClient", return_value=client),
     ):
-        text = await mslearn_mcp.microsoft_docs_search.ainvoke(
-            {"query": "enable WinRM"}
-        )
+        text = await mslearn_mcp.microsoft_docs_search.ainvoke({"query": "enable WinRM"})
 
     assert "WinRM" in text
     session.call_tool.assert_awaited_once_with(

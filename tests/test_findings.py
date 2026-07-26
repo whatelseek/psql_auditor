@@ -4,18 +4,10 @@ from auditor.state import Finding, aggregate_findings, render_report
 
 def test_aggregate_findings_counts_statuses():
     findings = {
-        "REQ-001": Finding(
-            requirement_id="REQ-001", status="pass", title="A"
-        ),
-        "REQ-002": Finding(
-            requirement_id="REQ-002", status="fail", title="B"
-        ),
-        "REQ-003": Finding(
-            requirement_id="REQ-003", status="error", title="C"
-        ),
-        "REQ-004": Finding(
-            requirement_id="REQ-004", status="partial", title="D"
-        ),
+        "REQ-001": Finding(requirement_id="REQ-001", status="pass", title="A"),
+        "REQ-002": Finding(requirement_id="REQ-002", status="fail", title="B"),
+        "REQ-003": Finding(requirement_id="REQ-003", status="error", title="C"),
+        "REQ-004": Finding(requirement_id="REQ-004", status="partial", title="D"),
     }
     counts = aggregate_findings(findings)
     assert counts == {

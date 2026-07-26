@@ -64,11 +64,7 @@ def iter_evidence_roots(evidence_dir: Path | str) -> list[LegacyEvidenceHit]:
         if not child.is_dir() or child.name.startswith("."):
             continue
         # Nested: <client_slug>/<audit_run_id>/
-        nested_runs = [
-            p
-            for p in child.iterdir()
-            if p.is_dir() and not p.name.startswith(".")
-        ]
+        nested_runs = [p for p in child.iterdir() if p.is_dir() and not p.name.startswith(".")]
         has_nested_arun = any(
             looks_like_audit_run_id(p.name) or _read_meta(p).get("audit_run_id")
             for p in nested_runs
@@ -85,9 +81,7 @@ def iter_evidence_roots(evidence_dir: Path | str) -> list[LegacyEvidenceHit]:
                         evidence_run_id=f"{child.name}/{run_dir.name}",
                         client_id=str(meta.get("client_id") or ""),
                         audit_run_id=arun,
-                        client_slug=str(
-                            meta.get("client_slug") or child.name
-                        ),
+                        client_slug=str(meta.get("client_slug") or child.name),
                         status=str(meta.get("status") or ""),
                         legacy=not bool(meta.get("audit_run_id")),
                     )
@@ -118,14 +112,11 @@ def resolve_evidence_for_audit_run(
     """Resolve exactly one evidence root for an explicit ``audit_run_id``."""
     arun = (audit_run_id or "").strip()
     if not arun:
-        raise MissingAuditRunIdError(
-            "audit_run_id is required to resolve evidence"
-        )
+        raise MissingAuditRunIdError("audit_run_id is required to resolve evidence")
     if not looks_like_audit_run_id(arun) and not arun.startswith("arun_"):
         # Reject client slug / display name used as run id.
         raise MissingAuditRunIdError(
-            f"value {arun!r} is not an audit_run_id "
-            "(client name/slug cannot identify a run)"
+            f"value {arun!r} is not an audit_run_id (client name/slug cannot identify a run)"
         )
     matches = [
         h
@@ -163,8 +154,7 @@ def require_audit_run_id(audit_run_id: str | None, *, context: str = "") -> str:
     value = (audit_run_id or "").strip()
     if not value:
         raise MissingAuditRunIdError(
-            "audit_run_id is required"
-            + (f" for {context}" if context else "")
+            "audit_run_id is required" + (f" for {context}" if context else "")
         )
     if looks_like_audit_run_id(value):
         return value

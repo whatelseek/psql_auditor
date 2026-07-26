@@ -10,8 +10,7 @@ from auditor.anonymization import (
 def test_regex_anonymization_ipv4_ipv6_email_reversible():
     anonymizer = ReversibleAnonymizer()
     text = (
-        "Contact Admin@Example.COM, backup admin@example.com. "
-        "IPs: 10.200.29.78 and 2001:db8::7334."
+        "Contact Admin@Example.COM, backup admin@example.com. IPs: 10.200.29.78 and 2001:db8::7334."
     )
     masked = anonymizer.anonymize_text(text)
     assert "10.200.29.78" not in masked

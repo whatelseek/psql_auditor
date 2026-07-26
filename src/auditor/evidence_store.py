@@ -50,9 +50,7 @@ _SEQ_FILE = re.compile(r"^(\d{3})_.+\.(txt|json)$", re.IGNORECASE)
 
 # Per-task host slug so parallel host/framework jobs share one EvidenceStore
 # without racing on the mutable ``host_segment`` attribute.
-_active_host_segment: ContextVar[str | None] = ContextVar(
-    "evidence_host_segment", default=None
-)
+_active_host_segment: ContextVar[str | None] = ContextVar("evidence_host_segment", default=None)
 
 
 @contextmanager
@@ -300,9 +298,7 @@ class EvidenceStore:
             nested_aruns = [
                 p
                 for p in path.iterdir()
-                if p.is_dir()
-                and not p.name.startswith(".")
-                and looks_like_audit_run_id(p.name)
+                if p.is_dir() and not p.name.startswith(".") and looks_like_audit_run_id(p.name)
             ]
             if len(nested_aruns) == 1:
                 nested_id = f"{rid}/{nested_aruns[0].name}"
@@ -310,8 +306,7 @@ class EvidenceStore:
                 return store
             if len(nested_aruns) > 1:
                 raise AmbiguousLegacyRunError(
-                    f"client folder {rid!r} has multiple audit runs; "
-                    "pass an explicit audit_run_id",
+                    f"client folder {rid!r} has multiple audit runs; pass an explicit audit_run_id",
                     candidates=[f"{rid}/{p.name}" for p in nested_aruns],
                 )
             # Legacy flat client folder (meta / evidence at root).
@@ -422,9 +417,7 @@ class EvidenceStore:
             if (path / "report.md").is_file():
                 return True
             try:
-                return any(
-                    p.is_dir() and p.name.upper().startswith("REQ") for p in path.iterdir()
-                )
+                return any(p.is_dir() and p.name.upper().startswith("REQ") for p in path.iterdir())
             except OSError:
                 return False
 
@@ -452,9 +445,7 @@ class EvidenceStore:
         if not fw_dir.is_dir():
             return []
         return sorted(
-            p.name
-            for p in fw_dir.iterdir()
-            if p.is_dir() and p.name.upper().startswith("REQ")
+            p.name for p in fw_dir.iterdir() if p.is_dir() and p.name.upper().startswith("REQ")
         )
 
     def load_finding(self, framework_id: str, req_id: str) -> dict[str, Any] | None:
@@ -467,11 +458,7 @@ class EvidenceStore:
         Returns:
             Parsed finding dict, or ``None`` when missing or invalid.
         """
-        path = (
-            self._framework_root(framework_id)
-            / _safe_segment(req_id, "REQ")
-            / "finding.json"
-        )
+        path = self._framework_root(framework_id) / _safe_segment(req_id, "REQ") / "finding.json"
         if not path.is_file():
             return None
         try:
@@ -667,9 +654,7 @@ class EvidenceStore:
             context="EvidenceStore.write_finding",
         )
         if not str(finding.get("client_id") or "").strip():
-            raise MissingAuditRunIdError(
-                "client_id is required for EvidenceStore.write_finding"
-            )
+            raise MissingAuditRunIdError("client_id is required for EvidenceStore.write_finding")
         path = self.requirement_dir(framework_id, req_id) / "finding.json"
         path.write_text(
             json.dumps(finding, indent=2, ensure_ascii=False) + "\n",
@@ -693,9 +678,7 @@ class EvidenceStore:
         files = [
             p
             for p in req_dir.iterdir()
-            if p.is_file()
-            and p.suffix == ".txt"
-            and re.match(r"^\d{3}_", p.name)
+            if p.is_file() and p.suffix == ".txt" and re.match(r"^\d{3}_", p.name)
         ]
         return sorted(files, key=lambda p: p.name)
 

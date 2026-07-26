@@ -9,7 +9,6 @@ from auditor.compliance import (
     severity_issue_counts,
 )
 
-
 SAMPLE = """
 # Audit Report: Ubuntu CIS
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from typing import Any
 
@@ -35,11 +34,10 @@ from auditor.results_store import (
     snapshot_checklist_safe,
     sync_session_status_from_run_meta,
 )
-from auditor.tools.mcp_client import reconnect_mcp_session
 from auditor.session_store import write_run_status
 from auditor.state import AuditorState, Finding
+from auditor.tools.mcp_client import reconnect_mcp_session
 from auditor.workflows.helpers import (
-    _as_finding,
     _extract_json,
     _is_recoverable_finding,
     _normalize_status,
@@ -86,6 +84,7 @@ def _bind_finding(
         return require_persistable(finding)
     return finding
 
+
 async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
     """Node: fill report cells for pending requirements (parallel)."""
     requirements = state.get("requirements") or {}
@@ -93,9 +92,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
     if not pending:
         return {
             "pending_ids": [],
-            "messages": [
-                AIMessage(content="No pending requirements to assess.", name="auditor")
-            ],
+            "messages": [AIMessage(content="No pending requirements to assess.", name="auditor")],
         }
 
     user_request = state.get("user_request") or "(none)"
@@ -109,8 +106,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
     sem = asyncio.Semaphore(limit)
     thread_hint = str(state.get("thread_id") or "")
     emit_phase(
-        f"Assessing {len(pending)} requirement(s) for `{framework_id}` "
-        f"(concurrency={limit})…",
+        f"Assessing {len(pending)} requirement(s) for `{framework_id}` (concurrency={limit})…",
         framework_id=framework_id,
     )
     if requirements:
@@ -120,9 +116,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
         if store is not None:
             try:
                 evidence_rel = str(
-                    store.root.relative_to(
-                        Path(runtime.settings.evidence_dir).resolve()
-                    )
+                    store.root.relative_to(Path(runtime.settings.evidence_dir).resolve())
                 )
             except ValueError:
                 evidence_rel = str(store.root)
@@ -140,11 +134,8 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
                     pass
         await snapshot_checklist_safe(
             runtime.settings,
-            client_name=str(state.get("client_name") or "")
-            or (store.run_id if store else ""),
-            evidence_run_id=str(
-                state.get("evidence_run_id") or (store.run_id if store else "")
-            ),
+            client_name=str(state.get("client_name") or "") or (store.run_id if store else ""),
+            evidence_run_id=str(state.get("evidence_run_id") or (store.run_id if store else "")),
             framework_id=framework_id or "framework",
             requirements=requirements,
             evidence_host_id=host_id or None,
@@ -192,9 +183,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
                                 "pass_criteria": requirements[req_id].pass_criteria,
                             },
                         )
-                        store.write_finding(
-                            framework_id, req_id, special.model_dump()
-                        )
+                        store.write_finding(framework_id, req_id, special.model_dump())
                     await runtime._warehouse_live_upsert(
                         state,
                         framework_id=framework_id,
@@ -359,6 +348,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
         ],
     }
 
+
 async def reconnect_session(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
     """Node: restore MCP sessions and bump retry counter (graph cycle)."""
     status = await reconnect_mcp_session()
@@ -377,7 +367,9 @@ async def reconnect_session(runtime: AuditRuntime, state: AuditorState) -> dict[
         ],
     }
 
-async def fill_requirement_cells(runtime: AuditRuntime,
+
+async def fill_requirement_cells(
+    runtime: AuditRuntime,
     req_id: str,
     requirement: Requirement,
     user_request: str,
@@ -431,14 +423,10 @@ async def fill_requirement_cells(runtime: AuditRuntime,
         runtime.settings.max_tool_output_chars,
         "evidence",
     )
-    report_lang = report_language or runtime._report_language_from_request(
-        user_request
-    )
+    report_lang = report_language or runtime._report_language_from_request(user_request)
     lang_instr = language_instruction(report_lang)
     fill_messages = [
-        SystemMessage(
-            content=FILL_SYSTEM_PROMPT.format(language_instruction=lang_instr)
-        ),
+        SystemMessage(content=FILL_SYSTEM_PROMPT.format(language_instruction=lang_instr)),
         HumanMessage(
             content=FILL_CELL_PROMPT.format(
                 report_language=report_lang.name,
@@ -456,14 +444,14 @@ async def fill_requirement_cells(runtime: AuditRuntime,
     response = await runtime.fill_model.ainvoke(fill_messages)
     finding = runtime._cells_to_finding(req_id, requirement, response, evidence)
     if state is not None:
-        finding = _bind_finding(
-            runtime, state, finding, framework_id=framework_id, store=store
-        )
+        finding = _bind_finding(runtime, state, finding, framework_id=framework_id, store=store)
     if store is not None:
         store.write_finding(framework_id, req_id, finding.model_dump())
     return finding
 
-async def gather_evidence(runtime: AuditRuntime,
+
+async def gather_evidence(
+    runtime: AuditRuntime,
     req_id: str,
     requirement: Requirement,
     user_request: str,
@@ -494,33 +482,22 @@ async def gather_evidence(runtime: AuditRuntime,
     if ssh_only:
         tool_note = "Use ONLY ssh_run / ssh_read_file for this inventory check."
     else:
-        tool_note = (
-            "Use inventory plus SSH/Postgres MCP tools appropriate for this framework."
-        )
+        tool_note = "Use inventory plus SSH/Postgres MCP tools appropriate for this framework."
     messages: list = [
         SystemMessage(
-            content=(
-                f"{EVIDENCE_SYSTEM_PROMPT}\n\n"
-                f"Active framework: `{framework_id}`. "
-                f"{tool_note}"
-            )
+            content=(f"{EVIDENCE_SYSTEM_PROMPT}\n\nActive framework: `{framework_id}`. {tool_note}")
         ),
         HumanMessage(
             content=EVIDENCE_PROMPT.format(
                 user_request=user_request,
                 requirement_block=requirement.to_prompt_block(),
-                playbook_block=playbook_block
-                or "(no playbook memory for this requirement)",
+                playbook_block=playbook_block or "(no playbook memory for this requirement)",
             )
         ),
     ]
     chunks: list[str] = []
     max_rounds = runtime.settings.max_tool_rounds_per_item
-    evidence_llm = (
-        runtime.evidence_model_ssh
-        if ssh_only
-        else runtime._evidence_llm()
-    )
+    evidence_llm = runtime.evidence_model_ssh if ssh_only else runtime._evidence_llm()
 
     for _ in range(max_rounds + 1):
         rounds = count_tool_rounds(messages)
@@ -550,7 +527,9 @@ async def gather_evidence(runtime: AuditRuntime,
 
     return "\n---\n".join(c.strip() for c in chunks if c and c.strip())
 
-def cells_to_finding(runtime: AuditRuntime,
+
+def cells_to_finding(
+    runtime: AuditRuntime,
     req_id: str,
     req: Requirement,
     ai: AIMessage,
@@ -572,15 +551,9 @@ def cells_to_finding(runtime: AuditRuntime,
     """
     data = _extract_json(str(ai.content or "")) or {}
     observation = str(
-        data.get("observation")
-        or data.get("evidence")
-        or fallback_evidence
-        or ai.content
-        or ""
+        data.get("observation") or data.get("evidence") or fallback_evidence or ai.content or ""
     )
-    recommendation = str(
-        data.get("recommendation") or data.get("remediation") or ""
-    )
+    recommendation = str(data.get("recommendation") or data.get("remediation") or "")
     # If observation still looks like a transport failure, force error status
     # so the cyclic reconnect path can pick it up.
     status = _normalize_status(data.get("status"))
@@ -618,7 +591,9 @@ def cells_to_finding(runtime: AuditRuntime,
     )
     return tmp
 
-def deterministic_it_audit_finding(runtime: AuditRuntime,
+
+def deterministic_it_audit_finding(
+    runtime: AuditRuntime,
     *,
     req_id: str,
     requirement: Requirement,
@@ -646,9 +621,7 @@ def deterministic_it_audit_finding(runtime: AuditRuntime,
                 severity=requirement.severity,
                 category=requirement.category,
                 pass_criteria=requirement.pass_criteria,
-                evidence=(
-                    f"Inventory-only assessment: INVENTORY.md is present at `{inv_path}`."
-                ),
+                evidence=(f"Inventory-only assessment: INVENTORY.md is present at `{inv_path}`."),
                 remediation="",
                 notes="Deterministic inventory file check.",
             )
@@ -697,13 +670,12 @@ def deterministic_it_audit_finding(runtime: AuditRuntime,
             category=requirement.category,
             pass_criteria=requirement.pass_criteria,
             evidence="Intake access probe summary:\n" + "\n".join(lines),
-            remediation=""
-            if any_ok
-            else "Fix SSH/Postgres credentials in inventory and re-probe.",
+            remediation="" if any_ok else "Fix SSH/Postgres credentials in inventory and re-probe.",
             notes="Deterministic from intake access_probe.",
         )
 
     return None
+
 
 def store_from_state(runtime: AuditRuntime, state: AuditorState) -> EvidenceStore | None:
     """Resolve the evidence store for this graph run (if configured)."""
@@ -724,7 +696,9 @@ def store_from_state(runtime: AuditRuntime, state: AuditorState) -> EvidenceStor
     runtime._evidence_by_run[store.run_id] = store
     return store
 
-async def warehouse_live_upsert(runtime: AuditRuntime,
+
+async def warehouse_live_upsert(
+    runtime: AuditRuntime,
     state: AuditorState,
     *,
     framework_id: str,
@@ -761,11 +735,8 @@ async def warehouse_live_upsert(runtime: AuditRuntime,
                 pass
     await record_requirement_result_safe(
         runtime.settings,
-        client_name=str(state.get("client_name") or "")
-        or (store.run_id if store else ""),
-        evidence_run_id=str(
-            state.get("evidence_run_id") or (store.run_id if store else "")
-        ),
+        client_name=str(state.get("client_name") or "") or (store.run_id if store else ""),
+        evidence_run_id=str(state.get("evidence_run_id") or (store.run_id if store else "")),
         framework_id=framework_id or "framework",
         evidence_host_id=host_id or None,
         finding=finding,
@@ -775,15 +746,13 @@ async def warehouse_live_upsert(runtime: AuditRuntime,
         session_number=runtime._results_session_number(state, store),
         hostname=hostname,
         ssh_host=ssh_host or host_id or None,
-        audit_run_id=str(
-            getattr(finding, "audit_run_id", "") or state.get("audit_run_id") or ""
-        ),
-        client_id=str(
-            getattr(finding, "client_id", "") or state.get("client_id") or ""
-        ),
+        audit_run_id=str(getattr(finding, "audit_run_id", "") or state.get("audit_run_id") or ""),
+        client_id=str(getattr(finding, "client_id", "") or state.get("client_id") or ""),
     )
 
-def results_session_number(runtime: AuditRuntime,
+
+def results_session_number(
+    runtime: AuditRuntime,
     state: AuditorState,
     store: EvidenceStore | None,
 ) -> int | None:
@@ -797,8 +766,7 @@ def results_session_number(runtime: AuditRuntime,
                 pass
     if state.get("results_session_number") is not None:
         try:
-            return int(state["results_session_number"])  # type: ignore[index]
+            return int(state["results_session_number"])
         except (TypeError, ValueError):
             return None
     return None
-

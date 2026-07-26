@@ -9,10 +9,11 @@ commands (especially Windows / Azure / .NET / PowerShell / WinRM).
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.sessions import Connection
 
 from auditor.mcp_registry import (
     build_http_connection,
@@ -57,7 +58,7 @@ async def _call_learn_tool(tool_name: str, arguments: dict[str, Any]) -> str:
             "Enable server `microsoft-learn` to search official docs."
         )
     client = MultiServerMCPClient(
-        {_SERVER_NAME: conn},
+        {_SERVER_NAME: cast(Connection, conn)},
         handle_tool_errors=True,
     )
     try:
