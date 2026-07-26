@@ -17,6 +17,7 @@ def test_discovers_agents_directory(tmp_path: Path):
     (tmp_path / "custom_cis.md").write_text(
         "---\n"
         "id: custom_cis\n"
+        'version: "1.0"\n'
         "aliases: [custom, acme]\n"
         "description: Acme custom benchmark\n"
         "domain: cybersecurity\n"
@@ -34,11 +35,14 @@ def test_discovers_agents_directory(tmp_path: Path):
     frameworks = list_frameworks(tmp_path)
     assert len(frameworks) == 1
     assert frameworks[0].id == "custom_cis"
+    assert frameworks[0].version == "1.0"
+    assert frameworks[0].executable is True
     assert "acme" in frameworks[0].aliases
     assert frameworks[0].domain == "cybersecurity"
     assert frameworks[0].detect.os_ids == ("acmeos",)
     checklist = load_framework_checklist(frameworks[0])
     assert checklist.ids() == ["REQ-001"]
+    assert checklist.requirements[0].content_hash
 
 
 def test_route_framework_by_alias():

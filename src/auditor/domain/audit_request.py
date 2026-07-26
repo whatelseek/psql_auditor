@@ -462,6 +462,15 @@ def validate_audit_request_semantics(
                     "unknown_framework",
                     f"unknown framework_id {fw_ref.framework_id!r}",
                 )
+            if not getattr(fw, "executable", True):
+                detail = "; ".join(getattr(fw, "validation_errors", ())[:3]) or (
+                    "framework failed registry validation"
+                )
+                _reject(
+                    f"targets[{idx}].frameworks[{jdx}].framework_id",
+                    "framework_not_executable",
+                    f"framework {fw_ref.framework_id!r} is not executable: {detail}",
+                )
             current = str(getattr(fw, "version", "") or "").strip()
             if current != fw_ref.framework_version:
                 _reject(

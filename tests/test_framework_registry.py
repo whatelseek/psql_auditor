@@ -1,0 +1,300 @@
+"""INPUT-002: Markdown framework registry parse / validate / retrieve."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from auditor.framework_registry import (
+    FrameworkNotExecutable,
+    FrameworkRegistry,
+    load_framework_registry,
+)
+from auditor.frameworks import (
+    frameworks_catalog_text,
+    get_requirement_prompt_block,
+    list_executable_frameworks,
+    list_frameworks,
+    load_framework_checklist,
+    requirement_index_text,
+    route_framework,
+)
+
+
+def _write_fw(
+    directory: Path,
+    name: str,
+    *,
+    frontmatter: str,
+    body: str,
+) -> Path:
+    path = directory / name
+    path.write_text(f"---\n{frontmatter}\n---\n{body}", encoding="utf-8")
+    return path
+
+
+_VALID_BODY = """# Sample Framework
+
+## REQ-001: Auth method
+**Category:** Access Control
+**Severity:** High
+**Applicability:** All hosts
+**Evidence required:** pg_hba.conf excerpt
+**How to verify:** Check authentication settings
+**Pass criteria:** No trust for remote
+**Fail criteria:** trust allowed remotely
+**Insufficient evidence criteria:** File unreadable
+**Recommendation:** Prefer scram-sha-256
+"""
+
+
+def test_parse_req_and_win_headings(tmp_path: Path) -> None:
+    body = """# Mixed Ids
+
+## REQ-001: Classic heading
+**Category:** Demo
+**Severity:** Low
+**How to verify:** echo req
+**Pass criteria:** ok
+
+### WIN-001 — Windows identity
+**Category:** Inventory
+**Severity:** Medium
+**Verification guidance:** WinRM hostname
+**Pass criteria:** Hostname recorded
+"""
+    _write_fw(
+        tmp_path,
+        "mixed.md",
+        frontmatter=(
+            'id: mixed\nversion: "1.0"\ndescription: Mixed heading shapes\ndomain: cybersecurity\n'
+        ),
+        body=body,
+    )
+    registry = load_framework_registry(tmp_path)
+    entry = registry.get("mixed")
+    assert entry is not None
+    assert entry.executable
+    assert [r.id for r in entry.requirements] == ["REQ-001", "WIN-001"]
+    win = entry.get_requirement("WIN-001")
+    assert win is not None
+    assert win.title == "Windows identity"
+    assert win.verification_guidance == "WinRM hostname"
+    assert win.content_hash
+
+
+def test_validate_missing_version_not_executable(tmp_path: Path) -> None:
+    _write_fw(
+        tmp_path,
+        "no_ver.md",
+        frontmatter="id: no_ver\ndescription: Missing version\ndomain: it\n",
+        body=_VALID_BODY,
+    )
+    registry = load_framework_registry(tmp_path)
+    entry = registry.get("no_ver")
+    assert entry is not None
+    assert not entry.executable
+    assert any(i.code == "missing_framework_version" for i in entry.issues)
+    with pytest.raises(FrameworkNotExecutable):
+        registry.require_executable("no_ver")
+    listed = list_frameworks(tmp_path, include_invalid=True)
+    assert listed[0].executable is False
+    assert listed[0].validation_errors
+    assert list_executable_frameworks(tmp_path) == []
+
+
+def test_validate_duplicate_requirement_ids(tmp_path: Path) -> None:
+    body = """# Dup Reqs
+
+## REQ-001: First
+**Category:** Demo
+**Severity:** Low
+**How to verify:** a
+**Pass criteria:** a
+
+## REQ-001: Second
+**Category:** Demo
+**Severity:** Low
+**How to verify:** b
+**Pass criteria:** b
+"""
+    _write_fw(
+        tmp_path,
+        "dup_req.md",
+        frontmatter='id: dup_req\nversion: "1.0"\ndomain: it\n',
+        body=body,
+    )
+    entry = load_framework_registry(tmp_path).get("dup_req")
+    assert entry is not None
+    assert not entry.executable
+    assert any(i.code == "duplicate_requirement_id" for i in entry.issues)
+
+
+def test_validate_duplicate_framework_ids(tmp_path: Path) -> None:
+    fm = 'id: same_id\nversion: "1.0"\ndomain: it\n'
+    _write_fw(tmp_path, "a.md", frontmatter=fm, body=_VALID_BODY)
+    _write_fw(tmp_path, "b.md", frontmatter=fm, body=_VALID_BODY)
+    registry = load_framework_registry(tmp_path)
+    assert len(registry.list_all()) == 2
+    assert all(not e.executable for e in registry.list_all())
+    assert all(
+        any(i.code == "duplicate_framework_id" for i in e.issues) for e in registry.list_all()
+    )
+
+
+def test_validate_empty_required_fields(tmp_path: Path) -> None:
+    body = """# Empty Fields
+
+## REQ-001: Has Title
+**Category:** Demo
+**Severity:** Low
+**How to verify:**
+**Pass criteria:**
+"""
+    _write_fw(
+        tmp_path,
+        "empty.md",
+        frontmatter='id: empty\nversion: "1.0"\ndomain: it\n',
+        body=body,
+    )
+    entry = load_framework_registry(tmp_path).get("empty")
+    assert entry is not None
+    assert not entry.executable
+    codes = {i.code for i in entry.issues if i.level == "error"}
+    assert "missing_verification_guidance" in codes
+    assert "missing_pass_criteria" in codes
+
+
+def test_invalid_visible_but_not_routed(tmp_path: Path) -> None:
+    _write_fw(
+        tmp_path,
+        "bad.md",
+        frontmatter="id: bad_fw\ndescription: no version\ndomain: cybersecurity\n",
+        body=_VALID_BODY,
+    )
+    _write_fw(
+        tmp_path,
+        "good.md",
+        frontmatter=(
+            "id: good_fw\n"
+            'version: "2.0"\n'
+            "description: Valid drop-in\n"
+            "domain: cybersecurity\n"
+            "aliases: [goodfw]\n"
+        ),
+        body=_VALID_BODY,
+    )
+    catalog = frameworks_catalog_text(tmp_path)
+    assert "bad_fw" in catalog
+    assert "INVALID" in catalog
+    assert "good_fw" in catalog
+
+    fw = route_framework("please audit goodfw", tmp_path)
+    assert fw.id == "good_fw"
+    assert fw.executable
+
+    bad = next(f for f in list_frameworks(tmp_path) if f.id == "bad_fw")
+    with pytest.raises(FrameworkNotExecutable):
+        load_framework_checklist(bad)
+
+
+def test_catalog_index_and_single_requirement_retrieval(tmp_path: Path) -> None:
+    _write_fw(
+        tmp_path,
+        "demo.md",
+        frontmatter=(
+            "id: demo\n"
+            'version: "1.0"\n'
+            "description: Demo framework\n"
+            "applicability: Linux servers\n"
+            "discovery_guidance: Collect OS release first\n"
+            "domain: cybersecurity\n"
+        ),
+        body=_VALID_BODY,
+    )
+    registry = FrameworkRegistry.load(tmp_path)
+    catalog = registry.catalog_text()
+    assert "`demo`" in catalog
+    assert "Linux servers" in catalog
+    assert "Collect OS release first" in catalog
+    # Compact catalog must not embed full requirement bodies.
+    assert "Prefer scram-sha-256" not in catalog
+
+    index = requirement_index_text("demo", tmp_path)
+    assert "REQ-001" in index
+    assert "Auth method" in index
+    assert "Prefer scram-sha-256" not in index
+
+    block = get_requirement_prompt_block("demo", "REQ-001", tmp_path)
+    assert "REQ-001" in block
+    assert "Prefer scram-sha-256" in block
+    assert "REQ-002" not in block
+
+    entry = registry.require_executable("demo")
+    checklist = entry.to_checklist()
+    assert checklist.ids() == ["REQ-001"]
+    assert checklist.requirements[0].content_hash
+
+
+def test_large_framework_parses_and_indexes(tmp_path: Path) -> None:
+    reqs = []
+    for i in range(1, 121):
+        reqs.append(
+            f"## REQ-{i:03d}: Control {i}\n"
+            f"**Category:** Batch\n"
+            f"**Severity:** Low\n"
+            f"**How to verify:** check {i}\n"
+            f"**Pass criteria:** pass {i}\n"
+        )
+    _write_fw(
+        tmp_path,
+        "large.md",
+        frontmatter='id: large\nversion: "9.0"\ndomain: cybersecurity\n',
+        body="# Large\n\n" + "\n".join(reqs),
+    )
+    registry = load_framework_registry(tmp_path)
+    entry = registry.require_executable("large")
+    assert len(entry.requirements) == 120
+    index = registry.requirement_index_text("large")
+    assert "`REQ-001`" in index
+    assert "`REQ-120`" in index
+    # Index stays compact: no full verification text for every row.
+    assert index.count("How to verify") == 0
+    mid = registry.get_requirement("large", "REQ-060")
+    assert mid is not None
+    assert mid.verification_guidance == "check 60"
+    assert mid.content_hash
+
+
+def test_new_framework_drop_in_without_python_changes(tmp_path: Path) -> None:
+    _write_fw(
+        tmp_path,
+        "brand_new.md",
+        frontmatter=(
+            "id: brand_new\n"
+            'version: "0.1"\n'
+            "description: Drop-in only\n"
+            "domain: it\n"
+            "aliases: [brandnew]\n"
+            "detect:\n"
+            "  always: true\n"
+        ),
+        body=_VALID_BODY,
+    )
+    frameworks = list_executable_frameworks(tmp_path)
+    assert [f.id for f in frameworks] == ["brand_new"]
+    checklist = load_framework_checklist(frameworks[0])
+    assert checklist.ids() == ["REQ-001"]
+
+
+def test_bundled_agents_remain_executable() -> None:
+    registry = load_framework_registry("agents")
+    executable = registry.list_executable()
+    assert {e.id for e in executable} >= {
+        "postgres_cis",
+        "ubuntu_cis_24_l2",
+        "host_facts",
+    }
+    assert all(e.version for e in executable)
+    assert all(e.requirements for e in executable)

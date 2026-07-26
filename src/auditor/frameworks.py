@@ -1,25 +1,28 @@
 """Drop-in audit frameworks from the ``agents/`` directory.
 
 Discovery and routing layer at the start of every audit run. Operators add
-Markdown checklists under ``agents/<name>.md``; this module scans that directory,
-parses optional YAML frontmatter, and selects the best match for a natural-
-language request or for live host facts.
+Markdown checklists under ``agents/<name>.md``; this module discovers them via
+:mod:`auditor.framework_registry`, attaches validation results, and selects the
+best match for a natural-language request or for live host facts.
 
 Pipeline integration:
 
-1. :func:`route_framework` / :func:`route_frameworks` pick framework(s) from chat.
+1. :func:`route_framework` / :func:`route_frameworks` pick **executable** frameworks.
 2. :func:`select_frameworks_for_host` auto-selects by OS, binaries, and ports.
-3. :func:`load_framework_checklist` feeds the LangGraph ``load_checklist`` node.
+3. :func:`load_framework_checklist` feeds the LangGraph ``load_checklist`` node
+   (raises if the framework failed registry validation).
 
-You create frameworks — the code only discovers them. Use the standard
-``REQ-NNN`` Markdown shape (see existing files) and optional frontmatter for
-aliases, description, and ``detect:`` host-matching rules.
+You create frameworks — the code only discovers and validates them. Use
+``REQ-NNN`` / ``WIN-NNN`` Markdown headings (see existing files) with YAML
+frontmatter for ``id``, ``version``, aliases, description, applicability,
+discovery guidance, and ``detect:`` host-matching rules. Invalid frameworks
+remain visible in the catalog with errors but are not routed or executed.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +69,11 @@ class Framework:
         detect: Host auto-detection rules parsed from frontmatter.
         language: Preferred checklist language (``en`` / ``ru`` / ``any``).
         family_id: Logical family key used to prefer language variants.
-        version: Explicit framework version from frontmatter (required to persist results).
+        version: Explicit framework version from frontmatter (required to execute).
+        applicability: Optional human-readable applicability statement.
+        discovery_guidance: Optional discovery / pre-assessment guidance.
+        executable: False when registry validation reported errors.
+        validation_errors: Human-readable validation error messages.
     """
 
     id: str
@@ -79,6 +86,10 @@ class Framework:
     language: str = "any"  # any | en | ru
     family_id: str = ""
     version: str = ""
+    applicability: str = ""
+    discovery_guidance: str = ""
+    executable: bool = True
+    validation_errors: tuple[str, ...] = ()
 
 
 def _normalize_framework_language(value: Any) -> str:
@@ -227,6 +238,10 @@ def _parse_agent_file(path: Path) -> Framework:
         detect = FrameworkDetect(always=True)
 
     version = str(meta.get("version") or meta.get("framework_version") or "").strip()
+    applicability = str(
+        meta.get("applicability") or meta.get("applies_to") or meta.get("scope") or ""
+    ).strip()
+    discovery_guidance = str(meta.get("discovery_guidance") or meta.get("discovery") or "").strip()
 
     return Framework(
         id=fw_id,
@@ -239,6 +254,8 @@ def _parse_agent_file(path: Path) -> Framework:
         language=language,
         family_id=family_id,
         version=version,
+        applicability=applicability,
+        discovery_guidance=discovery_guidance,
     )
 
 
@@ -266,37 +283,87 @@ def _prefer_language_variants(
     return selected
 
 
-def list_frameworks(agents_dir: Path | str | None = None) -> list[Framework]:
+def list_frameworks(
+    agents_dir: Path | str | None = None,
+    *,
+    include_invalid: bool = True,
+) -> list[Framework]:
     """Discover all frameworks by scanning ``agents/*.md``.
+
+    Uses the Markdown :class:`~auditor.framework_registry.FrameworkRegistry`
+    so validation errors are attached. Invalid frameworks remain listed when
+    ``include_invalid`` is true (default) but have ``executable=False``.
 
     Args:
         agents_dir: Directory containing drop-in Markdown frameworks.
+        include_invalid: When false, omit frameworks that failed validation.
 
     Returns:
         Sorted list of frameworks (by id). Missing directory → empty list.
     """
-    root = Path(agents_dir or "agents")
-    if not root.is_dir():
-        return []
-    frameworks = [_parse_agent_file(path) for path in sorted(root.glob("*.md"))]
-    return sorted(frameworks, key=lambda f: f.id)
+    from auditor.framework_registry import load_framework_registry
+
+    registry = load_framework_registry(agents_dir)
+    out: list[Framework] = []
+    for entry in registry.list_all():
+        if not include_invalid and not entry.executable:
+            continue
+        errors = tuple(i.message for i in entry.issues if i.level == "error")
+        out.append(
+            replace_framework(
+                entry.framework,
+                executable=entry.executable,
+                validation_errors=errors,
+            )
+        )
+    return sorted(out, key=lambda f: f.id)
+
+
+def list_executable_frameworks(agents_dir: Path | str | None = None) -> list[Framework]:
+    """Return only frameworks that passed registry validation."""
+    return list_frameworks(agents_dir, include_invalid=False)
+
+
+def replace_framework(
+    framework: Framework,
+    *,
+    executable: bool | None = None,
+    validation_errors: tuple[str, ...] | None = None,
+) -> Framework:
+    """Return a copy of ``framework`` with selected fields replaced."""
+    if executable is None and validation_errors is None:
+        return framework
+    if executable is None:
+        return replace(framework, validation_errors=validation_errors or ())
+    if validation_errors is None:
+        return replace(framework, executable=executable)
+    return replace(
+        framework,
+        executable=executable,
+        validation_errors=validation_errors,
+    )
 
 
 def get_framework(
     framework_id: str,
     agents_dir: Path | str | None = None,
+    *,
+    executable_only: bool = False,
 ) -> Framework | None:
     """Look up a discovered framework by id.
 
     Args:
         framework_id: Framework slug to match (exact id comparison).
         agents_dir: Directory to scan; defaults to ``agents``.
+        executable_only: When true, return ``None`` for invalid frameworks.
 
     Returns:
         The matching :class:`Framework`, or ``None`` if not found.
     """
-    for fw in list_frameworks(agents_dir):
+    for fw in list_frameworks(agents_dir, include_invalid=not executable_only):
         if fw.id == framework_id:
+            if executable_only and not fw.executable:
+                return None
             return fw
     return None
 
@@ -322,9 +389,16 @@ def _score_frameworks(
     Raises:
         FileNotFoundError: When ``agents_dir`` contains no ``*.md`` frameworks.
     """
-    frameworks = list_frameworks(agents_dir)
+    frameworks = list_executable_frameworks(agents_dir)
     frameworks = _prefer_language_variants(frameworks, preferred_language)
     if not frameworks:
+        # Surface invalid frameworks in the error when the directory is not empty.
+        all_fw = list_frameworks(agents_dir, include_invalid=True)
+        if all_fw and not any(f.executable for f in all_fw):
+            raise FileNotFoundError(
+                f"No executable frameworks in {Path(agents_dir or 'agents')}. "
+                "All discovered Markdown frameworks failed validation."
+            )
         raise FileNotFoundError(
             f"No frameworks found in {Path(agents_dir or 'agents')}. "
             "Add Markdown files like agents/ubuntu_cis.md"
@@ -483,7 +557,7 @@ def select_frameworks_for_host(
     """
     wanted = {d.lower() for d in (domains or ["it", "cybersecurity"])}
     candidates = _prefer_language_variants(
-        list_frameworks(agents_dir),
+        list_executable_frameworks(agents_dir),
         preferred_language,
     )
     matched: list[Framework] = []
@@ -494,7 +568,7 @@ def select_frameworks_for_host(
             matched.append(fw)
 
     if "it" in wanted and not any(f.domain == "it" for f in matched):
-        it_fw = get_framework("it_audit", agents_dir)
+        it_fw = get_framework("it_audit", agents_dir, executable_only=True)
         if it_fw is not None and it_fw not in matched:
             matched.insert(0, it_fw)
 
@@ -546,10 +620,11 @@ def prefer_framework_ids(
 
 
 def load_framework_checklist(framework: Framework) -> Checklist:
-    """Load checklist body from a framework file, stripping YAML frontmatter.
+    """Load checklist body for an **executable** framework only.
 
-    Delegates to :func:`auditor.checklist.parse_checklist_markdown` on the body
-    after optional frontmatter removal.
+    Uses the Markdown registry so requirement blocks include content hashes and
+    extended metadata. Non-executable frameworks raise
+    :class:`~auditor.framework_registry.FrameworkNotExecutable`.
 
     Args:
         framework: Discovered framework whose :attr:`~Framework.path` is read.
@@ -557,31 +632,54 @@ def load_framework_checklist(framework: Framework) -> Checklist:
     Returns:
         Parsed :class:`Checklist` with requirements in document order.
     """
-    text = framework.path.read_text(encoding="utf-8")
-    match = _FRONTMATTER.match(text)
-    body = match.group(2) if match else text
-    return parse_checklist_markdown(body, source_path=str(framework.path))
+    from auditor.framework_registry import FrameworkNotExecutable, load_framework_registry
+
+    registry = load_framework_registry(framework.path.parent)
+    entry = registry.get(framework.id)
+    if entry is None:
+        # Fallback for ad-hoc paths outside a registry scan.
+        text = framework.path.read_text(encoding="utf-8")
+        match = _FRONTMATTER.match(text)
+        body = match.group(2) if match else text
+        return parse_checklist_markdown(body, source_path=str(framework.path))
+    if not entry.executable:
+        raise FrameworkNotExecutable(framework.id, entry.issues)
+    return entry.to_checklist()
 
 
 def frameworks_catalog_text(agents_dir: Path | str | None = None) -> str:
-    """Build a human-readable catalog of available frameworks for prompts.
+    """Build a compact catalog of frameworks for selection prompts.
 
-    Args:
-        agents_dir: Directory to scan for ``*.md`` frameworks.
-
-    Returns:
-        Multi-line bullet list suitable for system prompts or help text.
+    Includes invalid frameworks with error markers so administrators can see
+    them, but routing/execution uses only executable entries.
     """
-    frameworks = list_frameworks(agents_dir)
-    if not frameworks:
-        return "No frameworks in agents/. Drop a .md checklist file to add one."
-    lines = ["Available frameworks (from agents/):"]
-    for fw in frameworks:
-        alias_preview = ", ".join(fw.aliases[:6])
-        lines.append(
-            f"- `{fw.id}` [{fw.domain}]: {fw.title} — {fw.description} (aliases: {alias_preview})"
-        )
-    return "\n".join(lines)
+    from auditor.framework_registry import load_framework_registry
+
+    return load_framework_registry(agents_dir).catalog_text(executable_only=False)
+
+
+def requirement_index_text(
+    framework_id: str,
+    agents_dir: Path | str | None = None,
+) -> str:
+    """Compact requirement index for a selected framework (no full bodies)."""
+    from auditor.framework_registry import load_framework_registry
+
+    return load_framework_registry(agents_dir).requirement_index_text(framework_id)
+
+
+def get_requirement_prompt_block(
+    framework_id: str,
+    requirement_id: str,
+    agents_dir: Path | str | None = None,
+) -> str:
+    """Return full text for the currently assessed requirement only."""
+    from auditor.framework_registry import load_framework_registry
+
+    req = load_framework_registry(agents_dir).get_requirement(framework_id, requirement_id)
+    if req is None:
+        return ""
+    return req.to_prompt_block()
 
 
 def frameworks_detect_catalog_text(agents_dir: Path | str | None = None) -> str:
