@@ -102,6 +102,9 @@ class InventoryReference(BaseModel):
 
     kind: Literal["client_file"]
     ref: StrictStr = Field(min_length=1)
+    # Optional expected inventory snapshot identity (inventory-driven launch).
+    version_id: StrictStr = ""
+    content_hash: StrictStr = ""
 
     @field_validator("ref")
     @classmethod
@@ -115,6 +118,11 @@ class InventoryReference(BaseModel):
         if ".." in path.parts:
             raise ValueError("inventory.ref must not contain path traversal")
         return text.replace("\\", "/")
+
+    @field_validator("version_id", "content_hash")
+    @classmethod
+    def _optional_identity(cls, value: str) -> str:
+        return (value or "").strip()
 
 
 class FrameworkReference(BaseModel):

@@ -18,16 +18,18 @@ from typing import Any
 
 from auditor.config import load_settings
 from auditor.domain.audit_plan import PlanConfirmationRejected
+from auditor.domain.audit_request import AuditRequestRejected
 from auditor.inventory.client_name import InvalidClientNameError
 from auditor.inventory.loaders import InventoryLoadError
 from auditor.inventory.plan import plan_confirmation_prompt
 from auditor.inventory.service import (
     analyze_client_inventory,
     confirm_audit_plan,
+    load_client_inventory,
     load_plan,
     persist_plan,
-    plan_to_audit_request_payload,
     reject_audit_launch,
+    start_confirmed_audit,
     validate_client_inventory,
 )
 
@@ -54,6 +56,7 @@ def cmd_inventory_validate(args: argparse.Namespace) -> int:
         "error_count": inventory.error_count,
         "warning_count": inventory.warning_count,
         "issues": [i.model_dump() for i in inventory.issues],
+        "credentials": [c.model_dump() for c in inventory.credentials],
     }
     _print_json(payload)
     return 1 if inventory.error_count else 0
@@ -81,6 +84,7 @@ def cmd_inventory_analyze(args: argparse.Namespace) -> int:
             "status": plan.status,
             "detections": [d.model_dump() for d in plan.technology_detections],
             "framework_decisions": [d.model_dump() for d in plan.framework_decisions],
+            "conflicts": [c.model_dump() for c in inventory.conflicts],
             "confirmation_prompt": plan_confirmation_prompt(plan),
         }
     )
@@ -93,6 +97,19 @@ def cmd_audit_plan(args: argparse.Namespace) -> int:
     latest = plans / "latest.json"
     if latest.is_file() and not args.refresh:
         plan = load_plan(latest)
+        # Surface stale plans before the operator confirms.
+        try:
+            inventory = load_client_inventory(settings.inventory_dir, args.client)
+            from auditor.inventory.plan import assert_plan_matches_inventory
+
+            assert_plan_matches_inventory(plan, inventory)
+        except PlanConfirmationRejected as exc:
+            print(f"warning: {exc}", file=sys.stderr)
+            print("Re-run with --refresh to regenerate the plan.", file=sys.stderr)
+            return 4
+        except (InvalidClientNameError, InventoryLoadError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     else:
         _inventory, plan = analyze_client_inventory(
             settings.inventory_dir,
@@ -119,7 +136,11 @@ def cmd_audit_start(args: argparse.Namespace) -> int:
         return 2
     plan = load_plan(latest)
     if args.reject:
-        plan = confirm_audit_plan(plan, action="reject", note=args.note or "rejected via CLI")
+        plan = confirm_audit_plan(
+            plan,
+            action="reject",
+            note=args.note or "rejected via CLI",
+        )
         persist_plan(plan, latest)
         print("audit launch rejected by operator")
         return 1
@@ -131,27 +152,44 @@ def cmd_audit_start(args: argparse.Namespace) -> int:
             print(plan_confirmation_prompt(plan), file=sys.stderr)
             print("\nRe-run with --confirm to approve the plan.", file=sys.stderr)
             return 3
-    else:
-        if plan.status != "confirmed":
-            plan = confirm_audit_plan(plan, action="approve", note=args.note or "confirmed via CLI")
-            persist_plan(plan, latest)
+        # Confirmed earlier — still require freshness before execute.
     try:
-        payload = plan_to_audit_request_payload(plan)
+        started = start_confirmed_audit(
+            settings.inventory_dir,
+            args.client,
+            plan,
+            settings=settings,
+            agents_dir=settings.agents_dir,
+            note=args.note or "confirmed via CLI",
+        )
     except PlanConfirmationRejected as exc:
         print(f"error: {exc}", file=sys.stderr)
+        if getattr(exc, "code", "") == "plan_stale":
+            print("Re-run `inventory analyze` / `audit plan --refresh`.", file=sys.stderr)
+            return 4
         return 3
+    except (InvalidClientNameError, InventoryLoadError, AuditRequestRejected) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     out = plans / "audit_request.json"
-    out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    out.write_text(
+        json.dumps(started["audit_request"], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if started.get("plan") is not None:
+        persist_plan(started["plan"], latest)
     _print_json(
         {
-            "status": "ready",
-            "plan_id": plan.plan_id,
+            "status": started["status"],
+            "plan_id": started["plan_id"],
+            "client_id": started["client_id"],
+            "audit_run_id": started["audit_run_id"],
+            "evidence_run_id": started.get("evidence_run_id"),
+            "audit_run_status": started.get("audit_run_status"),
+            "awaiting_hitl": started.get("awaiting_hitl"),
             "audit_request_path": str(out),
-            "audit_request": payload,
-            "note": (
-                "AuditRequest prepared after confirmation. "
-                "Execution proceeds through the existing arun_request path."
-            ),
+            "audit_request": started["audit_request"],
         }
     )
     return 0
@@ -179,7 +217,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan.add_argument("client")
     p_plan.add_argument("--refresh", action="store_true")
     p_plan.set_defaults(func=cmd_audit_plan)
-    p_start = audit_sub.add_parser("start", help="Start audit after plan confirmation")
+    p_start = audit_sub.add_parser(
+        "start",
+        help="Confirm plan (when --confirm) and start audit execution via arun_request",
+    )
     p_start.add_argument("client")
     p_start.add_argument("--confirm", action="store_true", help="Approve the draft plan")
     p_start.add_argument("--reject", action="store_true", help="Reject the draft plan")

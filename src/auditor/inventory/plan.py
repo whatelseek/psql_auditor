@@ -109,15 +109,21 @@ def generate_audit_plan(
 
     missing: list[str] = []
     for issue in inventory.issues:
-        if issue.level in {"error", "warning"}:
+        if issue.level in {"error", "warning"} or issue.code == "needs_discovery":
             missing.append(f"{issue.code}: {issue.message}")
     unresolved = [
-        q
-        for q in (
-            "Confirm read-only access for all selected targets",
-            *(f"Questionnaire pending: {name}" for name in inventory.questionnaires),
-        )
-        if q
+        "Confirm read-only access for all selected targets",
+        *(f"Questionnaire pending: {name}" for name in inventory.questionnaires),
+        *(
+            f"Clarify conflict on {c.host_id}.{c.fact}: "
+            f"inventory={c.inventory_value!r} vs discovered={c.discovered_value!r}"
+            for c in inventory.conflicts
+        ),
+        *(
+            f"Clarify framework selection for {d.target_id}: {d.reason}"
+            for d in decisions
+            if d.status == "considered"
+        ),
     ]
 
     # Coverage heuristic: hosts without errors / total hosts, adjusted for missing data.
@@ -269,6 +275,19 @@ def ensure_plan_confirmed(plan: AuditPlan) -> AuditPlan:
             code="plan_not_confirmed",
         )
     return plan
+
+
+def assert_plan_matches_inventory(plan: AuditPlan, inventory: ClientInventory) -> None:
+    """Reject confirmation/start when inventory changed since plan generation."""
+    if (
+        plan.inventory_version_id != inventory.version.version_id
+        or plan.inventory_content_hash != inventory.version.content_hash
+    ):
+        raise PlanConfirmationRejected(
+            "audit plan is stale: inventory changed since plan generation; "
+            "re-run inventory analyze / audit plan to regenerate",
+            code="plan_stale",
+        )
 
 
 def plan_confirmation_prompt(plan: AuditPlan) -> str:

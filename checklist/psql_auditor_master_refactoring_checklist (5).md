@@ -1,6 +1,6 @@
 # `psql_auditor` — Master Development and Acceptance Checklist
 
-Checklist version: **1.10**  
+Checklist version: **1.11**  
 Date: **2026-07-26**  
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
@@ -151,10 +151,14 @@ is an acceptance candidate only (green CI alone is not sufficient).
 
 - typed `AuditPlan` with confirmation gate (`src/auditor/domain/audit_plan.py`);
 - technology detection + framework selection decisions with reject reasons;
-- CLI `psql-auditor inventory|audit …` and HTTP plan/confirm routes;
-- audit launch rejected without explicit confirmation; confirmed plan maps to
-  INPUT-001 `AuditRequest` payload.
-  Live access probes / full preflight service remain incomplete.
+- stale-plan rejection (`plan_stale`) on confirm/start when inventory hash diverges;
+- `CREDENTIALS.md` merge + secret redaction; `needs_discovery` for IP/port-only hosts;
+- injectable read-only discovery + reconcile (conflicts → clarification; port-only
+  PostgreSQL does not select frameworks);
+- CLI/API confirm → `AuditRequest` (with inventory version/hash) → `arun_request`
+  execution returning `audit_run_id`.
+  Default analyze discoverer is no-op until live SSH/WinRM collector is wired;
+  independent acceptance still required.
 
 ### M3 — LangGraph orchestration and evidence collection
 
