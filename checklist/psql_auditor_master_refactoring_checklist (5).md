@@ -32,9 +32,12 @@ is not auto-accepted. `CORE-006` remains `[~]` pending independent acceptance.
 | Format | Passed |
 | Lint | Passed |
 | Type check | Passed, 85 files |
-| Unit tests | 414 passed |
+| Unit tests | 422 passed |
+| Integration tests | 7 passed |
+| Full suite | 429 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI (preflight gap closure) | [Run 30208965512](https://github.com/whatelseek/psql_auditor/actions/runs/30208965512), all jobs passed |
+| Clean CI (async start + inventory identity) | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), all jobs passed |
+| Prior clean CI (preflight gap closure) | [Run 30208965512](https://github.com/whatelseek/psql_auditor/actions/runs/30208965512), all jobs passed |
 | Prior clean CI (INPUT-001 candidate) | [Run 30203329883](https://github.com/whatelseek/psql_auditor/actions/runs/30203329883), all jobs passed |
 
 
