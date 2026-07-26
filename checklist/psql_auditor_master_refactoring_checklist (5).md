@@ -31,11 +31,11 @@ mandatory gates are green.
 | Format | 115 files already formatted |
 | Lint | Passed |
 | Type check | Passed, 67 files |
-| Unit tests | 313 passed |
+| Unit tests | 316 passed |
 | PostgreSQL integration tests | 7 passed |
-| Full suite | 320 passed |
+| Full suite | 323 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | [Run 30197519287](https://github.com/whatelseek/psql_auditor/actions/runs/30197519287), all jobs passed |
+| Clean CI | pending CORE-001 audit_run_id validation gap fix |
 
 Controlled negative runs:
 
@@ -96,6 +96,7 @@ with `make validate-defect-map` enforced in CI.
 `CORE-001` closure evidence:
 
 - `require_client_id` / `require_audit_run_id` reject empty and swapped ids;
+- `AuditRegistry.create_run` / `save_run` validate explicit `audit_run_id` via `require_audit_run_id`;
 - warehouse `start_session` / upsert paths require both identifiers;
 - `AuditRegistry.save_run` rejects client reassignment;
 - resume/bootstrap reject conflicting client ownership;

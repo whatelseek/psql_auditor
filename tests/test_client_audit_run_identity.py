@@ -619,3 +619,50 @@ def test_legacy_run_id_means_evidence_folder_not_audit_run(tmp_path: Path):
     # evidence folder id must not validate as the business audit_run_id alone when nested
     with pytest.raises(MissingAuditRunIdError):
         require_audit_run_id(store.run_id, context="legacy-check")
+
+
+def test_create_run_rejects_client_id_as_audit_run_id(tmp_path: Path):
+    """Explicit audit_run_id must be arun_*; client_* values are rejected."""
+    registry = get_audit_registry(tmp_path)
+    with pytest.raises(MissingAuditRunIdError):
+        registry.create_run(client_id=CLIENT_ALPHA_ID, audit_run_id=CLIENT_ALPHA_ID)
+    with pytest.raises(MissingAuditRunIdError):
+        registry.create_run(client_id=CLIENT_ALPHA_ID, audit_run_id="client_swapped00001")
+
+
+def test_save_run_rejects_invalid_or_swapped_audit_run_id(tmp_path: Path):
+    registry = get_audit_registry(tmp_path)
+    run = registry.create_run(client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_CURRENT_ID)
+    run.audit_run_id = CLIENT_ALPHA_ID
+    with pytest.raises(MissingAuditRunIdError):
+        registry.save_run(run)
+    run.audit_run_id = ""
+    with pytest.raises(MissingAuditRunIdError):
+        registry.save_run(run)
+    run.audit_run_id = "acme_corp"
+    with pytest.raises(MissingAuditRunIdError):
+        registry.save_run(run)
+    # Original row must remain under the valid id.
+    again = registry.get_run(RUN_ALPHA_CURRENT_ID)
+    assert again is not None
+    assert again.client_id == CLIENT_ALPHA_ID
+    assert again.audit_run_id == RUN_ALPHA_CURRENT_ID
+
+
+def test_create_and_save_run_accept_generated_and_explicit_arun_ids(tmp_path: Path):
+    registry = get_audit_registry(tmp_path)
+    generated = registry.create_run(client_id=CLIENT_ALPHA_ID)
+    assert looks_like_audit_run_id(generated.audit_run_id)
+    generated.evidence_run_id = f"client_alpha/{generated.audit_run_id}"
+    registry.save_run(generated)
+    stored = registry.get_run(generated.audit_run_id)
+    assert stored is not None
+    assert stored.evidence_run_id == generated.evidence_run_id
+
+    explicit = registry.create_run(client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_PREVIOUS_ID)
+    assert explicit.audit_run_id == RUN_ALPHA_PREVIOUS_ID
+    explicit.base_thread_id = "t-core001-gap"
+    registry.save_run(explicit)
+    again = registry.get_run(RUN_ALPHA_PREVIOUS_ID)
+    assert again is not None
+    assert again.base_thread_id == "t-core001-gap"

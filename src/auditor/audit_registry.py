@@ -104,11 +104,15 @@ class AuditRegistry:
         audit_run_id: str | None = None,
     ) -> AuditRun:
         """Create a new pending audit run (full restart → new id)."""
-        from auditor.legacy_compat import require_client_id
+        from auditor.legacy_compat import require_audit_run_id, require_client_id
 
         cid = require_client_id(client_id, context="AuditRegistry.create_run")
+        if audit_run_id is not None:
+            arid = require_audit_run_id(audit_run_id, context="AuditRegistry.create_run")
+        else:
+            arid = new_audit_run_id()
         run = AuditRun(
-            audit_run_id=audit_run_id or new_audit_run_id(),
+            audit_run_id=arid,
             client_id=cid,
             scope=dict(scope or {}),
             evidence_run_id=evidence_run_id,
@@ -157,10 +161,16 @@ class AuditRegistry:
         return self._row_to_run(rows[0])
 
     def save_run(self, run: AuditRun) -> None:
-        from auditor.legacy_compat import ClientOwnershipError, require_client_id
+        from auditor.legacy_compat import (
+            ClientOwnershipError,
+            require_audit_run_id,
+            require_client_id,
+        )
 
+        arid = require_audit_run_id(run.audit_run_id, context="AuditRegistry.save_run")
         cid = require_client_id(run.client_id, context="AuditRegistry.save_run")
-        existing = self.get_run(run.audit_run_id)
+        run.audit_run_id = arid
+        existing = self.get_run(arid)
         if existing is not None:
             prev = (existing.client_id or "").strip()
             if prev and prev != cid:
