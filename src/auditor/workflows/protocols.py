@@ -30,12 +30,13 @@ class AuditRuntime(Protocol):
     _checkpointer: Any
     _checkpoint_conn: Any | None
     _checkpoint_scope_key: str
+    _scoped_checkpoints: dict[str, Any]
     _async_cp_ready: bool
     _sqlite_cm: Any | None
     graph: Any
     intake_graph: Any
 
-    async def ensure_async_checkpointer(self, *args: Any, **kwargs: Any) -> None: ...
+    async def ensure_async_checkpointer(self, *args: Any, **kwargs: Any) -> Any: ...
 
     def _build(self, *args: Any, **kwargs: Any) -> Any: ...
 

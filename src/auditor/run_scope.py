@@ -56,6 +56,10 @@ class OwnershipManifestError(RunScopeIsolationError):
     """Raised when ownership metadata is missing, malformed, or conflicting."""
 
 
+class CheckpointInitError(RunScopeIsolationError):
+    """Raised when a canonical-run AsyncSqliteSaver cannot be initialized."""
+
+
 @dataclass(frozen=True, slots=True)
 class OwnershipManifest:
     """Trusted identity written at each run artifact root."""

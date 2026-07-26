@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from langgraph.graph import END, START, StateGraph
 
 from auditor.state import AuditorState
 from auditor.workflows.protocols import AuditRuntime
 
 
-def build_main_graph(runtime: AuditRuntime):
+def build_main_graph(runtime: AuditRuntime, checkpointer: Any | None = None):
     """Compile the main audit StateGraph with reconnect and HITL cycles.
+
+    Args:
+        checkpointer: Optional saver for CORE-005 run-scoped graphs. Defaults to
+            ``runtime._checkpointer`` (process-local / legacy).
 
     Returns:
         Compiled graph: route → load → host facts → assess → finalize.
@@ -48,11 +54,15 @@ def build_main_graph(runtime: AuditRuntime):
         },
     )
     graph.add_edge("finalize", END)
-    return graph.compile(checkpointer=runtime._checkpointer)
+    saver = checkpointer if checkpointer is not None else runtime._checkpointer
+    return graph.compile(checkpointer=saver)
 
 
-def build_intake_graph(runtime: AuditRuntime):
+def build_intake_graph(runtime: AuditRuntime, checkpointer: Any | None = None):
     """Compile the pre-audit intake questionnaire subgraph.
+
+    Args:
+        checkpointer: Optional saver for CORE-005 run-scoped graphs.
 
     Returns:
         Single-node graph ending at ``intake_gate`` (may interrupt).
@@ -61,4 +71,5 @@ def build_intake_graph(runtime: AuditRuntime):
     graph.add_node("intake_gate", runtime.intake_gate)
     graph.add_edge(START, "intake_gate")
     graph.add_edge("intake_gate", END)
-    return graph.compile(checkpointer=runtime._checkpointer)
+    saver = checkpointer if checkpointer is not None else runtime._checkpointer
+    return graph.compile(checkpointer=saver)

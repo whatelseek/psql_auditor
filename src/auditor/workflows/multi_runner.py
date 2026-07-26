@@ -383,7 +383,11 @@ def _bootstrap_audit_run(
         nested = evidence_run_id_for(client.slug, audit_run_id)
         if store.run_id != nested:
             old = store.run_id
-            store.rebind_run_id(nested)
+            store.rebind_run_id(
+                nested,
+                client_id=client.client_id,
+                audit_run_id=audit_run_id,
+            )
             runtime._evidence_by_run.pop(old, None)
             runtime._evidence_by_run[store.run_id] = store
             updated["evidence_run_id"] = store.run_id

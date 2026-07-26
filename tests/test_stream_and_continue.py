@@ -183,14 +183,15 @@ async def test_sqlite_checkpointer_survives_new_graph(tmp_path: Path):
     assert thread_id.startswith("audit:")
     assert client_id and audit_run_id
 
-    # Flush / close so the second process sees durable rows.
-    cm = getattr(graph, "_sqlite_cm", None)
-    if cm is not None:
-        await cm.__aexit__(None, None, None)
-        graph._sqlite_cm = None
-        graph._async_cp_ready = False
-
+    # Flush / close scoped saver so a new graph process sees durable rows.
     from auditor.run_scope import resolve_run_scope
+    from auditor.workflows.runner import acquire_run_checkpointer
+
+    key = f"{client_id}:{audit_run_id}"
+    bundle = (getattr(graph, "_scoped_checkpoints", {}) or {}).get(key)
+    if bundle is not None:
+        await bundle.sqlite_cm.__aexit__(None, None, None)
+        graph._scoped_checkpoints.pop(key, None)
 
     scope = resolve_run_scope(
         settings.evidence_dir,
@@ -200,9 +201,9 @@ async def test_sqlite_checkpointer_survives_new_graph(tmp_path: Path):
     assert scope.checkpoint_db_path.is_file()
 
     graph2 = AuditorGraph(settings=settings)
-    await graph2.ensure_async_checkpointer(client_id=client_id, audit_run_id=audit_run_id)
-    assert type(graph2._checkpointer).__name__ == "AsyncSqliteSaver"
-    snap = await graph2.graph.aget_state({"configurable": {"thread_id": thread_id}})
+    scoped = await acquire_run_checkpointer(graph2, client_id=client_id, audit_run_id=audit_run_id)
+    assert type(scoped.checkpointer).__name__ == "AsyncSqliteSaver"
+    snap = await scoped.graph.aget_state({"configurable": {"thread_id": thread_id}})
     assert snap.values.get("framework_id") == "postgres_cis"
     assert snap.tasks or snap.next
 

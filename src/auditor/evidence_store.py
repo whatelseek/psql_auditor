@@ -209,23 +209,44 @@ class EvidenceStore:
         fw = parts[-1] if parts else "framework"
         return base / _safe_segment(fw, "framework")
 
-    def rebind_run_id(self, new_run_id: str) -> str:
+    def rebind_run_id(
+        self,
+        new_run_id: str,
+        *,
+        client_id: str | None = None,
+        audit_run_id: str | None = None,
+    ) -> str:
         """Rename this evidence folder to ``new_run_id``.
 
         CORE-001 uses nested ``<client_slug>/<audit_run_id>`` so runs for the
         same client never share a folder. Bare client names are not valid run
         identities.
 
-        If the target folder already exists, merges contents into it and removes
-        the temporary source folder.
+        CORE-005: validate destination ownership **before** any mkdir / copy /
+        rename. Existing non-empty targets require a matching ``ownership.json``;
+        missing, malformed, or foreign ownership fail closed without mutating
+        source or destination. Merge is allowed only when ownership matches or
+        the destination is a genuinely new / empty directory.
 
         Args:
             new_run_id: Desired relative path under the evidence root
                 (``slug`` or ``slug/arun_…``).
+            client_id: Expected owner for the destination (recommended).
+            audit_run_id: Expected audit run for the destination (recommended).
 
         Returns:
             Final ``run_id`` (may contain ``/``) after rename/merge.
+
+        Raises:
+            OwnershipManifestError: Destination ownership missing/invalid/mismatch.
         """
+        from auditor.client_registry import looks_like_audit_run_id
+        from auditor.run_scope import (
+            OWNERSHIP_MANIFEST_NAME,
+            OwnershipManifestError,
+            read_ownership_manifest,
+        )
+
         parts = [
             _safe_segment(p, "x")
             for p in str(new_run_id).replace("\\", "/").split("/")
@@ -235,9 +256,6 @@ class EvidenceStore:
             parts = ["client"]
         new_id = "/".join(parts)
         base = self.root.parent
-        # When already nested (slug/arun), parent of current root may be slug.
-        # Always resolve relative to the configured evidence root (grandparent
-        # if current run_id already contains a slash).
         evidence_root = base
         if "/" in str(self.run_id):
             evidence_root = Path(self.root)
@@ -249,6 +267,66 @@ class EvidenceStore:
             self.run_id = new_id
             return self.run_id
 
+        expect_cid = (client_id or "").strip()
+        expect_arid = (audit_run_id or "").strip()
+        if not expect_arid and looks_like_audit_run_id(parts[-1]):
+            expect_arid = parts[-1]
+        # Prefer ownership already written on the source run.
+        src_own_path = old_root / OWNERSHIP_MANIFEST_NAME
+        if src_own_path.is_file():
+            try:
+                src_own = read_ownership_manifest(old_root)
+            except OwnershipManifestError:
+                src_own = None
+            if src_own is not None:
+                if not expect_cid:
+                    expect_cid = src_own.client_id
+                if not expect_arid:
+                    expect_arid = src_own.audit_run_id
+
+        dest_exists = new_root.exists()
+        dest_nonempty = False
+        if dest_exists:
+            if not new_root.is_dir():
+                raise OwnershipManifestError(f"rebind destination is not a directory: {new_root}")
+            dest_nonempty = any(new_root.iterdir())
+
+        if dest_nonempty:
+            own_path = new_root / OWNERSHIP_MANIFEST_NAME
+            if not own_path.is_file():
+                raise OwnershipManifestError(
+                    f"refusing rebind into non-empty destination without ownership.json: {new_root}"
+                )
+            try:
+                dest_own = read_ownership_manifest(new_root)
+            except OwnershipManifestError:
+                # Malformed — fail closed, no mutation.
+                raise
+            if expect_cid and dest_own.client_id != expect_cid:
+                raise OwnershipManifestError(
+                    f"rebind ownership mismatch at {new_root}: "
+                    f"manifest client_id={dest_own.client_id!r}, "
+                    f"expected={expect_cid!r}"
+                )
+            if expect_arid and dest_own.audit_run_id != expect_arid:
+                raise OwnershipManifestError(
+                    f"rebind ownership mismatch at {new_root}: "
+                    f"manifest audit_run_id={dest_own.audit_run_id!r}, "
+                    f"expected={expect_arid!r}"
+                )
+            if src_own_path.is_file():
+                src_own = read_ownership_manifest(old_root)
+                if (
+                    src_own.client_id != dest_own.client_id
+                    or src_own.audit_run_id != dest_own.audit_run_id
+                ):
+                    raise OwnershipManifestError(
+                        f"rebind refused: source ownership "
+                        f"({src_own.client_id!r}, {src_own.audit_run_id!r}) != "
+                        f"destination ({dest_own.client_id!r}, {dest_own.audit_run_id!r})"
+                    )
+
+        # Validation passed — mutate only now.
         new_root.mkdir(parents=True, exist_ok=True)
         if old_root.is_dir():
             for item in old_root.iterdir():

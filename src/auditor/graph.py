@@ -136,6 +136,7 @@ class AuditorGraph:
         self._checkpointer = MemorySaver()
         self._checkpoint_conn = None
         self._checkpoint_scope_key = ""
+        self._scoped_checkpoints: dict[str, Any] = {}
         self._async_cp_ready = False
         self._sqlite_cm = None
         self._orphan_tasks: dict[str, asyncio.Task[Any]] = {}

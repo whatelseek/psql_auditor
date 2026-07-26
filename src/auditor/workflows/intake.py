@@ -135,7 +135,11 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
             store = runtime._store_from_state(state)
             if store is not None:
                 old_id = store.run_id
-                store.rebind_run_id(evidence_key)
+                store.rebind_run_id(
+                    evidence_key,
+                    client_id=client.client_id,
+                    audit_run_id=audit_run_id,
+                )
                 runtime._evidence_by_run.pop(old_id, None)
                 runtime._evidence_by_run[store.run_id] = store
                 runtime._evidence_by_run[old_id] = store

@@ -163,7 +163,11 @@ async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, A
         )
         get_audit_registry(settings.evidence_dir).mark_run_started(arun.audit_run_id)
         nested = f"{client.slug}/{arun.audit_run_id}"
-        store.rebind_run_id(nested)
+        store.rebind_run_id(
+            nested,
+            client_id=client.client_id,
+            audit_run_id=arun.audit_run_id,
+        )
         run_id = store.run_id
         graph._evidence_by_run[run_id] = store
         store.write_run_meta(

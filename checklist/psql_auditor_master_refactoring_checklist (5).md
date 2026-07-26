@@ -23,19 +23,22 @@ Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 ## Latest verification
 
 `CORE-005` isolates LangGraph checkpoints and run artifacts by validated
-`client_id` + `audit_run_id` with ownership manifests. Local and CI gates share
-the same Make targets.
+`client_id` + `audit_run_id` with ownership manifests. Remaining isolation gaps
+are closed: per-run scoped checkpointer/graph bundles (no process-wide swap
+race), fail-closed `EvidenceStore.rebind_run_id`, and
+`CheckpointInitError` instead of silent `MemorySaver` fallback for canonical
+scopes. Local and CI gates share the same Make targets.
 
 | Check | Verified result |
 | --- | --- |
-| Format | 119 files already formatted |
+| Format | Passed |
 | Lint | Passed |
 | Type check | Passed, 69 files |
-| Unit tests | 350 passed |
+| Unit tests | 354 passed |
 | PostgreSQL integration tests | 7 passed |
-| Full suite | 357 passed |
+| Full suite | 361 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | [Run 30199323665](https://github.com/whatelseek/psql_auditor/actions/runs/30199323665), all jobs passed |
+| Clean CI | Pending push of gap-closure commit (prior green: [Run 30199323665](https://github.com/whatelseek/psql_auditor/actions/runs/30199323665)) |
 
 Controlled negative runs:
 
@@ -107,6 +110,18 @@ with `make validate-defect-map` enforced in CI.
 - [x] `CORE-003` — Introduce canonical result identity.
 - [x] `CORE-004` — Introduce structured `AssessmentResult`.
 - [x] `CORE-005` — Isolate checkpoints and artifacts by audit run.
+
+`CORE-005` closure evidence (gap closure):
+
+- `acquire_run_checkpointer` binds compiled graph + checkpointer to
+  `client_id` + `audit_run_id` on `runtime._scoped_checkpoints`;
+- concurrent `arun_one` captures a local scoped graph; another run cannot
+  replace or close its checkpointer;
+- canonical Sqlite init failure raises `CheckpointInitError` (no MemorySaver);
+- `EvidenceStore.rebind_run_id` validates destination ownership before any
+  mkdir/copy/rename and leaves both dirs unchanged on reject;
+- regression tests in `tests/test_run_scope_isolation.py`.
+
 - [~] `CORE-006` — Remove hidden global mutable state.
 
 ### M2 — Inputs and audit planning

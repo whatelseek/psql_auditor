@@ -488,3 +488,295 @@ def test_no_production_module_builds_shared_latest_path():
             if needle in text:
                 offenders.append(f"{path.relative_to(root.parent.parent)}:{needle}")
     assert not offenders, offenders
+
+
+# ---------------------------------------------------------------------------
+# CORE-005 gap closure: concurrent checkpointers, rebind, Sqlite init failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_concurrent_arun_one_keeps_isolated_checkpointers(tmp_path: Path):
+    """Two concurrent arun_one calls must not replace each other's Sqlite saver."""
+    settings = Settings(
+        _env_file=None,
+        evidence_dir=tmp_path,
+        agents_dir=Path("agents"),
+        intake_enabled=False,
+        hitl_enabled=False,
+        max_parallel_assessments=1,
+    )
+    graph = AuditorGraph(settings=settings)
+    get_client_registry(tmp_path).ensure_client(
+        display_name="Alpha", slug="client_alpha", client_id=CLIENT_ALPHA_ID
+    )
+    reg = get_audit_registry(tmp_path)
+    reg.create_run(
+        client_id=CLIENT_ALPHA_ID,
+        scope={"client_slug": "client_alpha"},
+        evidence_run_id="",
+        audit_run_id=RUN_ALPHA_PREVIOUS_ID,
+    )
+    reg.create_run(
+        client_id=CLIENT_ALPHA_ID,
+        scope={"client_slug": "client_alpha"},
+        evidence_run_id="",
+        audit_run_id=RUN_ALPHA_CURRENT_ID,
+    )
+
+    gate = asyncio.Event()
+    entered: list[str] = []
+    real_acquire = __import__(
+        "auditor.workflows.runner", fromlist=["acquire_run_checkpointer"]
+    ).acquire_run_checkpointer
+
+    async def gated_acquire(runtime, *, client_id, audit_run_id):
+        entered.append(audit_run_id)
+        # Force both callers to reach init before either finishes.
+        if len(entered) < 2:
+            await gate.wait()
+        else:
+            gate.set()
+        return await real_acquire(runtime, client_id=client_id, audit_run_id=audit_run_id)
+
+    async def fake_ainvoke(initial, config):
+        # Hold briefly so both scoped graphs stay live together.
+        await asyncio.sleep(0.05)
+        # Prove the captured graph's checkpointer connection is still open.
+        return {**initial, "findings": {}, "pending_ids": [], "report": "ok"}
+
+    with patch(
+        "auditor.workflows.runner.acquire_run_checkpointer",
+        side_effect=gated_acquire,
+    ):
+        # Patch build so ainvoke is cheap; still use real scoped savers.
+        original_build = graph._build
+
+        def build_with_fake(checkpointer=None):
+            compiled = original_build(checkpointer=checkpointer)
+            compiled.ainvoke = fake_ainvoke  # type: ignore[method-assign]
+            return compiled
+
+        with patch.object(graph, "_build", side_effect=build_with_fake):
+            r1, r2 = await asyncio.gather(
+                graph.arun_one(
+                    "audit previous",
+                    framework_id=FRAMEWORK_LINUX_ID,
+                    intake_state={
+                        "client_id": CLIENT_ALPHA_ID,
+                        "client_slug": "client_alpha",
+                        "client_name": "Alpha",
+                        "audit_run_id": RUN_ALPHA_PREVIOUS_ID,
+                        "asset_id": ASSET_LINUX_01_ID,
+                        "framework_version": FRAMEWORK_VERSION,
+                        "intake": {"client_name": "Alpha"},
+                    },
+                ),
+                graph.arun_one(
+                    "audit current",
+                    framework_id=FRAMEWORK_LINUX_ID,
+                    intake_state={
+                        "client_id": CLIENT_ALPHA_ID,
+                        "client_slug": "client_alpha",
+                        "client_name": "Alpha",
+                        "audit_run_id": RUN_ALPHA_CURRENT_ID,
+                        "asset_id": ASSET_LINUX_01_ID,
+                        "framework_version": FRAMEWORK_VERSION,
+                        "intake": {"client_name": "Alpha"},
+                    },
+                ),
+            )
+
+    tid1 = str(r1.get("thread_id") or "")
+    tid2 = str(r2.get("thread_id") or "")
+    assert tid1 != tid2
+    assert RUN_ALPHA_PREVIOUS_ID in tid1
+    assert RUN_ALPHA_CURRENT_ID in tid2
+
+    cache = getattr(graph, "_scoped_checkpoints", {})
+    b1 = cache[f"{CLIENT_ALPHA_ID}:{RUN_ALPHA_PREVIOUS_ID}"]
+    b2 = cache[f"{CLIENT_ALPHA_ID}:{RUN_ALPHA_CURRENT_ID}"]
+    assert b1.path != b2.path
+    assert b1.path.is_file() and b2.path.is_file()
+    assert b1.checkpointer is not b2.checkpointer
+    assert b1.conn is not b2.conn
+    # Neither connection was closed/replaced during concurrent execution.
+    from auditor.workflows.runner import _conn_open
+
+    assert _conn_open(b1.conn)
+    assert _conn_open(b2.conn)
+    # Persist distinct state into each scoped saver and prove cross-DB isolation.
+    cfg1 = {"configurable": {"thread_id": tid1}}
+    cfg2 = {"configurable": {"thread_id": tid2}}
+    await b1.graph.aupdate_state(
+        cfg1,
+        {"audit_run_id": RUN_ALPHA_PREVIOUS_ID, "client_id": CLIENT_ALPHA_ID},
+        as_node="finalize",
+    )
+    await b2.graph.aupdate_state(
+        cfg2,
+        {"audit_run_id": RUN_ALPHA_CURRENT_ID, "client_id": CLIENT_ALPHA_ID},
+        as_node="finalize",
+    )
+    snap1 = await b1.graph.aget_state(cfg1)
+    snap2 = await b2.graph.aget_state(cfg2)
+    assert snap1.values.get("audit_run_id") == RUN_ALPHA_PREVIOUS_ID
+    assert snap2.values.get("audit_run_id") == RUN_ALPHA_CURRENT_ID
+    # Cross-read: foreign thread is empty in the other DB.
+    foreign = await b1.graph.aget_state(cfg2)
+    assert not (foreign.values or {}).get("audit_run_id")
+
+
+def test_rebind_rejects_foreign_missing_malformed_ownership(tmp_path: Path):
+    from auditor.run_scope import OwnershipManifest, write_ownership_manifest
+
+    src = EvidenceStore(tmp_path, run_id="tmp_src_a")
+    src.write_run_meta(client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_CURRENT_ID)
+    # Destination owned by another client.
+    foreign = tmp_path / "client_alpha" / RUN_ALPHA_CURRENT_ID
+    foreign.mkdir(parents=True)
+    (foreign / "marker.txt").write_text("keep", encoding="utf-8")
+    write_ownership_manifest(
+        foreign,
+        OwnershipManifest(client_id=CLIENT_BETA_ID, audit_run_id=RUN_ALPHA_CURRENT_ID),
+    )
+    src_files_before = sorted(p.name for p in src.root.iterdir())
+    dest_files_before = sorted(p.name for p in foreign.iterdir())
+    with pytest.raises(OwnershipManifestError):
+        src.rebind_run_id(
+            f"client_alpha/{RUN_ALPHA_CURRENT_ID}",
+            client_id=CLIENT_ALPHA_ID,
+            audit_run_id=RUN_ALPHA_CURRENT_ID,
+        )
+    assert sorted(p.name for p in src.root.iterdir()) == src_files_before
+    assert sorted(p.name for p in foreign.iterdir()) == dest_files_before
+
+    # Missing manifest on non-empty dest.
+    missing = tmp_path / "client_alpha" / RUN_ALPHA_PREVIOUS_ID
+    missing.mkdir(parents=True)
+    (missing / "x.txt").write_text("x", encoding="utf-8")
+    src2 = EvidenceStore(tmp_path, run_id="tmp_src_b")
+    src2.write_run_meta(client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_PREVIOUS_ID)
+    before_src = sorted(p.name for p in src2.root.iterdir())
+    before_dest = sorted(p.name for p in missing.iterdir())
+    with pytest.raises(OwnershipManifestError):
+        src2.rebind_run_id(
+            f"client_alpha/{RUN_ALPHA_PREVIOUS_ID}",
+            client_id=CLIENT_ALPHA_ID,
+            audit_run_id=RUN_ALPHA_PREVIOUS_ID,
+        )
+    assert sorted(p.name for p in src2.root.iterdir()) == before_src
+    assert sorted(p.name for p in missing.iterdir()) == before_dest
+
+    # Malformed manifest.
+    bad = tmp_path / "client_alpha" / "arun_malformed0000001"
+    # need valid-looking arun id
+    from auditor.client_registry import looks_like_audit_run_id
+
+    arid_bad = "arun_malformed00001"
+    assert looks_like_audit_run_id(arid_bad)
+    bad = tmp_path / "client_alpha" / arid_bad
+    bad.mkdir(parents=True)
+    (bad / "ownership.json").write_text("{bad", encoding="utf-8")
+    (bad / "y.txt").write_text("y", encoding="utf-8")
+    src3 = EvidenceStore(tmp_path, run_id="tmp_src_c")
+    src3.write_run_meta(client_id=CLIENT_ALPHA_ID, audit_run_id=arid_bad)
+    before_src = sorted(p.name for p in src3.root.iterdir())
+    before_dest = sorted(p.name for p in bad.iterdir())
+    with pytest.raises(OwnershipManifestError):
+        src3.rebind_run_id(
+            f"client_alpha/{arid_bad}",
+            client_id=CLIENT_ALPHA_ID,
+            audit_run_id=arid_bad,
+        )
+    assert sorted(p.name for p in src3.root.iterdir()) == before_src
+    assert sorted(p.name for p in bad.iterdir()) == before_dest
+
+
+def test_rebind_allows_matching_ownership_or_empty_target(tmp_path: Path):
+    from auditor.run_scope import OwnershipManifest, write_ownership_manifest
+
+    # Empty / new target.
+    src = EvidenceStore(tmp_path, run_id="tmp_new")
+    src.write_run_meta(client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_CURRENT_ID)
+    (src.root / "note.txt").write_text("hello", encoding="utf-8")
+    final = src.rebind_run_id(
+        f"client_alpha/{RUN_ALPHA_CURRENT_ID}",
+        client_id=CLIENT_ALPHA_ID,
+        audit_run_id=RUN_ALPHA_CURRENT_ID,
+    )
+    assert final == f"client_alpha/{RUN_ALPHA_CURRENT_ID}"
+    assert (tmp_path / "client_alpha" / RUN_ALPHA_CURRENT_ID / "note.txt").is_file()
+
+    # Matching ownership merge.
+    src2 = EvidenceStore(tmp_path, run_id="tmp_merge")
+    src2.write_run_meta(client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_CURRENT_ID)
+    (src2.root / "extra.txt").write_text("more", encoding="utf-8")
+    dest = tmp_path / "client_alpha" / RUN_ALPHA_CURRENT_ID
+    write_ownership_manifest(
+        dest,
+        OwnershipManifest(client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_CURRENT_ID),
+    )
+    src2.rebind_run_id(
+        f"client_alpha/{RUN_ALPHA_CURRENT_ID}",
+        client_id=CLIENT_ALPHA_ID,
+        audit_run_id=RUN_ALPHA_CURRENT_ID,
+    )
+    assert (dest / "extra.txt").is_file()
+    assert (dest / "note.txt").is_file()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_init_failure_is_not_silent_success(tmp_path: Path):
+    from auditor.run_scope import CheckpointInitError
+    from auditor.workflows.runner import acquire_run_checkpointer
+
+    settings = Settings(
+        _env_file=None,
+        evidence_dir=tmp_path,
+        agents_dir=Path("agents"),
+        intake_enabled=False,
+        hitl_enabled=False,
+    )
+    graph = AuditorGraph(settings=settings)
+    get_client_registry(tmp_path).ensure_client(
+        display_name="Alpha", slug="client_alpha", client_id=CLIENT_ALPHA_ID
+    )
+    get_audit_registry(tmp_path).create_run(
+        client_id=CLIENT_ALPHA_ID,
+        scope={"client_slug": "client_alpha"},
+        evidence_run_id="",
+        audit_run_id=RUN_ALPHA_CURRENT_ID,
+    )
+
+    class BoomCM:
+        async def __aenter__(self):
+            raise OSError("sqlite open failed")
+
+        async def __aexit__(self, *args):
+            return False
+
+    with patch(
+        "auditor.workflows.runner.AsyncSqliteSaver.from_conn_string",
+        return_value=BoomCM(),
+    ):
+        with pytest.raises(CheckpointInitError):
+            await acquire_run_checkpointer(
+                graph,
+                client_id=CLIENT_ALPHA_ID,
+                audit_run_id=RUN_ALPHA_CURRENT_ID,
+            )
+        with pytest.raises(CheckpointInitError):
+            await graph.arun_one(
+                "audit",
+                framework_id=FRAMEWORK_LINUX_ID,
+                intake_state={
+                    "client_id": CLIENT_ALPHA_ID,
+                    "client_slug": "client_alpha",
+                    "client_name": "Alpha",
+                    "audit_run_id": RUN_ALPHA_CURRENT_ID,
+                    "asset_id": ASSET_LINUX_01_ID,
+                    "framework_version": FRAMEWORK_VERSION,
+                    "intake": {"client_name": "Alpha"},
+                },
+            )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -24,6 +25,7 @@ from auditor.legacy_compat import assert_client_owns_run, require_audit_run_id, 
 from auditor.progress import emit_phase
 from auditor.result_identity_bind import attach_result_identity
 from auditor.run_scope import (
+    CheckpointInitError,
     RunScopeIsolationError,
     assert_thread_belongs_to_run,
     checkpoint_thread_id,
@@ -166,7 +168,11 @@ async def arun_one(
     meta["thread_id"] = tid
     if store.run_id != scope.evidence_run_id:
         old_id = store.run_id
-        store.rebind_run_id(scope.evidence_run_id)
+        store.rebind_run_id(
+            scope.evidence_run_id,
+            client_id=client_id,
+            audit_run_id=audit_run_id,
+        )
         runtime._evidence_by_run.pop(old_id, None)
         runtime._evidence_by_run[store.run_id] = store
     run_row = registry.get_run(audit_run_id)
@@ -174,11 +180,13 @@ async def arun_one(
         run_row.evidence_run_id = store.run_id
         run_row.base_thread_id = scope.checkpoint_thread_id
         registry.save_run(run_row)
-    await ensure_async_checkpointer(
+    scoped = await acquire_run_checkpointer(
         runtime,
         client_id=client_id,
         audit_run_id=audit_run_id,
     )
+    # Capture locally — concurrent arun_one must not replace this saver/graph.
+    scoped_graph = scoped.graph
     asset_id = str((intake_state or {}).get("asset_id") or "")
     if not asset_id and ssh_target is not None:
         inv_key = ssh_target.inventory_key or ssh_target.label
@@ -260,7 +268,7 @@ async def arun_one(
 
     async def _invoke() -> dict[str, Any]:
         """Run the main graph and decorate with HITL/intake messaging."""
-        result = await runtime.graph.ainvoke(initial, config)
+        result = await scoped_graph.ainvoke(initial, config)
         return runtime._decorate_result(result, thread_id=tid, store=store)
 
     intake_for_scope = (intake_state.get("intake") if intake_state else None) or intake_state or {}
@@ -291,10 +299,10 @@ async def aresume(
         audit_run_id=audit_run_id,
         context="aresume",
     )
-    await ensure_async_checkpointer(runtime, client_id=cid, audit_run_id=arid)
+    scoped = await acquire_run_checkpointer(runtime, client_id=cid, audit_run_id=arid)
     config = {"configurable": {"thread_id": tid}}
     is_intake = ":intake" in tid or tid.endswith("intake")
-    graph = runtime.intake_graph if is_intake else runtime.graph
+    graph = scoped.intake_graph if is_intake else scoped.graph
     try:
         pre = await graph.aget_state(config)
         pre_values = pre.values or {}
@@ -578,10 +586,10 @@ async def acontinue(
             "messages": [],
         }
 
-    await ensure_async_checkpointer(runtime, client_id=cid, audit_run_id=arid)
+    scoped = await acquire_run_checkpointer(runtime, client_id=cid, audit_run_id=arid)
     config = {"configurable": {"thread_id": tid}}
     is_intake = ":intake" in tid or tid.endswith("intake")
-    graph = runtime.intake_graph if is_intake else runtime.graph
+    graph = scoped.intake_graph if is_intake else scoped.graph
 
     store = None
     if rid:
@@ -873,52 +881,137 @@ def interrupted_continue_message(runtime: AuditRuntime, thread_id: str, run_id: 
     )
 
 
+@dataclass
+class ScopedCheckpointBundle:
+    """Compiled graphs + Sqlite saver bound to one audit-run scope."""
+
+    scope_key: str
+    client_id: str
+    audit_run_id: str
+    path: Path
+    checkpointer: Any
+    sqlite_cm: Any
+    graph: Any
+    intake_graph: Any
+    conn: Any | None
+
+
+def _conn_open(conn: Any | None) -> bool:
+    if conn is None:
+        return False
+    try:
+        closed = bool(getattr(conn, "_connection", None) is None) or bool(
+            getattr(conn, "_closed", False)
+        )
+        return not closed
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _scoped_cache(runtime: AuditRuntime) -> dict[str, ScopedCheckpointBundle]:
+    cache = getattr(runtime, "_scoped_checkpoints", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        runtime._scoped_checkpoints = cache
+    return cache
+
+
+async def acquire_run_checkpointer(
+    runtime: AuditRuntime,
+    *,
+    client_id: str,
+    audit_run_id: str,
+) -> ScopedCheckpointBundle:
+    """Return a checkpointer/graph bundle for exact ``client_id`` + ``audit_run_id``.
+
+    Does not mutate or close other run scopes. Never falls back to MemorySaver.
+    """
+    cid = require_client_id(client_id, context="acquire_run_checkpointer")
+    arid = require_audit_run_id(audit_run_id, context="acquire_run_checkpointer")
+    scope = resolve_run_scope(runtime.settings.evidence_dir, client_id=cid, audit_run_id=arid)
+    key = f"{scope.client_id}:{scope.audit_run_id}"
+    cache = _scoped_cache(runtime)
+    existing = cache.get(key)
+    if existing is not None and _conn_open(existing.conn):
+        return existing
+    if existing is not None:
+        # Reconnect this scope only — leave other runs untouched.
+        try:
+            await existing.sqlite_cm.__aexit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+        cache.pop(key, None)
+
+    if AsyncSqliteSaver is None:
+        raise CheckpointInitError(
+            "AsyncSqliteSaver is unavailable; cannot initialize durable "
+            f"checkpoints for client_id={cid!r} audit_run_id={arid!r}"
+        )
+    path = scope.checkpoint_db_path
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sqlite_cm = AsyncSqliteSaver.from_conn_string(str(path))
+        checkpointer = await sqlite_cm.__aenter__()
+    except Exception as exc:  # noqa: BLE001
+        raise CheckpointInitError(
+            "failed to initialize AsyncSqliteSaver for "
+            f"client_id={cid!r} audit_run_id={arid!r} path={path}: {exc}"
+        ) from exc
+    conn = getattr(checkpointer, "conn", None)
+    graph = runtime._build(checkpointer=checkpointer)
+    intake_graph = runtime._build_intake(checkpointer=checkpointer)
+    bundle = ScopedCheckpointBundle(
+        scope_key=key,
+        client_id=cid,
+        audit_run_id=arid,
+        path=path,
+        checkpointer=checkpointer,
+        sqlite_cm=sqlite_cm,
+        graph=graph,
+        intake_graph=intake_graph,
+        conn=conn,
+    )
+    cache[key] = bundle
+    return bundle
+
+
 async def ensure_async_checkpointer(
     runtime: AuditRuntime,
     *,
     client_id: str | None = None,
     audit_run_id: str | None = None,
-) -> None:
-    """Upgrade to AsyncSqliteSaver scoped per audit run when identity is known.
+) -> ScopedCheckpointBundle | None:
+    """Acquire a run-scoped checkpointer, or upgrade the legacy process saver.
 
-    CORE-005: when ``client_id`` + ``audit_run_id`` are provided, open
-    ``<evidence_dir>/.checkpoints/<client_id>/<audit_run_id>.sqlite``. Otherwise
-    fall back to ``Settings.checkpoint_path`` (process-local / legacy tests).
+    When ``client_id`` + ``audit_run_id`` are provided, returns a
+    :class:`ScopedCheckpointBundle` without replacing other runs' savers.
+    Canonical scopes never fall back to ``MemorySaver`` — failures raise
+    :class:`CheckpointInitError`.
+
+    Without identity, keeps the process-local ``Settings.checkpoint_path`` /
+    MemorySaver path for legacy tests only.
     """
-    path: Path
-    scope_key = ""
     if client_id and audit_run_id:
-        scope = resolve_run_scope(
-            runtime.settings.evidence_dir,
+        return await acquire_run_checkpointer(
+            runtime,
             client_id=client_id,
             audit_run_id=audit_run_id,
         )
-        path = scope.checkpoint_db_path
-        scope_key = f"{scope.client_id}:{scope.audit_run_id}"
-    else:
-        path = Path(runtime.settings.checkpoint_path)
-        scope_key = f"legacy:{path.resolve()}"
 
+    path = Path(runtime.settings.checkpoint_path)
+    scope_key = f"legacy:{path.resolve()}"
     current_key = str(getattr(runtime, "_checkpoint_scope_key", "") or "")
     if (
         runtime._async_cp_ready
         and runtime._checkpoint_conn is not None
         and current_key == scope_key
+        and _conn_open(runtime._checkpoint_conn)
     ):
-        try:
-            conn = runtime._checkpoint_conn
-            closed = bool(getattr(conn, "_connection", None) is None) or bool(
-                getattr(conn, "_closed", False)
-            )
-            if not closed:
-                return
-        except Exception:  # noqa: BLE001
-            pass
-        runtime._async_cp_ready = False
+        return None
 
     try:
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
+        if AsyncSqliteSaver is None:
+            raise RuntimeError("AsyncSqliteSaver unavailable")
         path.parent.mkdir(parents=True, exist_ok=True)
         sqlite_cm = getattr(runtime, "_sqlite_cm", None)
         if sqlite_cm is not None:
@@ -936,14 +1029,14 @@ async def ensure_async_checkpointer(
         runtime.graph = runtime._build()
         runtime.intake_graph = runtime._build_intake()
         runtime._async_cp_ready = True
-    except Exception:  # noqa: BLE001
-        # Keep MemorySaver — process-local resume only.
+    except Exception:  # noqa: BLE001 — legacy unbound path only
         runtime._checkpointer = MemorySaver()
         runtime._checkpoint_scope_key = scope_key
         runtime.graph = runtime._build()
         runtime.intake_graph = runtime._build_intake()
         runtime._async_cp_ready = True
         runtime._checkpoint_conn = None
+    return None
 
 
 def target_scope(
