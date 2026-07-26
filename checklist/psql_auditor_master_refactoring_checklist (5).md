@@ -34,7 +34,7 @@ is not auto-accepted. `CORE-006` remains `[~]` pending independent acceptance.
 | Type check | Passed, 85 files |
 | Unit tests | 414 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Prior clean CI (inventory launch) | [Run 30208213773](https://github.com/whatelseek/psql_auditor/actions/runs/30208213773), all jobs passed |
+| Clean CI (preflight gap closure) | [Run 30208965512](https://github.com/whatelseek/psql_auditor/actions/runs/30208965512), all jobs passed |
 | Prior clean CI (INPUT-001 candidate) | [Run 30203329883](https://github.com/whatelseek/psql_auditor/actions/runs/30203329883), all jobs passed |
 
 
