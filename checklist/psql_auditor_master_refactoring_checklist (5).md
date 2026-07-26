@@ -11,34 +11,34 @@ Total tasks: **71**
 
 | Status | Count |
 | --- | ---: |
-| Complete `[x]` | **8 / 71 (11.3%)** |
-| Partially complete `[~]` | **5 / 71 (7.0%)** |
+| Complete `[x]` | **9 / 71 (12.7%)** |
+| Partially complete `[~]` | **4 / 71 (5.6%)** |
 | Open `[ ]` | **58 / 71 (81.7%)** |
-| Not fully complete | **63 / 71 (88.7%)** |
+| Not fully complete | **62 / 71 (87.3%)** |
 
-Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`.
+Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `CORE-006`.
 
-Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
+Partially complete: `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Latest verification
 
-`CORE-005` isolates LangGraph checkpoints and run artifacts by validated
-`client_id` + `audit_run_id` with ownership manifests. Remaining isolation gaps
-are closed: per-run scoped checkpointer/graph bundles (no process-wide swap
-race), fail-closed `EvidenceStore.rebind_run_id`, and
-`CheckpointInitError` instead of silent `MemorySaver` fallback for canonical
-scopes. Local and CI gates share the same Make targets.
+`CORE-006` introduces an explicit `ApplicationRuntime` owned by each FastAPI
+app instance (settings snapshot, graph, MCP pool, results store, task registry,
+scoped checkpoint leases). Production `/v1` handlers resolve the runtime from
+`request.app.state` and no longer use process-wide `_graph` / `_STORE` / `_POOL`.
+`FLOW-007` remains open for separate acceptance of removing the deprecated
+compatibility getters. Local and CI gates share the same Make targets.
 
 | Check | Verified result |
 | --- | --- |
 | Format | Passed |
 | Lint | Passed |
-| Type check | Passed, 69 files |
-| Unit tests | 354 passed |
+| Type check | Passed, 71 files |
+| Unit tests | 363 passed |
 | PostgreSQL integration tests | 7 passed |
-| Full suite | 361 passed |
+| Full suite | 370 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | [Run 30199875643](https://github.com/whatelseek/psql_auditor/actions/runs/30199875643), all jobs passed |
+| Clean CI | Pending push of CORE-006 commit |
 
 Controlled negative runs:
 
@@ -122,7 +122,19 @@ with `make validate-defect-map` enforced in CI.
   mkdir/copy/rename and leaves both dirs unchanged on reject;
 - regression tests in `tests/test_run_scope_isolation.py`.
 
-- [~] `CORE-006` — Remove hidden global mutable state.
+- [x] `CORE-006` — Remove hidden global mutable state.
+
+`CORE-006` closure evidence:
+
+- `ApplicationRuntime` with `start()` / `close()` owns settings, graph, MCP pool,
+  results store, task registry, and in-memory run registries;
+- FastAPI `create_app(settings=…)` lifespan binds runtime on `app.state`;
+- production handlers use `runtime_from_request()` (no `_graph` / global settings);
+- scoped checkpoint acquire is lock + refcount safe; `release_run_resources`
+  drops in-memory state without deleting durable artifacts;
+- stream background tasks tracked in `TaskRegistry` with observed exceptions;
+- tests: `tests/test_application_runtime.py` (two-app isolation, same-scope
+  acquire, shutdown, partial startup, restart/resume, concurrent runs).
 
 ### M2 — Inputs and audit planning
 
@@ -209,7 +221,7 @@ with `make validate-defect-map` enforced in CI.
 
 ## Current blockers
 
-- `CORE-006`: remove process-wide mutable graph/settings singletons.
+- `FLOW-007`: remove deprecated process-wide graph getters after independent review.
 - `DOC-001`: synchronize `docs/baseline.md` with the accepted `AUD-002`/`CORE-001`
   state and update stale evidence-layout examples to
   `artifacts/<client_slug>/<audit_run_id>/`.

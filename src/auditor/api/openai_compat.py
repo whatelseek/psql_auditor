@@ -41,8 +41,8 @@ from auditor.api.stream_progress import (
     chat_progress_chunks,
     responses_progress_events,
 )
-from auditor.config import get_settings
-from auditor.graph import get_auditor_graph_ready
+from auditor.application_runtime import ApplicationRuntime
+from auditor.config import Settings, get_settings
 from auditor.hitl import is_continue_reply, resolve_pause_resume
 from auditor.intent import classify_intent
 from auditor.progress import ProgressSink, bind_progress_sink
@@ -53,6 +53,14 @@ from auditor.results_store import (
 )
 
 router = APIRouter(prefix="/v1")
+
+
+def runtime_from_request(request: Request) -> ApplicationRuntime:
+    """Return the application runtime bound to this FastAPI app instance."""
+    runtime = getattr(request.app.state, "runtime", None)
+    if runtime is None:
+        raise HTTPException(status_code=503, detail="Application runtime not initialized")
+    return runtime
 
 
 class ChatMessage(BaseModel):
@@ -227,7 +235,7 @@ def _sse_responses_event(payload: dict[str, Any]) -> str:
 
 
 async def _stream_responses_audit(
-    auditor,
+    runtime: ApplicationRuntime,
     body: ChatCompletionRequest,
     model: str,
     response_id: str,
@@ -307,14 +315,17 @@ async def _stream_responses_audit(
 
     async def _runner() -> dict[str, Any]:
         """Run audit with progress sink bound (Responses stream path)."""
-        with bind_progress_sink(sink):
+        with runtime.bind(), bind_progress_sink(sink):
+            auditor = runtime.graph
+            assert auditor is not None
             try:
-                return await _run_or_resume(auditor, body)
+                return await _run_or_resume(runtime, auditor, body)
             finally:
                 sink.close()
 
     run_task = asyncio.create_task(_runner())
-    # Shield so client disconnect does not cancel the audit mid-assess.
+    stream_key = f"stream:responses:{response_id}"
+    runtime.task_registry.track(stream_key, run_task, owner="stream")
     shielded = asyncio.ensure_future(asyncio.shield(run_task))
 
     async def _pump_progress() -> None:
@@ -432,7 +443,7 @@ async def _stream_responses_audit(
     )
 
 
-def _check_api_key(authorization: str | None) -> None:
+def _check_api_key(authorization: str | None, settings: Settings | None = None) -> None:
     """Validate Bearer token when ``Settings.api_key`` is configured.
 
     Args:
@@ -441,7 +452,7 @@ def _check_api_key(authorization: str | None) -> None:
     Raises:
         HTTPException: 401 when a key is required but missing or incorrect.
     """
-    settings = get_settings()
+    settings = settings or get_settings()
     if not settings.api_key:
         return
     if not authorization or not authorization.startswith("Bearer "):
@@ -533,6 +544,7 @@ def _sse_chunk(
 
 @router.get("/models")
 async def list_models(
+    request: Request,
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """List the single auditor model advertised to Open WebUI.
@@ -543,8 +555,9 @@ async def list_models(
     Returns:
         OpenAI-style model list with one entry (``Settings.model_id``).
     """
-    _check_api_key(authorization)
-    settings = get_settings()
+    runtime = runtime_from_request(request)
+    settings = runtime.settings
+    _check_api_key(authorization, settings)
     return {
         "object": "list",
         "data": [
@@ -567,6 +580,7 @@ _DOWNLOAD_NAME = re.compile(
 @router.get("/downloads/{filename}")
 async def download_archive(
     filename: str,
+    request: Request,
     authorization: str | None = Header(default=None),
     token: str | None = Query(default=None),
 ):
@@ -586,7 +600,8 @@ async def download_archive(
     Raises:
         HTTPException: 404 for unknown names or missing files; 401 for bad auth.
     """
-    settings = get_settings()
+    runtime = runtime_from_request(request)
+    settings = runtime.settings
     match = _DOWNLOAD_NAME.match(filename)
     if not match:
         raise HTTPException(status_code=404, detail="Unknown archive name")
@@ -617,7 +632,11 @@ async def download_archive(
     )
 
 
-async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]:
+async def _run_or_resume(
+    runtime: ApplicationRuntime,
+    auditor,
+    body: ChatCompletionRequest,
+) -> dict[str, Any]:
     """Start audit, follow-up, ad-hoc command run, or resume intake/HITL/continue.
 
     Classifies the latest user message via ``classify_intent`` and dispatches
@@ -633,7 +652,7 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
         Graph result dict with ``report``, ``messages``, and optional pause flags.
     """
     try:
-        return await _run_or_resume_once(auditor, body)
+        return await _run_or_resume_once(runtime, auditor, body, settings=runtime.settings)
     except (ValueError, Exception) as exc:  # noqa: BLE001
         msg = f"{type(exc).__name__}: {exc}".lower()
         if (
@@ -642,16 +661,34 @@ async def _run_or_resume(auditor, body: ChatCompletionRequest) -> dict[str, Any]
             and "threads can only be started once" not in msg
         ):
             raise
-        from auditor.graph import reset_auditor_checkpointer
+        paused = resolve_pause_resume(body.messages)
+        parsed = None
+        if paused:
+            from auditor.run_scope import parse_checkpoint_thread_id
 
-        auditor = await reset_auditor_checkpointer()
-        return await _run_or_resume_once(auditor, body)
+            parsed = parse_checkpoint_thread_id(paused[1])
+        if parsed is not None:
+            await runtime.reconnect_run_checkpointer(
+                client_id=parsed[0],
+                audit_run_id=parsed[1],
+            )
+            auditor = runtime.graph
+        else:
+            auditor = runtime.graph
+            assert auditor is not None
+            await auditor.ensure_async_checkpointer()
+        return await _run_or_resume_once(runtime, auditor, body, settings=runtime.settings)
 
 
-async def _run_or_resume_once(auditor, body: ChatCompletionRequest) -> dict[str, Any]:
+async def _run_or_resume_once(
+    runtime: ApplicationRuntime,
+    auditor,
+    body: ChatCompletionRequest,
+    *,
+    settings: Settings,
+) -> dict[str, Any]:
     """Single attempt of :func:`_run_or_resume` (no checkpointer retry)."""
     user_text = _latest_user_text(body.messages)
-    settings = get_settings()
 
     # Explicit ``continue session N for Client`` must win over stale
     # ``[AUDIT_INTAKE|/HITL]`` markers still present in Open WebUI history —
@@ -751,15 +788,16 @@ async def chat_completions(
         ``JSONResponse`` with the full report, or ``StreamingResponse`` (SSE)
         when ``body.stream`` is ``True``.
     """
-    _check_api_key(authorization)
-    settings = get_settings()
+    runtime = runtime_from_request(request)
+    runtime.require_open()
+    settings = runtime.settings
+    _check_api_key(authorization, settings)
     model = body.model or settings.model_id
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    auditor = await get_auditor_graph_ready()
 
     if body.stream:
         return StreamingResponse(
-            _stream_audit(auditor, body, model, completion_id),
+            _stream_audit(runtime, body, model, completion_id),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -768,7 +806,10 @@ async def chat_completions(
             },
         )
 
-    result = await _run_or_resume(auditor, body)
+    with runtime.bind():
+        auditor = runtime.graph
+        assert auditor is not None
+        result = await _run_or_resume(runtime, auditor, body)
     content = result.get("report") or _last_ai_text(result.get("messages") or [])
     return JSONResponse(_completion_payload(content, model, completion_id))
 
@@ -776,6 +817,7 @@ async def chat_completions(
 @router.post("/responses")
 async def responses_api(
     body: ResponsesRequest,
+    request: Request,
     authorization: str | None = Header(default=None),
 ):
     """OpenAI Responses API shim used by newer Open WebUI connections.
@@ -794,8 +836,10 @@ async def responses_api(
     Raises:
         HTTPException: 400 when ``input`` yields no messages.
     """
-    _check_api_key(authorization)
-    settings = get_settings()
+    runtime = runtime_from_request(request)
+    runtime.require_open()
+    settings = runtime.settings
+    _check_api_key(authorization, settings)
     model = body.model or settings.model_id
     messages = _messages_from_responses_input(body)
     if not messages:
@@ -804,16 +848,15 @@ async def responses_api(
     chat_body = ChatCompletionRequest(
         model=model,
         messages=messages,
-        stream=False,
+        stream=body.stream,
         temperature=body.temperature,
         user=body.user,
     )
-    auditor = await get_auditor_graph_ready()
     response_id = f"resp_{uuid.uuid4().hex[:24]}"
 
     if body.stream:
         return StreamingResponse(
-            _stream_responses_audit(auditor, chat_body, model, response_id),
+            _stream_responses_audit(runtime, chat_body, model, response_id),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -822,7 +865,10 @@ async def responses_api(
             },
         )
 
-    result = await _run_or_resume(auditor, chat_body)
+    with runtime.bind():
+        auditor = runtime.graph
+        assert auditor is not None
+        result = await _run_or_resume(runtime, auditor, chat_body)
     content = result.get("report") or _last_ai_text(result.get("messages") or [])
     if result.get("awaiting_intake"):
         content = content
@@ -850,7 +896,7 @@ def _last_ai_text(messages: list) -> str:
 
 
 async def _stream_audit(
-    auditor,
+    runtime: ApplicationRuntime,
     body: ChatCompletionRequest,
     model: str,
     completion_id: str,
@@ -870,7 +916,7 @@ async def _stream_audit(
     Yields:
         SSE frame strings ending with ``data: [DONE]\\n\\n``.
     """
-    settings = get_settings()
+    settings = runtime.settings
     user_text = _latest_user_text(body.messages)
     paused = resolve_pause_resume(body.messages)
     session_num, client_hint = parse_continue_session_request(user_text)
@@ -993,13 +1039,17 @@ async def _stream_audit(
 
     async def _runner() -> dict[str, Any]:
         """Run audit with progress sink bound (chat completions stream path)."""
-        with bind_progress_sink(sink):
+        with runtime.bind(), bind_progress_sink(sink):
+            auditor = runtime.graph
+            assert auditor is not None
             try:
-                return await _run_or_resume(auditor, body)
+                return await _run_or_resume(runtime, auditor, body)
             finally:
                 sink.close()
 
     run_task = asyncio.create_task(_runner())
+    stream_key = f"stream:chat:{completion_id}"
+    runtime.task_registry.track(stream_key, run_task, owner="stream")
     shielded = asyncio.ensure_future(asyncio.shield(run_task))
 
     async def _pump() -> None:

@@ -9,10 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from auditor.checklist import Requirement
+from auditor.config import Settings
 from auditor.intent import classify_intent
 from auditor.results_store import (
     AuditSessionInfo,
     ResultsStore,
+    bind_results_store,
     format_session_results_markdown,
     format_sessions_markdown,
     get_results_store,
@@ -187,9 +189,6 @@ def test_client_database_name_uses_slug() -> None:
 
 
 def test_get_results_store_disabled_without_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    import auditor.results_store as rs
-
-    rs._STORE = None
     monkeypatch.setenv("RESULTS_DB_ENABLED", "true")
     monkeypatch.setenv("RESULTS_DATABASE_URL", "")
     from auditor.config import get_settings
@@ -197,13 +196,9 @@ def test_get_results_store_disabled_without_url(monkeypatch: pytest.MonkeyPatch)
     get_settings.cache_clear()
     assert get_results_store() is None
     get_settings.cache_clear()
-    rs._STORE = None
 
 
 def test_get_results_store_disabled_when_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    import auditor.results_store as rs
-
-    rs._STORE = None
     monkeypatch.setenv("RESULTS_DB_ENABLED", "false")
     monkeypatch.setenv("RESULTS_DATABASE_URL", "postgresql://u:p@localhost/postgres")
     from auditor.config import get_settings
@@ -211,7 +206,19 @@ def test_get_results_store_disabled_when_flag_off(monkeypatch: pytest.MonkeyPatc
     get_settings.cache_clear()
     assert get_results_store() is None
     get_settings.cache_clear()
-    rs._STORE = None
+
+
+def test_get_results_store_context_binding() -> None:
+    settings = Settings(
+        _env_file=None,
+        results_db_enabled=True,
+        results_database_url="postgresql://u:p@h/postgres",
+    )
+    store = ResultsStore(settings)  # type: ignore[arg-type]
+    with bind_results_store(store):
+        assert get_results_store() is store
+    with bind_results_store(None):
+        assert get_results_store() is None
 
 
 def test_intent_list_sessions() -> None:

@@ -26,7 +26,11 @@ class AuditRuntime(Protocol):
     playbooks: Any | None
     _evidence_by_run: dict[str, EvidenceStore]
     _multi_sessions: dict[str, dict[str, Any]]
+    mcp_pool: Any
+    results_store: Any | None
+    task_registry: Any
     _orphan_tasks: dict[str, Any]
+    _scoped_acquire_locks: dict[str, Any]
     _checkpointer: Any
     _checkpoint_conn: Any | None
     _checkpoint_scope_key: str
@@ -143,3 +147,5 @@ class AuditRuntime(Protocol):
     def route_after_assess(self, state: AuditorState) -> str: ...
 
     def route_after_hitl(self, state: AuditorState) -> str: ...
+
+    async def aclose_runtime_resources(self, *args: Any, **kwargs: Any) -> None: ...

@@ -6,6 +6,10 @@ isolate two audits aimed at different hosts. This module keeps an optional
 (and nested tool call) sees its own SSH/WinRM/PG credentials via
 :func:`effective_settings`.
 
+Application-owned base settings are also task-scoped via
+:func:`bind_app_settings` so concurrent FastAPI apps do not share a cached
+settings object. Credential overlays apply on top of that base.
+
 ``bind_ssh_target`` / :func:`bind_runtime_credentials` set the overlay for a
 ``with`` block. Prefer these over mutating ``os.environ`` in request handlers.
 """
@@ -21,6 +25,11 @@ from auditor.config import Settings, get_settings
 
 _runtime_target: ContextVar["RuntimeTarget | None"] = ContextVar(
     "auditor_runtime_target",
+    default=None,
+)
+
+_app_settings: ContextVar[Settings | None] = ContextVar(
+    "auditor_app_settings",
     default=None,
 )
 
@@ -100,6 +109,21 @@ class RuntimeTarget:
 def get_runtime_target() -> RuntimeTarget | None:
     """Return the current ContextVar overlay, or ``None`` when unbound."""
     return _runtime_target.get()
+
+
+def get_app_settings() -> Settings | None:
+    """Return the application-bound settings snapshot, or ``None`` when unbound."""
+    return _app_settings.get()
+
+
+@contextmanager
+def bind_app_settings(settings: Settings) -> Iterator[Settings]:
+    """Bind the application settings snapshot for the current task."""
+    token = _app_settings.set(settings)
+    try:
+        yield settings
+    finally:
+        _app_settings.reset(token)
 
 
 def _set_runtime_target(target: RuntimeTarget | None) -> Token:
@@ -215,12 +239,14 @@ def effective_settings(base: Settings | None = None) -> Settings:
     """Return ``base`` settings with the current run-scoped credential overlay applied.
 
     Args:
-        base: Settings to overlay; defaults to process :func:`~auditor.config.get_settings`.
+        base: Settings to overlay; defaults to the application-bound
+            snapshot from :func:`bind_app_settings`, then legacy
+            :func:`~auditor.config.get_settings`.
 
     Returns:
         A ``model_copy`` when an overlay is active; otherwise ``base`` unchanged.
     """
-    settings = base or get_settings()
+    settings = base or get_app_settings() or get_settings()
     overlay = get_runtime_target()
     if overlay is None:
         return settings

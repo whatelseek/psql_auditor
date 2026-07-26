@@ -136,11 +136,9 @@ def test_download_endpoint_serves_zip(tmp_path: Path):
         api_key="sk-test",
         public_base_url="http://localhost:8000",
     )
-    with patch("auditor.api.openai_compat.get_settings", return_value=settings):
-        app = create_app()
-        client = TestClient(app)
+    app = create_app(settings=settings)
+    with TestClient(app) as client:
         url = public_download_url(settings, run_id)
-        # path only for TestClient
         path = url.replace("http://localhost:8000", "")
         resp = client.get(path)
         assert resp.status_code == 200

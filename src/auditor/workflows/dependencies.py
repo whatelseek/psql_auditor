@@ -68,4 +68,7 @@ class GraphDependencies:
     playbooks: Any | None
     evidence: EvidenceRegistry
     multi_sessions: MultiSessionRegistry
-    orphan_tasks: dict[str, Any] = field(default_factory=dict)
+    mcp_pool: Any = None
+    results_store: Any | None = None
+    task_registry: Any = None
+    orphan_tasks: dict[str, Any] = field(default_factory=dict)  # deprecated

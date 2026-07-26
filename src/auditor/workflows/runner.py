@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -34,7 +35,7 @@ from auditor.run_scope import (
     resolve_run_scope,
     verify_registry_ownership,
 )
-from auditor.runtime_target import bind_runtime_credentials
+from auditor.runtime_target import bind_app_settings, bind_runtime_credentials
 from auditor.secrets_file import InventorySshTarget, bind_host_target, read_client_credentials
 from auditor.session_store import find_run_for_thread, write_run_status
 from auditor.state import AuditorState, Finding
@@ -180,103 +181,104 @@ async def arun_one(
         run_row.evidence_run_id = store.run_id
         run_row.base_thread_id = scope.checkpoint_thread_id
         registry.save_run(run_row)
-    scoped = await acquire_run_checkpointer(
+    async with _checkpointer_lease(
         runtime,
         client_id=client_id,
         audit_run_id=audit_run_id,
-    )
-    # Capture locally — concurrent arun_one must not replace this saver/graph.
-    scoped_graph = scoped.graph
-    asset_id = str((intake_state or {}).get("asset_id") or "")
-    if not asset_id and ssh_target is not None:
-        inv_key = ssh_target.inventory_key or ssh_target.label
-        if inv_key or ssh_target.asset_id:
+    ) as scoped:
+        scoped_graph = scoped.graph
+        asset_id = str((intake_state or {}).get("asset_id") or "")
+        if not asset_id and ssh_target is not None:
+            inv_key = ssh_target.inventory_key or ssh_target.label
+            if inv_key or ssh_target.asset_id:
+                asset_id = get_asset_registry(runtime.settings.evidence_dir).ensure_asset(
+                    client_id=client_id,
+                    inventory_key=inv_key or ssh_target.asset_id,
+                    label=ssh_target.label,
+                    ssh_host=ssh_target.host,
+                    asset_id=ssh_target.asset_id or None,
+                )
+            elif evidence_host_id and not evidence_host_id.replace(".", "").isdigit():
+                # Hostname (not IP) may serve as stable inventory key.
+                asset_id = get_asset_registry(runtime.settings.evidence_dir).ensure_asset(
+                    client_id=client_id,
+                    inventory_key=evidence_host_id,
+                    label=evidence_host_id,
+                    ssh_host=ssh_target.host if ssh_target else "",
+                )
+        if not asset_id:
+            # Client-scoped synthetic asset for hostless framework runs.
             asset_id = get_asset_registry(runtime.settings.evidence_dir).ensure_asset(
                 client_id=client_id,
-                inventory_key=inv_key or ssh_target.asset_id,
-                label=ssh_target.label,
-                ssh_host=ssh_target.host,
-                asset_id=ssh_target.asset_id or None,
+                inventory_key=f"client:{client_id}",
+                label=client_name or client_id,
             )
-        elif evidence_host_id and not evidence_host_id.replace(".", "").isdigit():
-            # Hostname (not IP) may serve as stable inventory key.
-            asset_id = get_asset_registry(runtime.settings.evidence_dir).ensure_asset(
-                client_id=client_id,
-                inventory_key=evidence_host_id,
-                label=evidence_host_id,
-                ssh_host=ssh_target.host if ssh_target else "",
+        fw_version = str((intake_state or {}).get("framework_version") or "")
+        if not fw_version and framework_id:
+            bare = framework_id.split("/", 1)[-1]
+            fw_obj = get_framework(bare, runtime.settings.agents_dir)
+            fw_version = str(getattr(fw_obj, "version", "") or "") if fw_obj else ""
+        meta["asset_id"] = asset_id
+        meta["client_id"] = client_id
+        meta["audit_run_id"] = audit_run_id
+        if fw_version:
+            meta["framework_version"] = fw_version
+        store.write_run_meta(**meta)
+        initial: AuditorState = {
+            "messages": [HumanMessage(content=user_text)],
+            "user_request": truncate_text(
+                user_text,
+                runtime.settings.max_user_request_chars,
+                "user_request",
+            ),
+            "report_language": report_lang.code,
+            "retry_count": 0,
+            "evidence_run_id": store.run_id,
+            "evidence_run_dir": str(store.root),
+            "hitl_skipped": [],
+            "awaiting_hitl": False,
+            "intake_complete": True,
+            "thread_id": tid,
+        }
+        if intake_state:
+            initial.update(
+                {
+                    "intake": dict(intake_state.get("intake") or intake_state),
+                    "client_name": str(intake_state.get("client_name") or ""),
+                    "has_cmdb": bool(intake_state.get("has_cmdb")),
+                    "has_access": bool(intake_state.get("has_access")),
+                    "audit_types": str(intake_state.get("audit_types") or ""),
+                }
             )
-    if not asset_id:
-        # Client-scoped synthetic asset for hostless framework runs.
-        asset_id = get_asset_registry(runtime.settings.evidence_dir).ensure_asset(
-            client_id=client_id,
-            inventory_key=f"client:{client_id}",
-            label=client_name or client_id,
-        )
-    fw_version = str((intake_state or {}).get("framework_version") or "")
-    if not fw_version and framework_id:
-        bare = framework_id.split("/", 1)[-1]
-        fw_obj = get_framework(bare, runtime.settings.agents_dir)
-        fw_version = str(getattr(fw_obj, "version", "") or "") if fw_obj else ""
-    meta["asset_id"] = asset_id
-    meta["client_id"] = client_id
-    meta["audit_run_id"] = audit_run_id
-    if fw_version:
-        meta["framework_version"] = fw_version
-    store.write_run_meta(**meta)
-    initial: AuditorState = {
-        "messages": [HumanMessage(content=user_text)],
-        "user_request": truncate_text(
-            user_text,
-            runtime.settings.max_user_request_chars,
-            "user_request",
-        ),
-        "report_language": report_lang.code,
-        "retry_count": 0,
-        "evidence_run_id": store.run_id,
-        "evidence_run_dir": str(store.root),
-        "hitl_skipped": [],
-        "awaiting_hitl": False,
-        "intake_complete": True,
-        "thread_id": tid,
-    }
-    if intake_state:
-        initial.update(
-            {
-                "intake": dict(intake_state.get("intake") or intake_state),
-                "client_name": str(intake_state.get("client_name") or ""),
-                "has_cmdb": bool(intake_state.get("has_cmdb")),
-                "has_access": bool(intake_state.get("has_access")),
-                "audit_types": str(intake_state.get("audit_types") or ""),
-            }
-        )
-        if intake_state.get("results_session_number") is not None:
-            initial["results_session_number"] = int(intake_state["results_session_number"])
-    if framework_id:
-        initial["framework_id"] = framework_id
-    if evidence_host_id:
-        initial["evidence_host_id"] = evidence_host_id
-    if audit_run_id:
-        initial["audit_run_id"] = audit_run_id
-    if asset_id:
-        initial["asset_id"] = asset_id
-    if client_id:
-        initial["client_id"] = client_id
-    if fw_version:
-        initial["framework_version"] = fw_version
-    config = {"configurable": {"thread_id": tid}}
+            if intake_state.get("results_session_number") is not None:
+                initial["results_session_number"] = int(intake_state["results_session_number"])
+        if framework_id:
+            initial["framework_id"] = framework_id
+        if evidence_host_id:
+            initial["evidence_host_id"] = evidence_host_id
+        if audit_run_id:
+            initial["audit_run_id"] = audit_run_id
+        if asset_id:
+            initial["asset_id"] = asset_id
+        if client_id:
+            initial["client_id"] = client_id
+        if fw_version:
+            initial["framework_version"] = fw_version
+        config = {"configurable": {"thread_id": tid}}
 
-    async def _invoke() -> dict[str, Any]:
-        """Run the main graph and decorate with HITL/intake messaging."""
-        result = await scoped_graph.ainvoke(initial, config)
-        return runtime._decorate_result(result, thread_id=tid, store=store)
+        async def _invoke() -> dict[str, Any]:
+            """Run the main graph and decorate with HITL/intake messaging."""
+            result = await scoped_graph.ainvoke(initial, config)
+            return runtime._decorate_result(result, thread_id=tid, store=store)
 
-    intake_for_scope = (intake_state.get("intake") if intake_state else None) or intake_state or {}
-    if not isinstance(intake_for_scope, dict):
-        intake_for_scope = {}
-    with runtime._target_scope(intake=intake_for_scope, ssh_target=ssh_target):
-        with bind_host_segment(evidence_host_id):
-            return await _invoke()
+        intake_for_scope = (
+            (intake_state.get("intake") if intake_state else None) or intake_state or {}
+        )
+        if not isinstance(intake_for_scope, dict):
+            intake_for_scope = {}
+        with runtime._target_scope(intake=intake_for_scope, ssh_target=ssh_target):
+            with bind_host_segment(evidence_host_id):
+                return await _invoke()
 
 
 async def aresume(
@@ -299,75 +301,76 @@ async def aresume(
         audit_run_id=audit_run_id,
         context="aresume",
     )
-    scoped = await acquire_run_checkpointer(runtime, client_id=cid, audit_run_id=arid)
-    config = {"configurable": {"thread_id": tid}}
-    is_intake = ":intake" in tid or tid.endswith("intake")
-    graph = scoped.intake_graph if is_intake else scoped.graph
-    try:
-        pre = await graph.aget_state(config)
-        pre_values = pre.values or {}
-    except Exception:  # noqa: BLE001
-        pre_values = {}
-    # Checkpoint state must not claim a different audit-run identity.
-    state_cid = str(pre_values.get("client_id") or "").strip()
-    state_arid = str(pre_values.get("audit_run_id") or "").strip()
-    if state_cid and state_cid != cid:
-        raise RunScopeIsolationError(
-            f"checkpoint client_id={state_cid!r} does not match resume client_id={cid!r}"
-        )
-    if state_arid and state_arid != arid:
-        raise RunScopeIsolationError(
-            f"checkpoint audit_run_id={state_arid!r} does not match resume audit_run_id={arid!r}"
-        )
-    slug = runtime._client_slug_from_values(pre_values)
-    with runtime._target_scope(
-        client_slug=slug,
-        intake=pre_values.get("intake") if isinstance(pre_values.get("intake"), dict) else None,
-    ):
-        result = await graph.ainvoke(Command(resume=user_text), config)
-    snap = await graph.aget_state(config)
-    values = snap.values or {}
-    run_id = values.get("evidence_run_id") or ""
-    store = runtime._evidence_by_run.get(run_id)
-    if store is None and run_id:
+    async with _checkpointer_lease(runtime, client_id=cid, audit_run_id=arid) as scoped:
+        config = {"configurable": {"thread_id": tid}}
+        is_intake = ":intake" in tid or tid.endswith("intake")
+        graph = scoped.intake_graph if is_intake else scoped.graph
         try:
-            store = EvidenceStore.open_existing(
-                runtime.settings.evidence_dir,
-                str(run_id),
-                client_id=cid,
-                audit_run_id=arid,
-            )
-            runtime._evidence_by_run[store.run_id] = store
+            pre = await graph.aget_state(config)
+            pre_values = pre.values or {}
         except Exception:  # noqa: BLE001
-            store = None
-    if store is not None:
-        store.require_ownership(client_id=cid, audit_run_id=arid)
-    decorated = runtime._decorate_result(result, thread_id=tid, store=store, intake=is_intake)
-    if decorated.get("awaiting_hitl"):
-        return decorated
+            pre_values = {}
+        # Checkpoint state must not claim a different audit-run identity.
+        state_cid = str(pre_values.get("client_id") or "").strip()
+        state_arid = str(pre_values.get("audit_run_id") or "").strip()
+        if state_cid and state_cid != cid:
+            raise RunScopeIsolationError(
+                f"checkpoint client_id={state_cid!r} does not match resume client_id={cid!r}"
+            )
+        if state_arid and state_arid != arid:
+            raise RunScopeIsolationError(
+                f"checkpoint audit_run_id={state_arid!r} does not match "
+                f"resume audit_run_id={arid!r}"
+            )
+        slug = runtime._client_slug_from_values(pre_values)
+        with runtime._target_scope(
+            client_slug=slug,
+            intake=pre_values.get("intake") if isinstance(pre_values.get("intake"), dict) else None,
+        ):
+            result = await graph.ainvoke(Command(resume=user_text), config)
+        snap = await graph.aget_state(config)
+        values = snap.values or {}
+        run_id = values.get("evidence_run_id") or ""
+        store = runtime._evidence_by_run.get(run_id)
+        if store is None and run_id:
+            try:
+                store = EvidenceStore.open_existing(
+                    runtime.settings.evidence_dir,
+                    str(run_id),
+                    client_id=cid,
+                    audit_run_id=arid,
+                )
+                runtime._evidence_by_run[store.run_id] = store
+            except Exception:  # noqa: BLE001
+                store = None
+        if store is not None:
+            store.require_ownership(client_id=cid, audit_run_id=arid)
+        decorated = runtime._decorate_result(result, thread_id=tid, store=store, intake=is_intake)
+        if decorated.get("awaiting_hitl"):
+            return decorated
 
-    if is_intake and values.get("intake_complete"):
-        # Continue into framework audits using intake answers.
-        session = runtime._forget_multi_session(tid) or {}
-        user_req = session.get("user_text") or values.get("user_request") or user_text
-        base_thread = session.get("base_thread") or checkpoint_thread_id(cid, arid)
-        run_id = values.get("evidence_run_id") or session.get("run_id") or run_id
-        intake = values.get("intake") or {}
-        if isinstance(intake, dict):
-            intake = {
-                **intake,
-                "client_id": cid,
-                "audit_run_id": arid,
-            }
-        return await runtime._start_frameworks_after_intake(
-            user_text=str(user_req),
-            base_thread=base_thread,
-            run_id=str(run_id),
-            intake=intake if isinstance(intake, dict) else {},
-        )
+        if is_intake and values.get("intake_complete"):
+            # Continue into framework audits using intake answers.
+            session = runtime._forget_multi_session(tid) or {}
+            user_req = session.get("user_text") or values.get("user_request") or user_text
+            base_thread = session.get("base_thread") or checkpoint_thread_id(cid, arid)
+            run_id = values.get("evidence_run_id") or session.get("run_id") or run_id
+            intake = values.get("intake") or {}
+            if isinstance(intake, dict):
+                intake = {
+                    **intake,
+                    "client_id": cid,
+                    "audit_run_id": arid,
+                }
+            return await runtime._start_frameworks_after_intake(
+                user_text=str(user_req),
+                base_thread=base_thread,
+                run_id=str(run_id),
+                intake=intake if isinstance(intake, dict) else {},
+            )
 
-    # If this thread was part of a multi-framework run, continue the queue.
-    return await runtime._continue_multi_after_resume(tid, decorated)
+        # If this thread was part of a multi-framework run, continue the queue.
+        return await runtime._continue_multi_after_resume(tid, decorated)
 
 
 async def _resolve_resume_identity(
@@ -586,196 +589,224 @@ async def acontinue(
             "messages": [],
         }
 
-    scoped = await acquire_run_checkpointer(runtime, client_id=cid, audit_run_id=arid)
-    config = {"configurable": {"thread_id": tid}}
-    is_intake = ":intake" in tid or tid.endswith("intake")
-    graph = scoped.intake_graph if is_intake else scoped.graph
+    async with _checkpointer_lease(runtime, client_id=cid, audit_run_id=arid) as scoped:
+        config = {"configurable": {"thread_id": tid}}
+        is_intake = ":intake" in tid or tid.endswith("intake")
+        graph = scoped.intake_graph if is_intake else scoped.graph
 
-    store = None
-    if rid:
-        runtime._reload_multi_sessions(rid)
-        store = runtime._evidence_by_run.get(rid)
+        store = None
+        if rid:
+            runtime._reload_multi_sessions(rid)
+            store = runtime._evidence_by_run.get(rid)
+            if store is None:
+                try:
+                    store = EvidenceStore.open_existing(
+                        runtime.settings.evidence_dir,
+                        rid,
+                        client_id=cid,
+                        audit_run_id=arid,
+                    )
+                    runtime._evidence_by_run[rid] = store
+                except Exception:  # noqa: BLE001
+                    store = None
         if store is None:
-            try:
-                store = EvidenceStore.open_existing(
-                    runtime.settings.evidence_dir,
-                    rid,
+            arun = registry.get_run(arid)
+            if arun is not None and arun.evidence_run_id:
+                try:
+                    store = EvidenceStore.open_existing(
+                        runtime.settings.evidence_dir,
+                        arun.evidence_run_id,
+                        client_id=cid,
+                        audit_run_id=arid,
+                    )
+                    runtime._evidence_by_run[store.run_id] = store
+                    rid = store.run_id
+                except Exception:  # noqa: BLE001
+                    store = None
+
+        # Prefer LangGraph checkpoint if the graph still has work / interrupt.
+        try:
+            snap = await graph.aget_state(config)
+        except Exception:  # noqa: BLE001
+            snap = None
+
+        if snap is not None and (
+            snap.next
+            or (snap.tasks and any(getattr(t, "interrupts", None) for t in (snap.tasks or [])))
+        ):
+            # Pending interrupt → treat as resume with continue/skip-all friendly text
+            interrupts = []
+            for task in snap.tasks or []:
+                interrupts.extend(list(getattr(task, "interrupts", None) or []))
+            if interrupts:
+                return await runtime.aresume(
+                    tid,
+                    "continue",
                     client_id=cid,
                     audit_run_id=arid,
                 )
-                runtime._evidence_by_run[rid] = store
-            except Exception:  # noqa: BLE001
-                store = None
-    if store is None:
-        arun = registry.get_run(arid)
-        if arun is not None and arun.evidence_run_id:
-            try:
-                store = EvidenceStore.open_existing(
-                    runtime.settings.evidence_dir,
-                    arun.evidence_run_id,
-                    client_id=cid,
-                    audit_run_id=arid,
+            slug = runtime._client_slug_from_values(snap.values or {})
+            with runtime._target_scope(
+                client_slug=slug,
+                intake=(snap.values or {}).get("intake")
+                if isinstance((snap.values or {}).get("intake"), dict)
+                else None,
+            ):
+                result = await graph.ainvoke(None, config)
+            values = (await graph.aget_state(config)).values or {}
+            run_id2 = values.get("evidence_run_id") or rid
+            if store is None and run_id2:
+                try:
+                    store = EvidenceStore.open_existing(
+                        runtime.settings.evidence_dir,
+                        str(run_id2),
+                        client_id=cid,
+                        audit_run_id=arid,
+                    )
+                    runtime._evidence_by_run[store.run_id] = store
+                except Exception:  # noqa: BLE001
+                    pass
+            decorated = runtime._decorate_result(
+                result, thread_id=tid, store=store, intake=is_intake
+            )
+            if decorated.get("awaiting_hitl"):
+                return decorated
+            if rid:
+                write_run_status(
+                    runtime.settings.evidence_dir, str(run_id2 or rid), status="running"
                 )
-                runtime._evidence_by_run[store.run_id] = store
-                rid = store.run_id
-            except Exception:  # noqa: BLE001
-                store = None
+            return await runtime._continue_multi_after_resume(tid, decorated)
 
-    # Prefer LangGraph checkpoint if the graph still has work / interrupt.
-    try:
-        snap = await graph.aget_state(config)
-    except Exception:  # noqa: BLE001
-        snap = None
+        # Evidence fallback: rebuild pending_ids from disk and re-enter assess.
+        if not rid:
+            return {
+                "report": (
+                    "No audit run bound to this thread. "
+                    "Pass an explicit evidence `run_id` / `audit_run_id`, or reply "
+                    "from a message that still has `[AUDIT_CONTINUE:…]` / "
+                    "`[AUDIT_HITL:…]` (CORE-002: no latest-run fallback)."
+                ),
+                "awaiting_hitl": False,
+                "messages": [],
+            }
 
-    if snap is not None and (
-        snap.next
-        or (snap.tasks and any(getattr(t, "interrupts", None) for t in (snap.tasks or [])))
-    ):
-        # Pending interrupt → treat as resume with continue/skip-all friendly text
-        interrupts = []
-        for task in snap.tasks or []:
-            interrupts.extend(list(getattr(task, "interrupts", None) or []))
-        if interrupts:
-            return await runtime.aresume(
-                tid,
-                "continue",
+        assert store is not None or rid
+        if store is None:
+            store = EvidenceStore.open_existing(
+                runtime.settings.evidence_dir,
+                rid,
                 client_id=cid,
                 audit_run_id=arid,
             )
-        slug = runtime._client_slug_from_values(snap.values or {})
-        with runtime._target_scope(
-            client_slug=slug,
-            intake=(snap.values or {}).get("intake")
-            if isinstance((snap.values or {}).get("intake"), dict)
-            else None,
-        ):
-            result = await graph.ainvoke(None, config)
-        values = (await graph.aget_state(config)).values or {}
-        run_id2 = values.get("evidence_run_id") or rid
-        if store is None and run_id2:
-            try:
-                store = EvidenceStore.open_existing(
-                    runtime.settings.evidence_dir,
-                    str(run_id2),
-                    client_id=cid,
-                    audit_run_id=arid,
-                )
-                runtime._evidence_by_run[store.run_id] = store
-            except Exception:  # noqa: BLE001
-                pass
-        decorated = runtime._decorate_result(result, thread_id=tid, store=store, intake=is_intake)
-        if decorated.get("awaiting_hitl"):
-            return decorated
-        if rid:
-            write_run_status(runtime.settings.evidence_dir, str(run_id2 or rid), status="running")
-        return await runtime._continue_multi_after_resume(tid, decorated)
+            runtime._evidence_by_run[rid] = store
+        store.require_ownership(client_id=cid, audit_run_id=arid)
 
-    # Evidence fallback: rebuild pending_ids from disk and re-enter assess.
-    if not rid:
-        return {
-            "report": (
-                "No audit run bound to this thread. "
-                "Pass an explicit evidence `run_id` / `audit_run_id`, or reply "
-                "from a message that still has `[AUDIT_CONTINUE:…]` / "
-                "`[AUDIT_HITL:…]` (CORE-002: no latest-run fallback)."
-            ),
-            "awaiting_hitl": False,
-            "messages": [],
-        }
+        meta = store.read_run_meta()
+        framework_id = str(meta.get("framework_id") or (tid.split(":")[-1] if ":" in tid else ""))
+        host_id = str(meta.get("evidence_host_id") or "")
+        if host_id:
+            store.host_segment = host_id
+        # Resolve framework folder under host if needed
+        fw_key = f"{host_id}/{framework_id}" if host_id else framework_id
+        disk_findings = store.load_findings(fw_key)
+        if not disk_findings and framework_id:
+            disk_findings = store.load_findings(framework_id)
 
-    assert store is not None or rid
-    if store is None:
-        store = EvidenceStore.open_existing(
-            runtime.settings.evidence_dir,
-            rid,
-            client_id=cid,
-            audit_run_id=arid,
+        from auditor.checklist import load_checklist
+        from auditor.frameworks import get_framework
+
+        fw = get_framework(framework_id, runtime.settings.agents_dir)
+        if fw is None:
+            return {
+                "report": f"Cannot continue: framework `{framework_id}` not found.",
+                "awaiting_hitl": False,
+            }
+        checklist = load_checklist(fw.path)
+        done = store.load_finding_requirement_ids(fw_key) or store.load_finding_requirement_ids(
+            framework_id
         )
-        runtime._evidence_by_run[rid] = store
-    store.require_ownership(client_id=cid, audit_run_id=arid)
+        pending = [rid_ for rid_ in checklist.ids() if rid_ not in done]
+        meta_pending = meta.get("pending_ids")
+        if isinstance(meta_pending, list) and meta_pending:
+            pending = [str(x) for x in meta_pending if str(x) not in done]
 
-    meta = store.read_run_meta()
-    framework_id = str(meta.get("framework_id") or (tid.split(":")[-1] if ":" in tid else ""))
-    host_id = str(meta.get("evidence_host_id") or "")
-    if host_id:
-        store.host_segment = host_id
-    # Resolve framework folder under host if needed
-    fw_key = f"{host_id}/{framework_id}" if host_id else framework_id
-    disk_findings = store.load_findings(fw_key)
-    if not disk_findings and framework_id:
-        disk_findings = store.load_findings(framework_id)
-
-    from auditor.checklist import load_checklist
-    from auditor.frameworks import get_framework
-
-    fw = get_framework(framework_id, runtime.settings.agents_dir)
-    if fw is None:
-        return {
-            "report": f"Cannot continue: framework `{framework_id}` not found.",
-            "awaiting_hitl": False,
-        }
-    checklist = load_checklist(fw.path)
-    done = store.load_finding_requirement_ids(fw_key) or store.load_finding_requirement_ids(
-        framework_id
-    )
-    pending = [rid_ for rid_ in checklist.ids() if rid_ not in done]
-    meta_pending = meta.get("pending_ids")
-    if isinstance(meta_pending, list) and meta_pending:
-        pending = [str(x) for x in meta_pending if str(x) not in done]
-
-    findings_objs: dict[str, Finding] = {}
-    for _key, raw in disk_findings.items():
-        try:
-            finding = Finding.model_validate(raw)
-            if not finding.result_id:
-                attach_result_identity(
-                    finding,
-                    state={
-                        "client_id": str(meta.get("client_id") or ""),
-                        "client_name": str(meta.get("client_name") or ""),
-                        "audit_run_id": str(meta.get("audit_run_id") or ""),
-                        "asset_id": str(meta.get("asset_id") or ""),
-                        "framework_version": str(
+        findings_objs: dict[str, Finding] = {}
+        for _key, raw in disk_findings.items():
+            try:
+                finding = Finding.model_validate(raw)
+                if not finding.result_id:
+                    attach_result_identity(
+                        finding,
+                        state={
+                            "client_id": str(meta.get("client_id") or ""),
+                            "client_name": str(meta.get("client_name") or ""),
+                            "audit_run_id": str(meta.get("audit_run_id") or ""),
+                            "asset_id": str(meta.get("asset_id") or ""),
+                            "framework_version": str(
+                                meta.get("framework_version") or getattr(fw, "version", "") or ""
+                            ),
+                        },
+                        framework_id=framework_id,
+                        framework_version=str(
                             meta.get("framework_version") or getattr(fw, "version", "") or ""
                         ),
-                    },
-                    framework_id=framework_id,
-                    framework_version=str(
-                        meta.get("framework_version") or getattr(fw, "version", "") or ""
-                    ),
-                    existing=raw,
-                )
-            if finding.result_id:
-                findings_objs[finding.result_id] = finding
-        except Exception:  # noqa: BLE001
-            continue
+                        existing=raw,
+                    )
+                if finding.result_id:
+                    findings_objs[finding.result_id] = finding
+            except Exception:  # noqa: BLE001
+                continue
 
-    write_run_status(
-        runtime.settings.evidence_dir,
-        rid,
-        status="running",
-        thread_id=tid,
-        pending_ids=pending,
-        framework_id=framework_id,
-    )
+        write_run_status(
+            runtime.settings.evidence_dir,
+            rid,
+            status="running",
+            thread_id=tid,
+            pending_ids=pending,
+            framework_id=framework_id,
+        )
 
-    continue_intake = meta.get("intake") if isinstance(meta.get("intake"), dict) else None
-    continue_slug = (
-        str(
-            meta.get("client_slug")
-            or ((continue_intake or {}).get("client_slug") if continue_intake else "")
-            or ""
-        ).strip()
-        or None
-    )
+        continue_intake = meta.get("intake") if isinstance(meta.get("intake"), dict) else None
+        continue_slug = (
+            str(
+                meta.get("client_slug")
+                or ((continue_intake or {}).get("client_slug") if continue_intake else "")
+                or ""
+            ).strip()
+            or None
+        )
 
-    if not pending:
-        # All REQs done — finalize via graph update + finalize node path
+        if not pending:
+            # All REQs done — finalize via graph update + finalize node path
+            await graph.aupdate_state(
+                config,
+                {
+                    "findings": findings_objs,
+                    "pending_ids": [],
+                    "requirements": {r.id: r for r in checklist.requirements},
+                    "framework_id": framework_id,
+                    "framework_title": fw.title,
+                    "checklist_title": checklist.title,
+                    "evidence_run_id": rid,
+                    "evidence_run_dir": str(store.root),
+                    "evidence_host_id": host_id,
+                    "thread_id": tid,
+                    "user_request": str(meta.get("user_request") or "continue"),
+                    "intake_complete": True,
+                    "awaiting_hitl": False,
+                },
+                as_node="assess_parallel",
+            )
+            with runtime._target_scope(client_slug=continue_slug, intake=continue_intake):
+                result = await graph.ainvoke(None, config)
+            decorated = runtime._decorate_result(result, thread_id=tid, store=store)
+            return await runtime._continue_multi_after_resume(tid, decorated)
+
         await graph.aupdate_state(
             config,
             {
                 "findings": findings_objs,
-                "pending_ids": [],
+                "pending_ids": pending,
                 "requirements": {r.id: r for r in checklist.requirements},
                 "framework_id": framework_id,
                 "framework_title": fw.title,
@@ -787,42 +818,18 @@ async def acontinue(
                 "user_request": str(meta.get("user_request") or "continue"),
                 "intake_complete": True,
                 "awaiting_hitl": False,
+                "retry_count": 0,
+                "hitl_skipped": list(meta.get("hitl_skipped") or []),
             },
-            as_node="assess_parallel",
+            as_node="load_framework",
         )
         with runtime._target_scope(client_slug=continue_slug, intake=continue_intake):
             result = await graph.ainvoke(None, config)
         decorated = runtime._decorate_result(result, thread_id=tid, store=store)
+        if decorated.get("awaiting_hitl"):
+            return decorated
+        write_run_status(runtime.settings.evidence_dir, rid, status="completed")
         return await runtime._continue_multi_after_resume(tid, decorated)
-
-    await graph.aupdate_state(
-        config,
-        {
-            "findings": findings_objs,
-            "pending_ids": pending,
-            "requirements": {r.id: r for r in checklist.requirements},
-            "framework_id": framework_id,
-            "framework_title": fw.title,
-            "checklist_title": checklist.title,
-            "evidence_run_id": rid,
-            "evidence_run_dir": str(store.root),
-            "evidence_host_id": host_id,
-            "thread_id": tid,
-            "user_request": str(meta.get("user_request") or "continue"),
-            "intake_complete": True,
-            "awaiting_hitl": False,
-            "retry_count": 0,
-            "hitl_skipped": list(meta.get("hitl_skipped") or []),
-        },
-        as_node="load_framework",
-    )
-    with runtime._target_scope(client_slug=continue_slug, intake=continue_intake):
-        result = await graph.ainvoke(None, config)
-    decorated = runtime._decorate_result(result, thread_id=tid, store=store)
-    if decorated.get("awaiting_hitl"):
-        return decorated
-    write_run_status(runtime.settings.evidence_dir, rid, status="completed")
-    return await runtime._continue_multi_after_resume(tid, decorated)
 
 
 async def arun_intake(
@@ -894,6 +901,8 @@ class ScopedCheckpointBundle:
     graph: Any
     intake_graph: Any
     conn: Any | None
+    refcount: int = 0
+    closed: bool = False
 
 
 def _conn_open(conn: Any | None) -> bool:
@@ -906,6 +915,19 @@ def _conn_open(conn: Any | None) -> bool:
         return not closed
     except Exception:  # noqa: BLE001
         return False
+
+
+async def _scope_lock(runtime: AuditRuntime, scope_key: str) -> asyncio.Lock:
+    meta = getattr(runtime, "_scoped_meta_lock", None)
+    locks = getattr(runtime, "_scoped_acquire_locks", None)
+    if meta is None or locks is None:
+        return asyncio.Lock()
+    async with meta:
+        lock = locks.get(scope_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[scope_key] = lock
+        return lock
 
 
 def _scoped_cache(runtime: AuditRuntime) -> dict[str, ScopedCheckpointBundle]:
@@ -924,6 +946,7 @@ async def acquire_run_checkpointer(
 ) -> ScopedCheckpointBundle:
     """Return a checkpointer/graph bundle for exact ``client_id`` + ``audit_run_id``.
 
+    Concurrent acquires for the same scope share one live bundle (refcounted).
     Does not mutate or close other run scopes. Never falls back to MemorySaver.
     """
     cid = require_client_id(client_id, context="acquire_run_checkpointer")
@@ -931,48 +954,164 @@ async def acquire_run_checkpointer(
     scope = resolve_run_scope(runtime.settings.evidence_dir, client_id=cid, audit_run_id=arid)
     key = f"{scope.client_id}:{scope.audit_run_id}"
     cache = _scoped_cache(runtime)
-    existing = cache.get(key)
-    if existing is not None and _conn_open(existing.conn):
-        return existing
-    if existing is not None:
-        # Reconnect this scope only — leave other runs untouched.
+    lock = await _scope_lock(runtime, key)
+    async with lock:
+        existing = cache.get(key)
+        if existing is not None and not existing.closed and _conn_open(existing.conn):
+            existing.refcount += 1
+            return existing
+        if existing is not None:
+            try:
+                await existing.sqlite_cm.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+            cache.pop(key, None)
+
+        if AsyncSqliteSaver is None:
+            raise CheckpointInitError(
+                "AsyncSqliteSaver is unavailable; cannot initialize durable "
+                f"checkpoints for client_id={cid!r} audit_run_id={arid!r}"
+            )
+        path = scope.checkpoint_db_path
         try:
-            await existing.sqlite_cm.__aexit__(None, None, None)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            sqlite_cm = AsyncSqliteSaver.from_conn_string(str(path))
+            checkpointer = await sqlite_cm.__aenter__()
+        except Exception as exc:  # noqa: BLE001
+            raise CheckpointInitError(
+                "failed to initialize AsyncSqliteSaver for "
+                f"client_id={cid!r} audit_run_id={arid!r} path={path}: {exc}"
+            ) from exc
+        conn = getattr(checkpointer, "conn", None)
+        graph = runtime._build(checkpointer=checkpointer)
+        intake_graph = runtime._build_intake(checkpointer=checkpointer)
+        bundle = ScopedCheckpointBundle(
+            scope_key=key,
+            client_id=cid,
+            audit_run_id=arid,
+            path=path,
+            checkpointer=checkpointer,
+            sqlite_cm=sqlite_cm,
+            graph=graph,
+            intake_graph=intake_graph,
+            conn=conn,
+            refcount=1,
+        )
+        cache[key] = bundle
+        return bundle
+
+
+async def release_run_checkpointer(
+    runtime: AuditRuntime,
+    *,
+    client_id: str,
+    audit_run_id: str,
+    close: bool = False,
+    force: bool = False,
+) -> None:
+    """Release a scoped checkpointer lease; close Sqlite when refcount hits zero."""
+    cid = require_client_id(client_id, context="release_run_checkpointer")
+    arid = require_audit_run_id(audit_run_id, context="release_run_checkpointer")
+    key = f"{cid}:{arid}"
+    cache = _scoped_cache(runtime)
+    lock = await _scope_lock(runtime, key)
+    async with lock:
+        bundle = cache.get(key)
+        if bundle is None or bundle.closed:
+            return
+        if not force:
+            bundle.refcount = max(0, bundle.refcount - 1)
+            if bundle.refcount > 0 or not close:
+                return
+        bundle.closed = True
+        try:
+            await bundle.sqlite_cm.__aexit__(None, None, None)
         except Exception:  # noqa: BLE001
             pass
         cache.pop(key, None)
 
-    if AsyncSqliteSaver is None:
-        raise CheckpointInitError(
-            "AsyncSqliteSaver is unavailable; cannot initialize durable "
-            f"checkpoints for client_id={cid!r} audit_run_id={arid!r}"
-        )
-    path = scope.checkpoint_db_path
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        sqlite_cm = AsyncSqliteSaver.from_conn_string(str(path))
-        checkpointer = await sqlite_cm.__aenter__()
-    except Exception as exc:  # noqa: BLE001
-        raise CheckpointInitError(
-            "failed to initialize AsyncSqliteSaver for "
-            f"client_id={cid!r} audit_run_id={arid!r} path={path}: {exc}"
-        ) from exc
-    conn = getattr(checkpointer, "conn", None)
-    graph = runtime._build(checkpointer=checkpointer)
-    intake_graph = runtime._build_intake(checkpointer=checkpointer)
-    bundle = ScopedCheckpointBundle(
-        scope_key=key,
+
+async def reconnect_run_checkpointer(
+    runtime: AuditRuntime,
+    *,
+    client_id: str,
+    audit_run_id: str,
+) -> ScopedCheckpointBundle:
+    """Close and reopen the scoped bundle for one run only."""
+    cid = require_client_id(client_id, context="reconnect_run_checkpointer")
+    arid = require_audit_run_id(audit_run_id, context="reconnect_run_checkpointer")
+    await release_run_checkpointer(
+        runtime,
         client_id=cid,
         audit_run_id=arid,
-        path=path,
-        checkpointer=checkpointer,
-        sqlite_cm=sqlite_cm,
-        graph=graph,
-        intake_graph=intake_graph,
-        conn=conn,
+        close=True,
+        force=True,
     )
-    cache[key] = bundle
-    return bundle
+    return await acquire_run_checkpointer(runtime, client_id=cid, audit_run_id=arid)
+
+
+async def release_run_resources(
+    runtime: AuditRuntime,
+    *,
+    client_id: str,
+    audit_run_id: str,
+) -> None:
+    """Drop in-memory handles for one terminal run (never deletes durable artifacts)."""
+    cid = require_client_id(client_id, context="release_run_resources")
+    arid = require_audit_run_id(audit_run_id, context="release_run_resources")
+    registry = getattr(runtime, "task_registry", None)
+    if registry is not None:
+        await registry.cancel_run(client_id=cid, audit_run_id=arid)
+    await release_run_checkpointer(
+        runtime,
+        client_id=cid,
+        audit_run_id=arid,
+        close=True,
+        force=True,
+    )
+    to_pop: list[str] = []
+    for run_id, store in runtime._evidence_by_run.items():
+        try:
+            meta = store.read_run_meta()
+        except Exception:  # noqa: BLE001
+            continue
+        if str(meta.get("audit_run_id") or "") == arid and str(meta.get("client_id") or "") == cid:
+            to_pop.append(run_id)
+    for run_id in to_pop:
+        runtime._evidence_by_run.pop(run_id, None)
+    thread_ids = [
+        tid
+        for tid, sess in runtime._multi_sessions.items()
+        if isinstance(sess, dict)
+        and str(sess.get("audit_run_id") or "") == arid
+        and (not sess.get("client_id") or str(sess.get("client_id")) == cid)
+    ]
+    for tid in thread_ids:
+        runtime._multi_sessions.pop(tid, None)
+
+
+@asynccontextmanager
+async def _checkpointer_lease(
+    runtime: AuditRuntime,
+    *,
+    client_id: str,
+    audit_run_id: str,
+):
+    """Acquire a scoped checkpointer lease; release refcount in ``finally``."""
+    scoped = await acquire_run_checkpointer(
+        runtime,
+        client_id=client_id,
+        audit_run_id=audit_run_id,
+    )
+    try:
+        yield scoped
+    finally:
+        await release_run_checkpointer(
+            runtime,
+            client_id=client_id,
+            audit_run_id=audit_run_id,
+            close=False,
+        )
 
 
 async def ensure_async_checkpointer(
@@ -1055,6 +1194,7 @@ def target_scope(
     if not slug and intake:
         slug = str(intake.get("client_slug") or "").strip()
     with ExitStack() as stack:
+        stack.enter_context(bind_app_settings(runtime.settings))
         if slug:
             try:
                 creds = read_client_credentials(runtime.settings.inventory_dir, slug)

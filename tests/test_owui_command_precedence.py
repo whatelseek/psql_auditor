@@ -19,7 +19,8 @@ async def test_list_sessions_wins_over_stale_intake_marker(monkeypatch):
     settings = MagicMock()
     settings.agents_dir = "agents"
     settings.adhoc_commands_enabled = True
-    monkeypatch.setattr("auditor.api.openai_compat.get_settings", lambda: settings)
+    runtime = MagicMock()
+    runtime.settings = settings
 
     body = ChatCompletionRequest(
         messages=[
@@ -35,7 +36,7 @@ async def test_list_sessions_wins_over_stale_intake_marker(monkeypatch):
         ]
     )
 
-    result = await _run_or_resume_once(auditor, body)
+    result = await _run_or_resume_once(runtime, auditor, body, settings=settings)
     assert result["report"] == "ok"
     auditor.alist_sessions.assert_awaited_once_with("List audit sessions")
     auditor.aresume.assert_not_awaited()
@@ -51,7 +52,8 @@ async def test_plain_intake_answer_still_resumes(monkeypatch):
     settings = MagicMock()
     settings.agents_dir = "agents"
     settings.adhoc_commands_enabled = True
-    monkeypatch.setattr("auditor.api.openai_compat.get_settings", lambda: settings)
+    runtime = MagicMock()
+    runtime.settings = settings
 
     body = ChatCompletionRequest(
         messages=[
@@ -67,7 +69,7 @@ async def test_plain_intake_answer_still_resumes(monkeypatch):
         ]
     )
 
-    result = await _run_or_resume_once(auditor, body)
+    result = await _run_or_resume_once(runtime, auditor, body, settings=settings)
     assert result["report"] == "resumed"
     auditor.aresume.assert_awaited_once_with("audit-abc:intake", "testcompany")
     auditor.alist_sessions.assert_not_awaited()

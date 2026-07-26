@@ -61,7 +61,8 @@ from auditor.intake import (
 )
 from auditor.llm import build_chat_model
 from auditor.memory.playbook_store import PlaybookMemory
-from auditor.tools.mcp_client import get_mcp_tools
+from auditor.task_registry import TaskRegistry
+from auditor.tools.mcp_client import PostgresMcpPool, build_mcp_tools
 from auditor.tools.ssh import get_ssh_tools
 from auditor.tools.winrm import get_winrm_tools
 from auditor.workflows import assessment as _wf_assessment
@@ -101,9 +102,10 @@ __all__ = [
 ]
 
 
-def _all_tools() -> list:
+def _all_tools(mcp_pool: PostgresMcpPool | None = None) -> list:
     """Collect LangChain tools for evidence gathering."""
-    return [*get_ssh_tools(), *get_winrm_tools(), *get_mcp_tools()]
+    pool = mcp_pool or PostgresMcpPool()
+    return [*get_ssh_tools(), *get_winrm_tools(), *build_mcp_tools(pool)]
 
 
 def _host_tools() -> list:
@@ -119,14 +121,29 @@ class AuditorGraph:
     across HITL pauses.
     """
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        mcp_pool: PostgresMcpPool | None = None,
+        results_store: Any | None = None,
+        task_registry: TaskRegistry | None = None,
+    ) -> None:
         """Wire settings, models, tools, memory, and compile LangGraph workflows.
 
         Args:
             settings: Application settings; defaults to ``get_settings()``.
+            mcp_pool: Runtime-owned MCP pool; a private pool is created when omitted.
+            results_store: Optional results warehouse bound into playbooks/tools.
+            task_registry: Background task registry (created when omitted).
         """
         self.settings = settings or get_settings()
-        self.tools = _all_tools()
+        self._owns_mcp_pool = mcp_pool is None
+        self.mcp_pool = mcp_pool or PostgresMcpPool(size=self.settings.mcp_postgres_pool_size)
+        self.results_store = results_store
+        self._owns_task_registry = task_registry is None
+        self.task_registry = task_registry or TaskRegistry()
+        self.tools = _all_tools(self.mcp_pool)
         self.tools_by_name = {t.name: t for t in self.tools}
         self._evidence = EvidenceRegistry()
         # Shared dict for back-compat with followup/adhoc/tests.
@@ -137,6 +154,8 @@ class AuditorGraph:
         self._checkpoint_conn = None
         self._checkpoint_scope_key = ""
         self._scoped_checkpoints: dict[str, Any] = {}
+        self._scoped_acquire_locks: dict[str, asyncio.Lock] = {}
+        self._scoped_meta_lock = asyncio.Lock()
         self._async_cp_ready = False
         self._sqlite_cm = None
         self._orphan_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -146,6 +165,7 @@ class AuditorGraph:
                 memory_dir=self.settings.memory_dir,
                 learn=self.settings.memory_learn,
                 settings=self.settings,
+                results_store=self.results_store,
             )
             if self.settings.memory_enabled
             else None
@@ -163,6 +183,9 @@ class AuditorGraph:
             playbooks=self.playbooks,
             evidence=self._evidence,
             multi_sessions=self._multi,
+            mcp_pool=self.mcp_pool,
+            results_store=self.results_store,
+            task_registry=self.task_registry,
             orphan_tasks=self._orphan_tasks,
         )
         self.graph = self._build()
@@ -342,6 +365,35 @@ class AuditorGraph:
 
     async def acontinue(self, *args, **kwargs):
         return await _wf_runner.acontinue(self, *args, **kwargs)
+
+    async def aclose_runtime_resources(self, timeout: float = 10.0) -> None:
+        """Close scoped checkpoints and clear in-memory run registries."""
+        from auditor.workflows.runner import release_run_checkpointer
+
+        cache = dict(self._scoped_checkpoints)
+        for bundle in cache.values():
+            await release_run_checkpointer(
+                self,
+                client_id=bundle.client_id,
+                audit_run_id=bundle.audit_run_id,
+                close=True,
+                force=True,
+            )
+        if self._sqlite_cm is not None:
+            try:
+                await self._sqlite_cm.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+            self._sqlite_cm = None
+        self._checkpoint_conn = None
+        self._async_cp_ready = False
+        self._evidence.stores.clear()
+        self._multi.sessions.clear()
+        self._scoped_acquire_locks.clear()
+        if self._owns_mcp_pool:
+            await self.mcp_pool.close()
+        if self._owns_task_registry:
+            await self.task_registry.shutdown(timeout=timeout)
 
     def cancel_audit_run(self, audit_run_id: str):
         """Cancel open jobs and the AuditRun (same ``audit_run_id``)."""
@@ -573,7 +625,10 @@ _graph: AuditorGraph | None = None
 
 
 def get_auditor_graph() -> AuditorGraph:
-    """Return the process-wide singleton ``AuditorGraph`` (lazy-initialized)."""
+    """Deprecated/test-only process-wide ``AuditorGraph`` (lazy-initialized).
+
+    Production HTTP handlers must use :class:`~auditor.application_runtime.ApplicationRuntime`.
+    """
     global _graph
     if _graph is None:
         _graph = AuditorGraph()
@@ -581,14 +636,20 @@ def get_auditor_graph() -> AuditorGraph:
 
 
 async def get_auditor_graph_ready() -> AuditorGraph:
-    """Return the singleton after durable Sqlite checkpointer setup."""
+    """Deprecated/test-only: singleton after legacy Sqlite checkpointer setup.
+
+    Not for production API paths.
+    """
     graph = get_auditor_graph()
     await graph.ensure_async_checkpointer()
     return graph
 
 
 async def reset_auditor_checkpointer() -> AuditorGraph:
-    """Force-reopen the Sqlite checkpointer after a closed-connection failure."""
+    """Deprecated/test-only: reopen legacy process checkpointer on the singleton.
+
+    Production retry must call ``runtime.reconnect_run_checkpointer`` for the run.
+    """
     graph = get_auditor_graph()
     graph._async_cp_ready = False
     graph._checkpoint_conn = None

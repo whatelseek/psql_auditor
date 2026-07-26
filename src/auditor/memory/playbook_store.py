@@ -92,6 +92,7 @@ class PlaybookMemory:
         memory_dir: Path | str,
         learn: bool = True,
         settings: Settings | None = None,
+        results_store: Any | None = None,
     ) -> None:
         """Create memory and load seeds + learned entries.
 
@@ -106,6 +107,7 @@ class PlaybookMemory:
         self.memory_dir = Path(memory_dir)
         self.learn = learn
         self.settings = settings
+        self._injected_results_store = results_store
         self._store = InMemoryStore()
         self._lock = threading.Lock()
         self._dirty = False
@@ -122,7 +124,10 @@ class PlaybookMemory:
             self._tracked_framework_ids.add(bare)
 
     def _results_store(self):
-        """Return enabled ResultsStore when settings configure the warehouse."""
+        """Return injected or context-bound ResultsStore when enabled."""
+        if self._injected_results_store is not None:
+            store = self._injected_results_store
+            return store if getattr(store, "enabled", False) else None
         if self.settings is None:
             return None
         from auditor.results_store import get_results_store

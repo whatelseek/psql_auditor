@@ -37,7 +37,6 @@ from auditor.results_store import (
 )
 from auditor.session_store import write_run_status
 from auditor.state import AuditorState, Finding
-from auditor.tools.mcp_client import reconnect_mcp_session
 from auditor.workflows.helpers import (
     _extract_json,
     _is_recoverable_finding,
@@ -356,7 +355,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
 
 async def reconnect_session(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
     """Node: restore MCP sessions and bump retry counter (graph cycle)."""
-    status = await reconnect_mcp_session()
+    status = await runtime.mcp_pool.reconnect()
     retry_count = int(state.get("retry_count") or 0) + 1
     pending = state.get("pending_ids") or []
     return {

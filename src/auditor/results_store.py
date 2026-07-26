@@ -33,7 +33,7 @@ Pipeline role:
 
 Key entry points:
     :class:`ResultsStore` — async PostgreSQL access and schema management.
-    :func:`get_results_store` — singleton when ``RESULTS_DB_ENABLED``.
+    :func:`get_results_store` — context-bound or ephemeral when ``RESULTS_DB_ENABLED``.
     :func:`resolve_continue_target` — map explicit continue targets (no latest-run).
 """
 
@@ -42,6 +42,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +62,7 @@ from auditor.domain.result_identity import (
     validate_result_identity,
 )
 from auditor.intake import client_slug as make_client_slug
+from auditor.runtime_target import get_app_settings
 from auditor.state import Finding
 
 logger = logging.getLogger(__name__)
@@ -2179,13 +2182,33 @@ class ResultsStore:
             return 0
 
 
-_STORE: ResultsStore | None = None
+class _ResultsStoreUnset:
+    """Sentinel: no ContextVar binding active."""
+
+
+_RESULTS_STORE_UNSET = _ResultsStoreUnset()
+_results_store_ctx: ContextVar[ResultsStore | None | _ResultsStoreUnset] = ContextVar(
+    "_results_store_ctx",
+    default=_RESULTS_STORE_UNSET,
+)
+
+
+@contextmanager
+def bind_results_store(store: ResultsStore | None):
+    """Bind ``store`` (including explicit ``None``) for the current context."""
+    token = _results_store_ctx.set(store)
+    try:
+        yield store
+    finally:
+        _results_store_ctx.reset(token)
 
 
 def get_results_store(settings: Settings | None = None) -> ResultsStore | None:
-    """Return a process-wide :class:`ResultsStore` when enabled, else ``None``.
+    """Return the bound or ephemeral :class:`ResultsStore` when enabled.
 
-    Caches a singleton per settings instance.
+    When :func:`bind_results_store` is active (including explicit ``None``),
+    returns that binding. Otherwise constructs a fresh store from ``settings``
+    or application settings — no module-level singleton.
 
     Args:
         settings: Optional settings override.
@@ -2193,12 +2216,13 @@ def get_results_store(settings: Settings | None = None) -> ResultsStore | None:
     Returns:
         Enabled store instance, or ``None`` when results DB is disabled.
     """
-    global _STORE
-    settings = settings or get_settings()
-    store = _STORE
-    if store is None or store.settings is not settings:
-        store = ResultsStore(settings)
-        _STORE = store
+    bound = _results_store_ctx.get()
+    if not isinstance(bound, _ResultsStoreUnset):
+        if bound is None:
+            return None
+        return bound if bound.enabled else None
+    snap = settings or get_app_settings() or get_settings()
+    store = ResultsStore(snap)
     return store if store.enabled else None
 
 

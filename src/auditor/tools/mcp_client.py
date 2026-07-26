@@ -58,6 +58,10 @@ _TRANSPORT_EXC_NAMES = frozenset(
 )
 
 
+class McpPoolClosedError(RuntimeError):
+    """Raised when a closed MCP pool is used."""
+
+
 def _postgres_blocked_tools(settings: Settings) -> frozenset[str]:
     """Merge hard-coded blocked tools with ``mcps/registry.json`` for postgres."""
     blocked = set(_BLOCKED_REMOTE_TOOLS)
@@ -318,6 +322,7 @@ class PostgresMcpPool:
         self._queue: asyncio.Queue[PostgresMcpSession] | None = None
         self._init_lock = asyncio.Lock()
         self._size = 0
+        self._closed = False
 
     @property
     def size(self) -> int:
@@ -346,6 +351,8 @@ class PostgresMcpPool:
 
     async def _ensure(self, settings: Settings) -> None:
         """Lazily create ``PostgresMcpSession`` workers and the release queue."""
+        if self._closed:
+            raise McpPoolClosedError("PostgresMcpPool is closed")
         if self._queue is not None:
             return
         async with self._init_lock:
@@ -376,6 +383,8 @@ class PostgresMcpPool:
         Returns:
             Formatted MCP result from the borrowed worker.
         """
+        if self._closed:
+            raise McpPoolClosedError("PostgresMcpPool is closed")
         settings = settings or effective_settings()
         await self._ensure(settings)
         assert self._queue is not None
@@ -387,6 +396,8 @@ class PostgresMcpPool:
 
     async def list_tools(self, settings: Settings | None = None) -> str:
         """List tools via one pooled session (same as single-session ``list_tools``)."""
+        if self._closed:
+            raise McpPoolClosedError("PostgresMcpPool is closed")
         settings = settings or effective_settings()
         await self._ensure(settings)
         assert self._queue is not None
@@ -399,6 +410,9 @@ class PostgresMcpPool:
     async def close(self) -> None:
         """Close every pooled MCP subprocess."""
         async with self._init_lock:
+            if self._closed:
+                return
+            self._closed = True
             sessions = list(self._sessions)
             self._sessions = []
             self._queue = None
@@ -415,6 +429,8 @@ class PostgresMcpPool:
         Returns:
             Aggregate success message or first failure summary.
         """
+        if self._closed:
+            raise McpPoolClosedError("PostgresMcpPool is closed")
         settings = settings or effective_settings()
         await self._ensure(settings)
         results = [await session.reconnect(settings) for session in self._sessions]
@@ -425,18 +441,6 @@ class PostgresMcpPool:
                 f"pool workers: {failures[0]}"
             )
         return f"MCP session pool reconnected successfully ({len(results)} workers)"
-
-
-_POOL = PostgresMcpPool()
-
-
-async def reconnect_mcp_session() -> str:
-    """Public helper to recycle every pooled Postgres MCP session.
-
-    Returns:
-        Result from ``PostgresMcpPool.reconnect``.
-    """
-    return await _POOL.reconnect()
 
 
 def _format_mcp_result(result: Any) -> str:
@@ -533,122 +537,110 @@ def _reject_if_not_readonly(sql: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-@tool
-async def mcp_connect_db(
-    host: str = "",
-    port: int = 5432,
-    user: str = "",
-    password: str = "",
-    database: str = "",
-) -> str:
-    """Connect the Postgres MCP server to a database (antonorlov/mcp-postgres-server).
+def build_mcp_tools(pool: PostgresMcpPool) -> list:
+    """Build LangChain MCP tools bound to ``pool`` (production/runtime-owned)."""
 
-    Usually unnecessary when PG_HOST / PG_USER / PG_PASSWORD / PG_DATABASE are
-    already set in the environment — the MCP server auto-connects. Use this when
-    switching targets mid-audit or recovering from a failed connection.
+    @tool
+    async def mcp_connect_db(
+        host: str = "",
+        port: int = 5432,
+        user: str = "",
+        password: str = "",
+        database: str = "",
+    ) -> str:
+        """Connect the Postgres MCP server to a database (antonorlov/mcp-postgres-server).
 
-    Credentials are never echoed back; evidence logs redact ``password``.
-    """
-    settings = effective_settings()
-    args = {
-        "host": host or settings.pg_host or "",
-        "port": port or settings.pg_port,
-        "user": user or settings.pg_user,
-        "password": password or (settings.pg_password or ""),
-        "database": database or settings.pg_database,
-    }
-    missing = [k for k in ("host", "user", "password", "database") if not args[k]]
-    if missing:
+        Usually unnecessary when PG_HOST / PG_USER / PG_PASSWORD / PG_DATABASE are
+        already set in the environment — the MCP server auto-connects. Use this when
+        switching targets mid-audit or recovering from a failed connection.
+
+        Credentials are never echoed back; evidence logs redact ``password``.
+        """
+        settings = effective_settings()
+        args = {
+            "host": host or settings.pg_host or "",
+            "port": port or settings.pg_port,
+            "user": user or settings.pg_user,
+            "password": password or (settings.pg_password or ""),
+            "database": database or settings.pg_database,
+        }
+        missing = [k for k in ("host", "user", "password", "database") if not args[k]]
+        if missing:
+            return (
+                "MCP error: connect_db missing "
+                + ", ".join(missing)
+                + ". Set PG_* / DATABASE_URL in the environment or pass full credentials."
+            )
+        result = await pool.call_tool("connect_db", args, settings=settings)
+        if result.lower().startswith("mcp error"):
+            return result
         return (
-            "MCP error: connect_db missing "
-            + ", ".join(missing)
-            + ". Set PG_* / DATABASE_URL in the environment or pass full credentials."
+            f"MCP connect_db ok (host={args['host']}, port={args['port']}, "
+            f"user={args['user']}, database={args['database']})"
         )
-    result = await _POOL.call_tool("connect_db", args, settings=settings)
-    # Never echo password-bearing args in the tool return path.
-    if result.lower().startswith("mcp error"):
-        return result
-    return (
-        f"MCP connect_db ok (host={args['host']}, port={args['port']}, "
-        f"user={args['user']}, database={args['database']})"
-    )
 
+    @tool
+    async def mcp_query(sql: str, params_json: str = "[]") -> str:
+        """Run a read-only SELECT against PostgreSQL via LangChain MCP adapters.
 
-@tool
-async def mcp_query(sql: str, params_json: str = "[]") -> str:
-    """Run a read-only SELECT against PostgreSQL via LangChain MCP adapters.
+        Prefer catalog SELECTs, e.g.:
+        - SELECT name, setting FROM pg_settings WHERE name = 'ssl'
+        - SELECT rolname, rolsuper FROM pg_roles
 
-    Prefer catalog SELECTs, e.g.:
-    - SELECT name, setting FROM pg_settings WHERE name = 'ssl'
-    - SELECT rolname, rolsuper FROM pg_roles
+        SHOW statements are auto-rewritten to pg_settings SELECTs. Mutating SQL is
+        not allowed (remote ``execute`` is not exposed).
+        """
+        try:
+            params = json.loads(params_json) if params_json else []
+            if not isinstance(params, list):
+                return "MCP error: params_json must be a JSON array"
+        except json.JSONDecodeError as exc:
+            return f"MCP error: invalid params_json: {exc}"
 
-    SHOW statements are auto-rewritten to pg_settings SELECTs. Mutating SQL is
-    not allowed (remote ``execute`` is not exposed).
-    """
-    try:
-        params = json.loads(params_json) if params_json else []
-        if not isinstance(params, list):
-            return "MCP error: params_json must be a JSON array"
-    except json.JSONDecodeError as exc:
-        return f"MCP error: invalid params_json: {exc}"
+        rewritten = rewrite_show_to_select(sql)
+        rejected = _reject_if_not_readonly(rewritten)
+        if rejected:
+            return rejected
+        return await pool.call_tool(
+            "query",
+            {"sql": rewritten, "params": params},
+        )
 
-    rewritten = rewrite_show_to_select(sql)
-    rejected = _reject_if_not_readonly(rewritten)
-    if rejected:
-        return rejected
-    return await _POOL.call_tool(
-        "query",
-        {"sql": rewritten, "params": params},
-    )
+    @tool
+    async def mcp_list_schemas() -> str:
+        """List database schemas via antonorlov/mcp-postgres-server (LangChain MCP)."""
+        return await pool.call_tool("list_schemas", {})
 
+    @tool
+    async def mcp_list_tables(schema_name: str = "public") -> str:
+        """List tables in a schema via antonorlov/mcp-postgres-server (LangChain MCP)."""
+        return await pool.call_tool("list_tables", {"schema": schema_name})
 
-@tool
-async def mcp_list_schemas() -> str:
-    """List database schemas via antonorlov/mcp-postgres-server (LangChain MCP)."""
-    return await _POOL.call_tool("list_schemas", {})
+    @tool
+    async def mcp_describe_table(table: str, schema_name: str = "public") -> str:
+        """Describe a table's columns via antonorlov/mcp-postgres-server (LangChain MCP)."""
+        return await pool.call_tool(
+            "describe_table",
+            {"table": table, "schema": schema_name},
+        )
 
+    @tool
+    async def mcp_list_tools() -> str:
+        """List tools exposed by the configured antonorlov/mcp-postgres-server."""
+        return await pool.list_tools()
 
-@tool
-async def mcp_list_tables(schema_name: str = "public") -> str:
-    """List tables in a schema via antonorlov/mcp-postgres-server (LangChain MCP)."""
-    return await _POOL.call_tool("list_tables", {"schema": schema_name})
+    @tool
+    async def mcp_list_servers() -> str:
+        """List MCP servers from ``mcps/registry.json`` and credential readiness.
 
+        Does not print secrets. Use this to see which DB MCPs are enabled and whether
+        inventory/settings look configured. To add a server, edit the registry and
+        inventory — do not write passwords into ``registry.json``.
+        """
+        settings = effective_settings()
+        registry = load_mcp_registry(settings.mcps_dir)
+        return format_registry_markdown(registry, settings)
 
-@tool
-async def mcp_describe_table(table: str, schema_name: str = "public") -> str:
-    """Describe a table's columns via antonorlov/mcp-postgres-server (LangChain MCP)."""
-    return await _POOL.call_tool(
-        "describe_table",
-        {"table": table, "schema": schema_name},
-    )
-
-
-@tool
-async def mcp_list_tools() -> str:
-    """List tools exposed by the configured antonorlov/mcp-postgres-server."""
-    return await _POOL.list_tools()
-
-
-@tool
-async def mcp_list_servers() -> str:
-    """List MCP servers from ``mcps/registry.json`` and credential readiness.
-
-    Does not print secrets. Use this to see which DB MCPs are enabled and whether
-    inventory/settings look configured. To add a server, edit the registry and
-    inventory — do not write passwords into ``registry.json``.
-    """
-    settings = effective_settings()
-    registry = load_mcp_registry(settings.mcps_dir)
-    return format_registry_markdown(registry, settings)
-
-
-def get_mcp_tools() -> list:
-    """Return curated LangChain tools for bound MCP servers.
-
-    Returns:
-        Postgres ``mcp_*`` tools, optional Microsoft Learn docs tools, and
-        ``mcp_list_servers`` for ``bind_tools``.
-    """
     from auditor.tools.mslearn_mcp import get_microsoft_learn_tools
 
     return [
@@ -661,3 +653,31 @@ def get_mcp_tools() -> list:
         mcp_list_servers,
         *get_microsoft_learn_tools(),
     ]
+
+
+_COMPAT_POOL = PostgresMcpPool()
+_compat_tools = build_mcp_tools(_COMPAT_POOL)
+_compat_by_name = {t.name: t for t in _compat_tools}
+mcp_connect_db = _compat_by_name["mcp_connect_db"]
+mcp_query = _compat_by_name["mcp_query"]
+mcp_list_schemas = _compat_by_name["mcp_list_schemas"]
+mcp_list_tables = _compat_by_name["mcp_list_tables"]
+mcp_describe_table = _compat_by_name["mcp_describe_table"]
+mcp_list_tools = _compat_by_name["mcp_list_tools"]
+mcp_list_servers = _compat_by_name["mcp_list_servers"]
+
+
+async def reconnect_mcp_session() -> str:
+    """Deprecated: recycle the module-level compat MCP pool (tests only).
+
+    Production code must call ``runtime.mcp_pool.reconnect()`` instead.
+    """
+    return await _COMPAT_POOL.reconnect()
+
+
+def get_mcp_tools() -> list:
+    """Deprecated/test-compat: tools bound to the module ``_COMPAT_POOL``.
+
+    Production graphs must use :func:`build_mcp_tools` with a runtime-owned pool.
+    """
+    return list(_compat_tools)

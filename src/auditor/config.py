@@ -267,18 +267,27 @@ class Settings(BaseSettings):
         return env
 
 
-@lru_cache
-def get_settings() -> Settings:
-    """Return a process-wide cached ``Settings`` instance.
+def load_settings() -> Settings:
+    """Parse environment into a fresh immutable ``Settings`` snapshot.
 
-    Loads ``secrets/connection.md`` (SSH/PG/MCP) before reading the environment.
-    Caching avoids re-reading on every tool call. Call
-    ``get_settings.cache_clear()`` in tests after mutating ``os.environ``.
-
-    Returns:
-        The singleton ``Settings`` object for this process.
+    Used at the application composition boundary (:class:`ApplicationRuntime` /
+    :func:`create_app`). Does not cache; callers own the returned instance.
     """
     from auditor.secrets_file import load_connection_secrets
 
     load_connection_secrets()
     return Settings()
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return a process-wide cached ``Settings`` instance (CLI / legacy tests).
+
+    Production FastAPI paths must use the settings snapshot owned by
+    :class:`~auditor.application_runtime.ApplicationRuntime` instead.
+    Call ``get_settings.cache_clear()`` in tests after mutating ``os.environ``.
+
+    Returns:
+        The singleton ``Settings`` object for this process.
+    """
+    return load_settings()
