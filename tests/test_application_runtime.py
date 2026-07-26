@@ -56,7 +56,7 @@ async def test_two_fastapi_apps_isolated_state(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_same_scope_concurrent_acquire_shared_refcount(tmp_path: Path) -> None:
+async def test_same_scope_concurrent_acquire_shared_lease_count(tmp_path: Path) -> None:
     settings = Settings(
         _env_file=None,
         evidence_dir=tmp_path,
@@ -86,22 +86,16 @@ async def test_same_scope_concurrent_acquire_shared_refcount(tmp_path: Path) -> 
 
     b1, b2 = await asyncio.gather(_acquire(), _acquire())
     assert b1 is b2
-    assert b1.refcount == 2
+    assert b1.lease_count == 2
     await release_run_checkpointer(
-        graph,
-        client_id=CLIENT_ALPHA_ID,
-        audit_run_id=RUN_ALPHA_CURRENT_ID,
-        close=False,
+        graph, client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_CURRENT_ID
     )
-    assert b1.refcount == 1
+    assert b1.lease_count == 1
     assert not b1.closed
     await release_run_checkpointer(
-        graph,
-        client_id=CLIENT_ALPHA_ID,
-        audit_run_id=RUN_ALPHA_CURRENT_ID,
-        close=False,
+        graph, client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_CURRENT_ID
     )
-    assert b1.refcount == 0
+    assert b1.lease_count == 0
     assert not b1.closed
     await graph.aclose_runtime_resources()
 
@@ -180,10 +174,7 @@ async def test_restart_new_runtime_resumes_scoped_checkpoint(tmp_path: Path) -> 
     )
     db_path = bundle_a.path
     await release_run_checkpointer(
-        runtime_a.graph,
-        client_id=CLIENT_ALPHA_ID,
-        audit_run_id=RUN_ALPHA_CURRENT_ID,
-        close=False,
+        runtime_a.graph, client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_CURRENT_ID
     )
     await runtime_a.close()
     assert db_path.is_file()
@@ -198,6 +189,11 @@ async def test_restart_new_runtime_resumes_scoped_checkpoint(tmp_path: Path) -> 
     )
     snap = await bundle_b.graph.aget_state(cfg)
     assert snap.values.get("audit_run_id") == RUN_ALPHA_CURRENT_ID
+    await release_run_checkpointer(
+        runtime_b.graph,
+        client_id=CLIENT_ALPHA_ID,
+        audit_run_id=RUN_ALPHA_CURRENT_ID,
+    )
     await runtime_b.close()
 
 
@@ -311,4 +307,10 @@ async def test_concurrent_runs_on_one_runtime_isolated(tmp_path: Path) -> None:
     assert not t_beta.done()
     assert graph._multi_sessions[f"audit:{CLIENT_BETA_ID}:{RUN_BETA_CURRENT_ID}"]["k"] == 2
     t_beta.cancel()
+    await release_run_checkpointer(
+        graph, client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_CURRENT_ID
+    )
+    await release_run_checkpointer(
+        graph, client_id=CLIENT_BETA_ID, audit_run_id=RUN_BETA_CURRENT_ID
+    )
     await runtime.close()

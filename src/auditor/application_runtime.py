@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager, contextmanager
 from enum import Enum
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Iterator
@@ -21,8 +22,8 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Iterator
 from auditor.config import Settings, load_settings
 from auditor.results_store import ResultsStore, bind_results_store
 from auditor.runtime_target import bind_app_settings
-from auditor.task_registry import TaskRegistry
-from auditor.tools.mcp_client import PostgresMcpPool
+from auditor.task_registry import TaskRegistry, TaskRegistryShutdownTimeoutError
+from auditor.tools.mcp_client import McpPoolShutdownTimeoutError, PoolState, PostgresMcpPool
 
 if TYPE_CHECKING:
     from auditor.graph import AuditorGraph
@@ -68,7 +69,10 @@ class ApplicationRuntime:
         self.settings = settings
         self.shutdown_timeout = shutdown_timeout
         self.state = RuntimeState.CREATED
-        self.mcp_pool = mcp_pool or PostgresMcpPool(size=settings.mcp_postgres_pool_size)
+        self.mcp_pool = mcp_pool or PostgresMcpPool(
+            size=settings.mcp_postgres_pool_size,
+            shutdown_timeout=min(5.0, shutdown_timeout),
+        )
         self._owns_mcp_pool = mcp_pool is None
         if results_store is not None:
             self.results_store: ResultsStore | None = results_store
@@ -120,40 +124,63 @@ class ApplicationRuntime:
                 return self
             except Exception as exc:
                 logger.exception("application runtime startup failed")
-                await self._close_unlocked(reason="startup_failure")
+                try:
+                    await self._close_unlocked(reason="startup_failure")
+                except RuntimeShutdownTimeoutError:
+                    logger.warning("startup failure cleanup timed out; runtime left CLOSING")
                 raise RuntimeStartupError(f"application runtime startup failed: {exc}") from exc
 
     async def close(self) -> None:
-        """Idempotent shutdown of all owned resources."""
+        """Idempotent shutdown of all owned resources.
+
+        ``CLOSED → close()`` is a no-op. ``CLOSING → close()`` resumes drain
+        under the remaining overall deadline. Success transitions to ``CLOSED``
+        only after all owned resources are actually closed.
+        """
         async with self._close_lock:
             await self._close_unlocked(reason="shutdown")
+
+    def _remaining(self, deadline: float) -> float:
+        return max(0.0, deadline - time.monotonic())
 
     async def _close_unlocked(self, *, reason: str) -> None:
         if self.state is RuntimeState.CLOSED:
             return
+        # Resume incomplete shutdown or begin a new one with one monotonic deadline.
         self.state = RuntimeState.CLOSING
-        errors: list[str] = []
+        deadline = time.monotonic() + self.shutdown_timeout
         try:
-            await self.task_registry.shutdown(timeout=self.shutdown_timeout)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"task_registry: {exc}")
-        graph = self.graph
-        if graph is not None:
             try:
-                await graph.aclose_runtime_resources(timeout=self.shutdown_timeout)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"graph: {exc}")
-            self.graph = None
-        if self._owns_mcp_pool:
-            try:
-                await self.mcp_pool.close()
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"mcp_pool: {exc}")
-        self.state = RuntimeState.CLOSED
-        if errors:
-            raise RuntimeShutdownTimeoutError(
-                f"runtime close incomplete ({reason}): {'; '.join(errors)}"
-            )
+                await self.task_registry.shutdown(timeout=self._remaining(deadline))
+            except TaskRegistryShutdownTimeoutError as exc:
+                raise RuntimeShutdownTimeoutError(
+                    f"runtime close incomplete ({reason}): task_registry: {exc}"
+                ) from exc
+
+            graph = self.graph
+            if graph is not None:
+                try:
+                    await graph.aclose_runtime_resources(timeout=self._remaining(deadline))
+                except Exception as exc:  # noqa: BLE001
+                    # Keep graph reference so a later close can retry draining leases.
+                    raise RuntimeShutdownTimeoutError(
+                        f"runtime close incomplete ({reason}): graph: {exc}"
+                    ) from exc
+                self.graph = None
+
+            if self._owns_mcp_pool and self.mcp_pool.state is not PoolState.CLOSED:
+                try:
+                    await self.mcp_pool.close(timeout=self._remaining(deadline))
+                except McpPoolShutdownTimeoutError as exc:
+                    raise RuntimeShutdownTimeoutError(
+                        f"runtime close incomplete ({reason}): mcp_pool: {exc}"
+                    ) from exc
+
+            self.state = RuntimeState.CLOSED
+        except RuntimeShutdownTimeoutError:
+            # Remain CLOSING; do not force-close live dependencies.
+            self.state = RuntimeState.CLOSING
+            raise
 
     async def release_run_resources(
         self,

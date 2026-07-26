@@ -31,6 +31,7 @@ class AuditRuntime(Protocol):
     task_registry: Any
     _orphan_tasks: dict[str, Any]
     _scoped_acquire_locks: dict[str, Any]
+    _scoped_meta_lock: Any
     _checkpointer: Any
     _checkpoint_conn: Any | None
     _checkpoint_scope_key: str

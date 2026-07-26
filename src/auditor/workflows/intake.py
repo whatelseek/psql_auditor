@@ -172,7 +172,15 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                     audit_run_id=audit_run_id,
                     client_slug=client.slug,
                 )
+                from auditor.workflows.runner import release_run_checkpointer
+
                 await runtime.ensure_async_checkpointer(
+                    client_id=run_scope.client_id,
+                    audit_run_id=run_scope.audit_run_id,
+                )
+                # Warm only — release the acquire lease so intake does not hold it.
+                await release_run_checkpointer(
+                    runtime,
                     client_id=run_scope.client_id,
                     audit_run_id=run_scope.audit_run_id,
                 )

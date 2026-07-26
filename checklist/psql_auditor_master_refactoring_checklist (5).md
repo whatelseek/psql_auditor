@@ -11,41 +11,33 @@ Total tasks: **71**
 
 | Status | Count |
 | --- | ---: |
-| Complete `[x]` | **9 / 71 (12.7%)** |
-| Partially complete `[~]` | **4 / 71 (5.6%)** |
+| Complete `[x]` | **8 / 71 (11.3%)** |
+| Partially complete `[~]` | **5 / 71 (7.0%)** |
 | Open `[ ]` | **58 / 71 (81.7%)** |
-| Not fully complete | **62 / 71 (87.3%)** |
+| Not fully complete | **63 / 71 (88.7%)** |
 
-Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `CORE-006`.
+Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`.
 
-Partially complete: `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
+Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Latest verification
 
-`CORE-006` introduces an explicit `ApplicationRuntime` owned by each FastAPI
-app instance (settings snapshot, graph, MCP pool, results store, task registry,
-scoped checkpoint leases). Production `/v1` handlers resolve the runtime from
-`request.app.state` and no longer use process-wide `_graph` / `_STORE` / `_POOL`.
-`FLOW-007` remains open for separate acceptance of removing the deprecated
-compatibility getters. Local and CI gates share the same Make targets.
+`CORE-006` lifecycle race fixes are implemented and ready for independent
+acceptance review. Checklist status remains `[~]` until that review. Fixes
+cover lease-aware MCP pool shutdown, truthful task-registry timeouts, balanced
+checkpoint leases (no force-close), and failure-atomic scoped Sqlite init.
 
 | Check | Verified result |
 | --- | --- |
 | Format | Passed |
 | Lint | Passed |
 | Type check | Passed, 71 files |
-| Unit tests | 363 passed |
+| Unit tests | 373 passed |
 | PostgreSQL integration tests | 7 passed |
-| Full suite | 370 passed |
+| Full suite | 380 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | [Run 30202005287](https://github.com/whatelseek/psql_auditor/actions/runs/30202005287), all jobs passed |
+| Clean CI | Pending push of lifecycle-fix commit |
 
-Controlled negative runs:
-
-- [Run 30194952566](https://github.com/whatelseek/psql_auditor/actions/runs/30194952566):
-  a deliberately broken unit test made the pipeline red.
-- [Run 30195039647](https://github.com/whatelseek/psql_auditor/actions/runs/30195039647):
-  deliberate lint and type errors made both gates fail.
 
 ## Quality assessment
 
@@ -122,19 +114,14 @@ with `make validate-defect-map` enforced in CI.
   mkdir/copy/rename and leaves both dirs unchanged on reject;
 - regression tests in `tests/test_run_scope_isolation.py`.
 
-- [x] `CORE-006` — Remove hidden global mutable state.
+- [~] `CORE-006` — Remove hidden global mutable state.
 
-`CORE-006` closure evidence:
+`CORE-006` remains partially complete pending independent acceptance review.
+`ApplicationRuntime` ownership is implemented; lifecycle race fixes (lease-aware
+MCP pool, truthful task-registry timeouts, balanced checkpoint leases without
+force-close, failure-atomic scoped Sqlite init) are ready for acceptance.
+Do not mark complete based on class existence alone.
 
-- `ApplicationRuntime` with `start()` / `close()` owns settings, graph, MCP pool,
-  results store, task registry, and in-memory run registries;
-- FastAPI `create_app(settings=…)` lifespan binds runtime on `app.state`;
-- production handlers use `runtime_from_request()` (no `_graph` / global settings);
-- scoped checkpoint acquire is lock + refcount safe; `release_run_resources`
-  drops in-memory state without deleting durable artifacts;
-- stream background tasks tracked in `TaskRegistry` with observed exceptions;
-- tests: `tests/test_application_runtime.py` (two-app isolation, same-scope
-  acquire, shutdown, partial startup, restart/resume, concurrent runs).
 
 ### M2 — Inputs and audit planning
 

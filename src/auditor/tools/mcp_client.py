@@ -23,6 +23,7 @@ import json
 import re
 import shlex
 from contextlib import AsyncExitStack
+from enum import Enum
 from typing import Any, cast
 
 from langchain_core.tools import tool
@@ -59,7 +60,19 @@ _TRANSPORT_EXC_NAMES = frozenset(
 
 
 class McpPoolClosedError(RuntimeError):
-    """Raised when a closed MCP pool is used."""
+    """Raised when a closed or closing Postgres MCP pool is used."""
+
+
+class McpPoolShutdownTimeoutError(RuntimeError):
+    """Raised when MCP borrowers remain active after the shutdown deadline."""
+
+
+class PoolState(str, Enum):
+    """Lifecycle states for :class:`PostgresMcpPool`."""
+
+    OPEN = "open"
+    CLOSING = "closing"
+    CLOSED = "closed"
 
 
 def _postgres_blocked_tools(settings: Settings) -> frozenset[str]:
@@ -307,37 +320,45 @@ class PostgresMcpSession:
 class PostgresMcpPool:
     """Pool of ``PostgresMcpSession`` workers for concurrent MCP tool calls.
 
-    Each worker owns its own stdio ``npx mcp-postgres-server`` process. Callers
-    acquire a free session, invoke the tool, then release it back to the queue.
+    Lifecycle: ``OPEN → CLOSING → CLOSED``. Borrowing and active-borrower
+    registration are atomic under an internal condition. Sessions are never
+    closed while borrowed, and returning borrowers never touch a cleared queue.
     """
 
-    def __init__(self, size: int | None = None) -> None:
+    def __init__(self, size: int | None = None, *, shutdown_timeout: float = 5.0) -> None:
         """Create a pool; actual workers are spawned lazily on first use.
 
         Args:
             size: Fixed pool size, or ``None`` to read ``mcp_postgres_pool_size``.
+            shutdown_timeout: Default grace period for active borrowers on close.
         """
         self._configured_size = size
+        self.shutdown_timeout = shutdown_timeout
         self._sessions: list[PostgresMcpSession] = []
-        self._queue: asyncio.Queue[PostgresMcpSession] | None = None
-        self._init_lock = asyncio.Lock()
+        self._available: list[PostgresMcpSession] = []
+        self._active: set[PostgresMcpSession] = set()
+        self._cond = asyncio.Condition()
         self._size = 0
-        self._closed = False
+        self._state = PoolState.OPEN
+        self._initialized = False
 
     @property
     def size(self) -> int:
         """Number of pooled sessions (0 until first use)."""
         return self._size
 
+    @property
+    def state(self) -> PoolState:
+        """Current pool lifecycle state."""
+        return self._state
+
+    @property
+    def closed(self) -> bool:
+        """True when the pool is fully ``CLOSED``."""
+        return self._state is PoolState.CLOSED
+
     def _resolve_size(self, settings: Settings) -> int:
-        """Clamp configured pool size to ``[1, 16]``.
-
-        Args:
-            settings: Source for ``mcp_postgres_pool_size`` when not overridden.
-
-        Returns:
-            Number of concurrent MCP worker sessions.
-        """
+        """Clamp configured pool size to ``[1, 16]``."""
         raw = (
             self._configured_size
             if self._configured_size is not None
@@ -350,22 +371,44 @@ class PostgresMcpPool:
         return max(1, min(n, 16))
 
     async def _ensure(self, settings: Settings) -> None:
-        """Lazily create ``PostgresMcpSession`` workers and the release queue."""
-        if self._closed:
-            raise McpPoolClosedError("PostgresMcpPool is closed")
-        if self._queue is not None:
+        """Compat helper for tests: initialize the pool under the condition lock."""
+        async with self._cond:
+            await self._ensure_unlocked(settings)
+
+    async def _ensure_unlocked(self, settings: Settings) -> None:
+        """Create workers when still ``OPEN`` (caller holds ``_cond``)."""
+        if self._state is not PoolState.OPEN:
+            raise McpPoolClosedError(f"PostgresMcpPool is {self._state.value}")
+        if self._initialized:
             return
-        async with self._init_lock:
-            if self._queue is not None:
-                return
-            size = self._resolve_size(settings)
-            sessions = [PostgresMcpSession() for _ in range(size)]
-            queue: asyncio.Queue[PostgresMcpSession] = asyncio.Queue()
-            for session in sessions:
-                queue.put_nowait(session)
-            self._sessions = sessions
-            self._queue = queue
-            self._size = size
+        size = self._resolve_size(settings)
+        sessions = [PostgresMcpSession() for _ in range(size)]
+        self._sessions = sessions
+        self._available = list(sessions)
+        self._size = size
+        self._initialized = True
+
+    async def _acquire(self, settings: Settings) -> PostgresMcpSession:
+        """Borrow a session atomically; reject when closing/closed."""
+        async with self._cond:
+            await self._ensure_unlocked(settings)
+            while True:
+                if self._state is not PoolState.OPEN:
+                    raise McpPoolClosedError(f"PostgresMcpPool is {self._state.value}")
+                if self._available:
+                    session = self._available.pop()
+                    self._active.add(session)
+                    return session
+                await self._cond.wait()
+
+    async def _release(self, session: PostgresMcpSession) -> None:
+        """Return a borrowed session or drop it when the pool is closing."""
+        async with self._cond:
+            self._active.discard(session)
+            if self._state is PoolState.OPEN:
+                self._available.append(session)
+            # CLOSING/CLOSED: never return into an available collection.
+            self._cond.notify_all()
 
     async def call_tool(
         self,
@@ -373,67 +416,69 @@ class PostgresMcpPool:
         arguments: dict[str, Any] | None = None,
         settings: Settings | None = None,
     ) -> str:
-        """Borrow a pooled session, call the remote tool, then release it.
-
-        Args:
-            tool_name: Remote MCP tool name.
-            arguments: Tool arguments dict.
-            settings: Optional settings override.
-
-        Returns:
-            Formatted MCP result from the borrowed worker.
-        """
-        if self._closed:
-            raise McpPoolClosedError("PostgresMcpPool is closed")
+        """Borrow a pooled session, call the remote tool, then release it."""
         settings = settings or effective_settings()
-        await self._ensure(settings)
-        assert self._queue is not None
-        session = await self._queue.get()
+        session = await self._acquire(settings)
         try:
             return await session.call_tool(tool_name, arguments, settings=settings)
         finally:
-            self._queue.put_nowait(session)
+            await self._release(session)
 
     async def list_tools(self, settings: Settings | None = None) -> str:
-        """List tools via one pooled session (same as single-session ``list_tools``)."""
-        if self._closed:
-            raise McpPoolClosedError("PostgresMcpPool is closed")
+        """List tools via one pooled session (same acquire/release contract)."""
         settings = settings or effective_settings()
-        await self._ensure(settings)
-        assert self._queue is not None
-        session = await self._queue.get()
+        session = await self._acquire(settings)
         try:
             return await session.list_tools(settings=settings)
         finally:
-            self._queue.put_nowait(session)
+            await self._release(session)
 
-    async def close(self) -> None:
-        """Close every pooled MCP subprocess."""
-        async with self._init_lock:
-            if self._closed:
+    async def close(self, timeout: float | None = None) -> None:
+        """Drain borrowers, then close every session exactly once.
+
+        Transitions ``OPEN → CLOSING``, rejects new/waiting borrowers, waits for
+        active borrowers up to ``timeout``, then closes sessions and becomes
+        ``CLOSED``. On timeout raises :class:`McpPoolShutdownTimeoutError` and
+        remains ``CLOSING`` so a later ``close()`` can finish.
+        """
+        grace = self.shutdown_timeout if timeout is None else timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, grace)
+        sessions_to_close: list[PostgresMcpSession] = []
+        async with self._cond:
+            if self._state is PoolState.CLOSED:
                 return
-            self._closed = True
-            sessions = list(self._sessions)
+            if self._state is PoolState.OPEN:
+                self._state = PoolState.CLOSING
+                self._cond.notify_all()
+            while self._active:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise McpPoolShutdownTimeoutError(
+                        f"MCP pool shutdown timed out with {len(self._active)} active borrower(s)"
+                    )
+                try:
+                    await asyncio.wait_for(self._cond.wait(), timeout=remaining)
+                except TimeoutError as exc:
+                    raise McpPoolShutdownTimeoutError(
+                        f"MCP pool shutdown timed out with {len(self._active)} active borrower(s)"
+                    ) from exc
+            sessions_to_close = list(self._sessions)
             self._sessions = []
-            self._queue = None
+            self._available.clear()
             self._size = 0
-        for session in sessions:
+            self._state = PoolState.CLOSED
+            self._cond.notify_all()
+        for session in sessions_to_close:
             await session.close()
 
     async def reconnect(self, settings: Settings | None = None) -> str:
-        """Reconnect every pooled session (used by the graph ``reconnect_session`` node).
-
-        Args:
-            settings: Optional settings override.
-
-        Returns:
-            Aggregate success message or first failure summary.
-        """
-        if self._closed:
-            raise McpPoolClosedError("PostgresMcpPool is closed")
+        """Reconnect every pooled session (graph ``reconnect_session`` node)."""
         settings = settings or effective_settings()
-        await self._ensure(settings)
-        results = [await session.reconnect(settings) for session in self._sessions]
+        async with self._cond:
+            await self._ensure_unlocked(settings)
+            sessions = list(self._sessions)
+        results = [await session.reconnect(settings) for session in sessions]
         failures = [r for r in results if "failed" in r.lower()]
         if failures:
             return (

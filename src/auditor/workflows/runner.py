@@ -27,6 +27,9 @@ from auditor.progress import emit_phase
 from auditor.result_identity_bind import attach_result_identity
 from auditor.run_scope import (
     CheckpointInitError,
+    CheckpointLeaseError,
+    CheckpointScopeBusyError,
+    CheckpointScopeClosingError,
     RunScopeIsolationError,
     assert_thread_belongs_to_run,
     checkpoint_thread_id,
@@ -901,8 +904,9 @@ class ScopedCheckpointBundle:
     graph: Any
     intake_graph: Any
     conn: Any | None
-    refcount: int = 0
+    lease_count: int = 0
     closed: bool = False
+    closing: bool = False
 
 
 def _conn_open(conn: Any | None) -> bool:
@@ -917,19 +921,6 @@ def _conn_open(conn: Any | None) -> bool:
         return False
 
 
-async def _scope_lock(runtime: AuditRuntime, scope_key: str) -> asyncio.Lock:
-    meta = getattr(runtime, "_scoped_meta_lock", None)
-    locks = getattr(runtime, "_scoped_acquire_locks", None)
-    if meta is None or locks is None:
-        return asyncio.Lock()
-    async with meta:
-        lock = locks.get(scope_key)
-        if lock is None:
-            lock = asyncio.Lock()
-            locks[scope_key] = lock
-        return lock
-
-
 def _scoped_cache(runtime: AuditRuntime) -> dict[str, ScopedCheckpointBundle]:
     cache = getattr(runtime, "_scoped_checkpoints", None)
     if not isinstance(cache, dict):
@@ -938,33 +929,66 @@ def _scoped_cache(runtime: AuditRuntime) -> dict[str, ScopedCheckpointBundle]:
     return cache
 
 
+async def _scope_lock(runtime: AuditRuntime, key: str) -> asyncio.Lock:
+    locks = getattr(runtime, "_scoped_acquire_locks", None)
+    if not isinstance(locks, dict):
+        locks = {}
+        runtime._scoped_acquire_locks = locks
+    meta = getattr(runtime, "_scoped_meta_lock", None)
+    if meta is None:
+        meta = asyncio.Lock()
+        runtime._scoped_meta_lock = meta
+    async with meta:
+        lock = locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[key] = lock
+        return lock
+
+
+async def _close_sqlite_cm(sqlite_cm: Any) -> None:
+    if sqlite_cm is None:
+        return
+    try:
+        await sqlite_cm.__aexit__(None, None, None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def acquire_run_checkpointer(
     runtime: AuditRuntime,
     *,
     client_id: str,
     audit_run_id: str,
 ) -> ScopedCheckpointBundle:
-    """Return a checkpointer/graph bundle for exact ``client_id`` + ``audit_run_id``.
+    """Return a leased checkpointer/graph bundle for ``client_id`` + ``audit_run_id``.
 
-    Concurrent acquires for the same scope share one live bundle (refcounted).
-    Does not mutate or close other run scopes. Never falls back to MemorySaver.
+    Concurrent acquires for the same scope share one live bundle. Each successful
+    acquire owns exactly one lease that must be released once.
+    Construction is failure-atomic: SQLite is closed if graph compilation fails.
     """
     cid = require_client_id(client_id, context="acquire_run_checkpointer")
     arid = require_audit_run_id(audit_run_id, context="acquire_run_checkpointer")
     scope = resolve_run_scope(runtime.settings.evidence_dir, client_id=cid, audit_run_id=arid)
     key = f"{scope.client_id}:{scope.audit_run_id}"
-    cache = _scoped_cache(runtime)
     lock = await _scope_lock(runtime, key)
     async with lock:
+        cache = _scoped_cache(runtime)
         existing = cache.get(key)
-        if existing is not None and not existing.closed and _conn_open(existing.conn):
-            existing.refcount += 1
-            return existing
         if existing is not None:
-            try:
-                await existing.sqlite_cm.__aexit__(None, None, None)
-            except Exception:  # noqa: BLE001
-                pass
+            if existing.closing or existing.closed:
+                raise CheckpointScopeClosingError(f"checkpoint scope {key} is closing/closed")
+            if _conn_open(existing.conn):
+                existing.lease_count += 1
+                return existing
+            # Idle but dead connection — only reconnect when no leases.
+            if existing.lease_count > 0:
+                raise CheckpointScopeBusyError(
+                    f"checkpoint scope {key} has {existing.lease_count} active lease(s) "
+                    "on a closed connection"
+                )
+            await _close_sqlite_cm(existing.sqlite_cm)
+            existing.closed = True
             cache.pop(key, None)
 
         if AsyncSqliteSaver is None:
@@ -973,32 +997,41 @@ async def acquire_run_checkpointer(
                 f"checkpoints for client_id={cid!r} audit_run_id={arid!r}"
             )
         path = scope.checkpoint_db_path
+        sqlite_cm: Any = None
+        entered = False
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             sqlite_cm = AsyncSqliteSaver.from_conn_string(str(path))
             checkpointer = await sqlite_cm.__aenter__()
+            entered = True
+            conn = getattr(checkpointer, "conn", None)
+            graph = runtime._build(checkpointer=checkpointer)
+            intake_graph = runtime._build_intake(checkpointer=checkpointer)
+            bundle = ScopedCheckpointBundle(
+                scope_key=key,
+                client_id=cid,
+                audit_run_id=arid,
+                path=path,
+                checkpointer=checkpointer,
+                sqlite_cm=sqlite_cm,
+                graph=graph,
+                intake_graph=intake_graph,
+                conn=conn,
+                lease_count=1,
+            )
+            cache[key] = bundle
+            return bundle
+        except CheckpointInitError:
+            if entered:
+                await _close_sqlite_cm(sqlite_cm)
+            raise
         except Exception as exc:  # noqa: BLE001
+            if entered:
+                await _close_sqlite_cm(sqlite_cm)
             raise CheckpointInitError(
                 "failed to initialize AsyncSqliteSaver for "
                 f"client_id={cid!r} audit_run_id={arid!r} path={path}: {exc}"
             ) from exc
-        conn = getattr(checkpointer, "conn", None)
-        graph = runtime._build(checkpointer=checkpointer)
-        intake_graph = runtime._build_intake(checkpointer=checkpointer)
-        bundle = ScopedCheckpointBundle(
-            scope_key=key,
-            client_id=cid,
-            audit_run_id=arid,
-            path=path,
-            checkpointer=checkpointer,
-            sqlite_cm=sqlite_cm,
-            graph=graph,
-            intake_graph=intake_graph,
-            conn=conn,
-            refcount=1,
-        )
-        cache[key] = bundle
-        return bundle
 
 
 async def release_run_checkpointer(
@@ -1006,28 +1039,49 @@ async def release_run_checkpointer(
     *,
     client_id: str,
     audit_run_id: str,
-    close: bool = False,
-    force: bool = False,
 ) -> None:
-    """Release a scoped checkpointer lease; close Sqlite when refcount hits zero."""
+    """Release exactly one lease for the scoped checkpointer.
+
+    Does not close SQLite. Raises :class:`CheckpointLeaseError` on unmatched release.
+    """
     cid = require_client_id(client_id, context="release_run_checkpointer")
     arid = require_audit_run_id(audit_run_id, context="release_run_checkpointer")
     key = f"{cid}:{arid}"
-    cache = _scoped_cache(runtime)
     lock = await _scope_lock(runtime, key)
     async with lock:
+        cache = _scoped_cache(runtime)
+        bundle = cache.get(key)
+        if bundle is None or bundle.closed:
+            raise CheckpointLeaseError(f"unmatched checkpoint lease release for scope {key}")
+        if bundle.lease_count <= 0:
+            raise CheckpointLeaseError(f"checkpoint lease count already zero for scope {key}")
+        bundle.lease_count -= 1
+
+
+async def close_run_checkpointer(
+    runtime: AuditRuntime,
+    *,
+    client_id: str,
+    audit_run_id: str,
+) -> None:
+    """Close and uncache a scoped bundle only when its lease count is zero."""
+    cid = require_client_id(client_id, context="close_run_checkpointer")
+    arid = require_audit_run_id(audit_run_id, context="close_run_checkpointer")
+    key = f"{cid}:{arid}"
+    lock = await _scope_lock(runtime, key)
+    async with lock:
+        cache = _scoped_cache(runtime)
         bundle = cache.get(key)
         if bundle is None or bundle.closed:
             return
-        if not force:
-            bundle.refcount = max(0, bundle.refcount - 1)
-            if bundle.refcount > 0 or not close:
-                return
+        if bundle.lease_count > 0:
+            raise CheckpointScopeBusyError(
+                f"cannot close checkpoint scope {key} with {bundle.lease_count} active lease(s)"
+            )
+        bundle.closing = True
+        await _close_sqlite_cm(bundle.sqlite_cm)
         bundle.closed = True
-        try:
-            await bundle.sqlite_cm.__aexit__(None, None, None)
-        except Exception:  # noqa: BLE001
-            pass
+        bundle.closing = False
         cache.pop(key, None)
 
 
@@ -1037,17 +1091,35 @@ async def reconnect_run_checkpointer(
     client_id: str,
     audit_run_id: str,
 ) -> ScopedCheckpointBundle:
-    """Close and reopen the scoped bundle for one run only."""
+    """Replace an idle scoped bundle. Fails if the scope is leased.
+
+    Publishes a replacement with ``lease_count=0`` (no hidden lease). Callers
+    that need a lease must call :func:`acquire_run_checkpointer` separately.
+    """
     cid = require_client_id(client_id, context="reconnect_run_checkpointer")
     arid = require_audit_run_id(audit_run_id, context="reconnect_run_checkpointer")
-    await release_run_checkpointer(
-        runtime,
-        client_id=cid,
-        audit_run_id=arid,
-        close=True,
-        force=True,
-    )
-    return await acquire_run_checkpointer(runtime, client_id=cid, audit_run_id=arid)
+    key = f"{cid}:{arid}"
+    lock = await _scope_lock(runtime, key)
+    async with lock:
+        cache = _scoped_cache(runtime)
+        existing = cache.get(key)
+        if existing is not None and not existing.closed and existing.lease_count > 0:
+            raise CheckpointScopeBusyError(
+                f"cannot reconnect checkpoint scope {key} with "
+                f"{existing.lease_count} active lease(s)"
+            )
+        if existing is not None and not existing.closed:
+            existing.closing = True
+            await _close_sqlite_cm(existing.sqlite_cm)
+            existing.closed = True
+            existing.closing = False
+            cache.pop(key, None)
+
+    # Build outside the busy-fail path using acquire then immediately release
+    # so the published bundle is idle (lease_count=0).
+    bundle = await acquire_run_checkpointer(runtime, client_id=cid, audit_run_id=arid)
+    await release_run_checkpointer(runtime, client_id=cid, audit_run_id=arid)
+    return bundle
 
 
 async def release_run_resources(
@@ -1056,38 +1128,54 @@ async def release_run_resources(
     client_id: str,
     audit_run_id: str,
 ) -> None:
-    """Drop in-memory handles for one terminal run (never deletes durable artifacts)."""
+    """Release in-memory resources for one terminal/abandoned audit run.
+
+    Atomic from the caller's perspective: if the scope is busy, raises
+    :class:`CheckpointScopeBusyError` without mutating evidence/multi/cache.
+    Never deletes durable checkpoint or artifact files.
+    """
     cid = require_client_id(client_id, context="release_run_resources")
     arid = require_audit_run_id(audit_run_id, context="release_run_resources")
+    key = f"{cid}:{arid}"
+    cache = _scoped_cache(runtime)
+    bundle = cache.get(key)
+    if bundle is not None and not bundle.closed and bundle.lease_count > 0:
+        raise CheckpointScopeBusyError(
+            f"cannot release resources for {key}: {bundle.lease_count} active lease(s)"
+        )
     registry = getattr(runtime, "task_registry", None)
     if registry is not None:
-        await registry.cancel_run(client_id=cid, audit_run_id=arid)
-    await release_run_checkpointer(
-        runtime,
-        client_id=cid,
-        audit_run_id=arid,
-        close=True,
-        force=True,
-    )
-    to_pop: list[str] = []
-    for run_id, store in runtime._evidence_by_run.items():
+        from auditor.task_registry import TaskRegistryShutdownTimeoutError
+
         try:
-            meta = store.read_run_meta()
-        except Exception:  # noqa: BLE001
-            continue
-        if str(meta.get("audit_run_id") or "") == arid and str(meta.get("client_id") or "") == cid:
-            to_pop.append(run_id)
-    for run_id in to_pop:
-        runtime._evidence_by_run.pop(run_id, None)
-    thread_ids = [
-        tid
-        for tid, sess in runtime._multi_sessions.items()
-        if isinstance(sess, dict)
-        and str(sess.get("audit_run_id") or "") == arid
-        and (not sess.get("client_id") or str(sess.get("client_id")) == cid)
-    ]
-    for tid in thread_ids:
-        runtime._multi_sessions.pop(tid, None)
+            await registry.cancel_run(client_id=cid, audit_run_id=arid)
+        except TaskRegistryShutdownTimeoutError as exc:
+            raise CheckpointScopeBusyError(
+                f"cannot release resources for {key}: live background tasks {exc.keys}"
+            ) from exc
+    # Re-check lease after task cancel (another caller may have acquired).
+    bundle = cache.get(key)
+    if bundle is not None and not bundle.closed and bundle.lease_count > 0:
+        raise CheckpointScopeBusyError(
+            f"cannot release resources for {key}: {bundle.lease_count} active lease(s)"
+        )
+    await close_run_checkpointer(runtime, client_id=cid, audit_run_id=arid)
+    evidence = getattr(runtime, "_evidence_by_run", None)
+    if isinstance(evidence, dict):
+        drop = [
+            rid
+            for rid, store in list(evidence.items())
+            if getattr(store, "audit_run_id", None) == arid
+            or rid == arid
+            or str(getattr(store, "run_id", "")) == arid
+        ]
+        for rid in drop:
+            evidence.pop(rid, None)
+    sessions = getattr(runtime, "_multi_sessions", None)
+    if isinstance(sessions, dict):
+        for tid in list(sessions):
+            if f":{arid}" in tid or tid.endswith(arid):
+                sessions.pop(tid, None)
 
 
 @asynccontextmanager
@@ -1097,21 +1185,23 @@ async def _checkpointer_lease(
     client_id: str,
     audit_run_id: str,
 ):
-    """Acquire a scoped checkpointer lease; release refcount in ``finally``."""
+    """Acquire a scoped checkpointer lease; release exactly once in ``finally``."""
     scoped = await acquire_run_checkpointer(
         runtime,
         client_id=client_id,
         audit_run_id=audit_run_id,
     )
+    released = False
     try:
         yield scoped
     finally:
-        await release_run_checkpointer(
-            runtime,
-            client_id=client_id,
-            audit_run_id=audit_run_id,
-            close=False,
-        )
+        if not released:
+            released = True
+            await release_run_checkpointer(
+                runtime,
+                client_id=client_id,
+                audit_run_id=audit_run_id,
+            )
 
 
 async def ensure_async_checkpointer(
@@ -1122,8 +1212,8 @@ async def ensure_async_checkpointer(
 ) -> ScopedCheckpointBundle | None:
     """Acquire a run-scoped checkpointer, or upgrade the legacy process saver.
 
-    When ``client_id`` + ``audit_run_id`` are provided, returns a
-    :class:`ScopedCheckpointBundle` without replacing other runs' savers.
+    When ``client_id`` + ``audit_run_id`` are provided, returns a leased
+    :class:`ScopedCheckpointBundle`. Callers must release the lease.
     Canonical scopes never fall back to ``MemorySaver`` — failures raise
     :class:`CheckpointInitError`.
 

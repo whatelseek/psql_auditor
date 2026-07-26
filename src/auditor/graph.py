@@ -367,17 +367,35 @@ class AuditorGraph:
         return await _wf_runner.acontinue(self, *args, **kwargs)
 
     async def aclose_runtime_resources(self, timeout: float = 10.0) -> None:
-        """Close scoped checkpoints and clear in-memory run registries."""
-        from auditor.workflows.runner import release_run_checkpointer
+        """Close scoped checkpoints after leases drain; clear in-memory registries.
 
-        cache = dict(self._scoped_checkpoints)
-        for bundle in cache.values():
-            await release_run_checkpointer(
+        Does not force-close actively leased scopes. Raises
+        :class:`~auditor.run_scope.CheckpointScopeBusyError` when leases remain
+        after ``timeout``.
+        """
+        import time
+
+        from auditor.run_scope import CheckpointScopeBusyError
+        from auditor.workflows.runner import close_run_checkpointer
+
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            cache = dict(self._scoped_checkpoints)
+            busy = [b for b in cache.values() if not b.closed and b.lease_count > 0]
+            if not busy:
+                break
+            if time.monotonic() >= deadline:
+                keys = [b.scope_key for b in busy]
+                raise CheckpointScopeBusyError(
+                    "checkpoint leases still active at shutdown: " + ", ".join(keys)
+                )
+            await asyncio.sleep(0.02)
+
+        for bundle in list(self._scoped_checkpoints.values()):
+            await close_run_checkpointer(
                 self,
                 client_id=bundle.client_id,
                 audit_run_id=bundle.audit_run_id,
-                close=True,
-                force=True,
             )
         if self._sqlite_cm is not None:
             try:
@@ -391,9 +409,11 @@ class AuditorGraph:
         self._multi.sessions.clear()
         self._scoped_acquire_locks.clear()
         if self._owns_mcp_pool:
-            await self.mcp_pool.close()
+            remaining = max(0.0, deadline - time.monotonic())
+            await self.mcp_pool.close(timeout=remaining)
         if self._owns_task_registry:
-            await self.task_registry.shutdown(timeout=timeout)
+            remaining = max(0.0, deadline - time.monotonic())
+            await self.task_registry.shutdown(timeout=remaining)
 
     def cancel_audit_run(self, audit_run_id: str):
         """Cancel open jobs and the AuditRun (same ``audit_run_id``)."""

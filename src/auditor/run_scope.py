@@ -60,6 +60,18 @@ class CheckpointInitError(RunScopeIsolationError):
     """Raised when a canonical-run AsyncSqliteSaver cannot be initialized."""
 
 
+class CheckpointLeaseError(RunScopeIsolationError):
+    """Raised on unmatched or double checkpoint lease release."""
+
+
+class CheckpointScopeBusyError(RunScopeIsolationError):
+    """Raised when a scoped checkpoint is still leased by an active caller."""
+
+
+class CheckpointScopeClosingError(RunScopeIsolationError):
+    """Raised when a scoped checkpoint is already closing and cannot be used."""
+
+
 @dataclass(frozen=True, slots=True)
 class OwnershipManifest:
     """Trusted identity written at each run artifact root."""

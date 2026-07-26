@@ -14,6 +14,14 @@ class TaskRegistryError(RuntimeError):
     """Raised when task registry operations are invalid after shutdown."""
 
 
+class TaskRegistryShutdownTimeoutError(TaskRegistryError):
+    """Raised when tracked tasks remain alive after a shutdown/cancel deadline."""
+
+    def __init__(self, message: str, *, keys: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.keys = list(keys or [])
+
+
 @dataclass
 class TrackedTask:
     """One background task with stable owner / run identity."""
@@ -75,7 +83,10 @@ class TaskRegistry:
                     type(exc).__name__,
                     exc,
                 )
-            self._tasks.pop(key, None)
+            # Only forget when truly done; keep entry if somehow re-registered.
+            current = self._tasks.get(key)
+            if current is tracked and t.done():
+                self._tasks.pop(key, None)
 
         task.add_done_callback(_done)
         return task
@@ -86,12 +97,24 @@ class TaskRegistry:
     def keys(self) -> list[str]:
         return list(self._tasks)
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
     def tasks_for_run(self, *, client_id: str, audit_run_id: str) -> list[TrackedTask]:
         return [
             t
             for t in self._tasks.values()
             if t.client_id == client_id and t.audit_run_id == audit_run_id
         ]
+
+    def _consume_done(self, tracked: TrackedTask) -> None:
+        if not tracked.task.done():
+            return
+        try:
+            tracked.task.exception()
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
 
     async def cancel_run(
         self,
@@ -100,39 +123,61 @@ class TaskRegistry:
         audit_run_id: str,
         timeout: float | None = None,
     ) -> None:
-        """Cancel tasks owned by one audit run; leave other runs untouched."""
+        """Cancel tasks owned by one audit run; leave other runs untouched.
+
+        Raises:
+            TaskRegistryShutdownTimeoutError: when targeted tasks remain alive.
+        """
         targets = self.tasks_for_run(client_id=client_id, audit_run_id=audit_run_id)
-        for tracked in targets:
-            tracked.task.cancel()
         if not targets:
             return
-        await asyncio.wait(
+        for tracked in targets:
+            tracked.task.cancel()
+        wait_timeout = timeout if timeout is not None else self.shutdown_timeout
+        _done, pending = await asyncio.wait(
             [t.task for t in targets],
-            timeout=timeout if timeout is not None else self.shutdown_timeout,
+            timeout=wait_timeout,
         )
         for tracked in targets:
             if tracked.task.done():
-                try:
-                    tracked.task.exception()
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
+                self._consume_done(tracked)
+        alive = [t for t in targets if not t.task.done()]
+        if alive or pending:
+            keys = [t.key for t in alive]
+            raise TaskRegistryShutdownTimeoutError(
+                "cancel_run timed out with live tasks: " + ", ".join(keys),
+                keys=keys,
+            )
 
     async def shutdown(self, timeout: float | None = None) -> None:
-        """Cancel and await remaining tasks with a bounded timeout (idempotent)."""
+        """Cancel and await remaining tasks with a bounded timeout.
+
+        Sets closed before cancellation so new tasks cannot be registered.
+        Retains every still-running task; a later ``shutdown()`` retries drain.
+        Succeeds only when no tracked tasks remain active.
+        """
         async with self._lock:
             self._closed = True
-            pending = [t.task for t in list(self._tasks.values()) if not t.task.done()]
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.wait(
-                    pending,
-                    timeout=timeout if timeout is not None else self.shutdown_timeout,
+            pending_tracked = [t for t in list(self._tasks.values()) if not t.task.done()]
+            for tracked in pending_tracked:
+                tracked.task.cancel()
+            if pending_tracked:
+                wait_timeout = timeout if timeout is not None else self.shutdown_timeout
+                _done, still_pending = await asyncio.wait(
+                    [t.task for t in pending_tracked],
+                    timeout=wait_timeout,
                 )
-            for task in pending:
-                if task.done():
-                    try:
-                        task.exception()
-                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                        pass
+            else:
+                still_pending = set()
+            for tracked in pending_tracked:
+                if tracked.task.done():
+                    self._consume_done(tracked)
+            alive = [t for t in list(self._tasks.values()) if not t.task.done()]
+            if alive or still_pending:
+                keys = sorted({t.key for t in alive})
+                raise TaskRegistryShutdownTimeoutError(
+                    "task registry shutdown timed out; live keys: " + ", ".join(keys),
+                    keys=keys,
+                )
+            # All tracked tasks are done; clear any residual done entries.
             self._tasks.clear()
