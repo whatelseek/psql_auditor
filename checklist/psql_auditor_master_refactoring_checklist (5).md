@@ -32,13 +32,13 @@ statuses are not changed automatically by green CI.
 
 | Check | Verified result |
 | --- | --- |
-| Format | Pending local re-verification on rebased PR #36 |
-| Lint | Pending local re-verification on rebased PR #36 |
-| Type check | Pending local re-verification on rebased PR #36 |
-| Unit tests | Pending local re-verification on rebased PR #36 |
-| Integration tests | Pending local re-verification on rebased PR #36 |
-| Full suite | Pending local re-verification on rebased PR #36 |
-| Defect map | Target `validate-defect-map: OK` (72/72) |
+| Format | Passed |
+| Lint | Passed |
+| Type check | Passed, 88 files |
+| Unit tests | 442 passed |
+| Integration tests | 8 passed |
+| Full suite | 450 passed |
+| Defect map | `validate-defect-map: OK` (72/72) |
 | Prior clean CI (PR #35 review base) | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), all jobs passed |
 | Prior clean CI (async start + inventory identity) | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), all jobs passed |
 

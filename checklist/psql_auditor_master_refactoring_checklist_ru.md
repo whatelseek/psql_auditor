@@ -37,12 +37,12 @@ execution и review production discovery). Статусы приёмки не м
 
 | Проверка | Результат |
 | --- | --- |
-| Format / Lint | Ожидает локальной перепроверки на rebased PR #36 |
-| Type check | Ожидает локальной перепроверки на rebased PR #36 |
-| Unit tests | Ожидает локальной перепроверки на rebased PR #36 |
-| Integration tests | Ожидает локальной перепроверки на rebased PR #36 |
-| Full suite | Ожидает локальной перепроверки на rebased PR #36 |
-| Defect map | Цель `validate-defect-map: OK` (72/72) |
+| Format / Lint | Passed |
+| Type check | Passed, 88 files |
+| Unit tests | 442 passed |
+| Integration tests | 8 passed |
+| Full suite | 450 passed |
+| Defect map | `validate-defect-map: OK` (72/72) |
 | Prior clean CI (база review PR #35) | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), все jobs зелёные |
 | Prior clean CI (async start + inventory identity) | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), все jobs зелёные |
 
