@@ -35,7 +35,7 @@ the same Make targets.
 | PostgreSQL integration tests | 7 passed |
 | Full suite | 357 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | *(pending push)* |
+| Clean CI | [Run 30199323665](https://github.com/whatelseek/psql_auditor/actions/runs/30199323665), all jobs passed |
 
 Controlled negative runs:
 
