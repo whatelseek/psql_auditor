@@ -1,54 +1,63 @@
 # `psql_auditor` — Master Development and Acceptance Checklist
 
-Checklist version: **1.9**  
+Checklist version: **1.13**  
 Date: **2026-07-26**  
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
-Latest reviewed revision: [`3153d56`](https://github.com/whatelseek/psql_auditor/commit/3153d56703d39398fc0c1f5c24c24ceacaad554c)  
+Latest independently reviewed revision: [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8)  
 Total tasks: **71**
 
 ## Status summary
 
 | Status | Count |
 | --- | ---: |
-| Complete `[x]` | **8 / 71 (11.3%)** |
+| Complete `[x]` | **10 / 71 (14.1%)** |
 | Partially complete `[~]` | **5 / 71 (7.0%)** |
-| Open `[ ]` | **58 / 71 (81.7%)** |
-| Not fully complete | **63 / 71 (88.7%)** |
+| Open `[ ]` | **56 / 71 (78.9%)** |
+| Not fully complete | **61 / 71 (85.9%)** |
 
-Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`.
+Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `INPUT-001`, `INPUT-003`.
 
 Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Latest verification
 
-`CORE-006` lifecycle race fixes are implemented and ready for independent
-acceptance review. Checklist status remains `[~]` until that review. Fixes
-cover lease-aware MCP pool shutdown, truthful task-registry timeouts, balanced
-checkpoint leases (no force-close), and failure-atomic scoped Sqlite init.
+PR #35 inventory-driven audit launch was independently reviewed at commit
+[`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8).
+`INPUT-001` and `INPUT-003` are accepted. `INPUT-005` remains partial because
+production SSH/WinRM discovery and YAML/JSON execution integration are not complete.
 
 | Check | Verified result |
 | --- | --- |
 | Format | Passed |
 | Lint | Passed |
-| Type check | Passed, 71 files |
-| Unit tests | 373 passed |
-| PostgreSQL integration tests | 7 passed |
-| Full suite | 380 passed |
+| Type check | Passed |
+| Unit tests | 422 passed |
+| Integration tests | 7 passed |
+| Full suite | 429 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | [Run 30203329883](https://github.com/whatelseek/psql_auditor/actions/runs/30203329883), all jobs passed |
+| Current clean CI | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), all jobs passed |
+| Prior clean CI | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), all jobs passed |
+| Preflight gap closure CI | [Run 30208965512](https://github.com/whatelseek/psql_auditor/actions/runs/30208965512), all jobs passed |
 
+### Closed findings in PR #35
+
+- stale `AuditPlan` confirmation after inventory modification;
+- `CREDENTIALS.md` was detected but not loaded;
+- `audit start` created a request without starting execution;
+- API start called `asyncio.run()` inside an active event loop;
+- saved `AuditRequest` could be replayed after inventory modification.
 
 ## Quality assessment
 
 | Area | Baseline | Current | Change |
 | --- | ---: | ---: | ---: |
-| Architecture and separation of concerns | 4.0/10 | 7.0/10 | +3.0 |
-| Execution/result identity | 3.5/10 | 8.0/10 | +4.5 |
-| Testability and regression coverage | 5.5/10 | 8.2/10 | +2.7 |
-| Maintainability | 3.5/10 | 7.0/10 | +3.5 |
-| Production readiness | 3.5/10 | 7.0/10 | +3.5 |
-| **Overall code rating** | **4.0/10** | **7.5/10** | **+3.5** |
+| Architecture and separation of concerns | 4.0/10 | 7.7/10 | +3.7 |
+| Execution/result identity | 3.5/10 | 8.2/10 | +4.7 |
+| Testability and regression coverage | 5.5/10 | 8.5/10 | +3.0 |
+| Maintainability | 3.5/10 | 7.2/10 | +3.7 |
+| Production readiness | 3.5/10 | 6.3/10 | +2.8 |
+| **Overall code rating** | **4.0/10** | **7.4/10** | **+3.4** |
 
 ## Task register
 
@@ -58,78 +67,83 @@ checkpoint leases (no force-close), and failure-atomic scoped Sqlite init.
 - [x] `AUD-002` — Establish unified local and CI quality gates.
 - [x] `AUD-003` — Prepare shared deterministic test fixtures.
 
-`AUD-001` is complete: the defect-to-module map covers all 71 checklist IDs
-with `make validate-defect-map` enforced in CI.
+Closure evidence:
 
-`AUD-003` closure evidence:
-
-- shared module `tests/fixtures/canonical_audit.py` with
-  `build_canonical_scenario()` → immutable `CanonicalScenario`;
-- fixed UTC clock `FIXED_NOW = 2026-07-26T09:00:00Z` via `FixedClock`;
-- two clients, alpha with previous+current runs, beta with one run;
-- two frameworks each defining distinct `REQ-001`, two linux assets;
-- all seven result statuses plus observation/formula/history/exception cases;
-- deterministic fake LLM scenarios reused through `DeterministicFakeChatModel`;
-- validation in `tests/test_canonical_fixtures.py`; sample reuse in identity,
-  quality-gate LLM, and report-export tests.
-
-`AUD-002` closure evidence:
-
-- canonical targets: `format-check`, `lint`, `typecheck`, `test-unit`,
-  `test-integration`, `test`, and `check`;
-- CI invokes the same Make targets without `continue-on-error`;
-- `scripts/run_pytest_group.py` rejects zero-test discovery;
-- each PostgreSQL test creates, migrates, and drops an `aud002_<hex>` database;
-- `DeterministicFakeChatModel` is injected through a model factory;
-- external HTTP/LLM access is blocked in mandatory tests;
-- controlled red runs and the final green run are linked above.
+- defect-to-module map covers all 71 checklist IDs and is enforced in CI;
+- canonical local and CI targets include format, lint, typecheck, unit, integration and full-suite tests;
+- deterministic shared fixtures and fake LLM scenarios are reused across regression tests;
+- mandatory tests block unintended external HTTP/LLM access.
 
 ### M1 — Identifiers and domain model
 
 - [x] `CORE-001` — Separate `client_id` from `audit_run_id`.
-
-`CORE-001` closure evidence:
-
-- `require_client_id` / `require_audit_run_id` reject empty and swapped ids;
-- `AuditRegistry.create_run` / `save_run` validate explicit `audit_run_id` via `require_audit_run_id`;
-- warehouse `start_session` / upsert paths require both identifiers;
-- `AuditRegistry.save_run` rejects client reassignment;
-- resume/bootstrap reject conflicting client ownership;
-- legacy API `run_id` means evidence folder, not `audit_run_id`;
-- tests reuse AUD-003 fixtures in `tests/test_client_audit_run_identity.py`.
-
 - [x] `CORE-002` — Separate `AuditRun` from `AuditJob`.
 - [x] `CORE-003` — Introduce canonical result identity.
 - [x] `CORE-004` — Introduce structured `AssessmentResult`.
 - [x] `CORE-005` — Isolate checkpoints and artifacts by audit run.
-
-`CORE-005` closure evidence (gap closure):
-
-- `acquire_run_checkpointer` binds compiled graph + checkpointer to
-  `client_id` + `audit_run_id` on `runtime._scoped_checkpoints`;
-- concurrent `arun_one` captures a local scoped graph; another run cannot
-  replace or close its checkpointer;
-- canonical Sqlite init failure raises `CheckpointInitError` (no MemorySaver);
-- `EvidenceStore.rebind_run_id` validates destination ownership before any
-  mkdir/copy/rename and leaves both dirs unchanged on reject;
-- regression tests in `tests/test_run_scope_isolation.py`.
-
 - [~] `CORE-006` — Remove hidden global mutable state.
 
-`CORE-006` remains partially complete pending independent acceptance review.
-`ApplicationRuntime` ownership is implemented; lifecycle race fixes (lease-aware
-MCP pool, truthful task-registry timeouts, balanced checkpoint leases without
-force-close, failure-atomic scoped Sqlite init) are ready for acceptance.
-Do not mark complete based on class existence alone.
-
+`CORE-006` remains partial. `ApplicationRuntime` ownership and multiple lifecycle
+race fixes are implemented, but complete removal of legacy process-wide mutable
+state still requires a dedicated independent acceptance review.
 
 ### M2 — Inputs and audit planning
 
-- [ ] `INPUT-001` — Introduce a strict `AuditRequest`.
+- [x] `INPUT-001` — Introduce a strict `AuditRequest`.
+
+Acceptance evidence:
+
+- strict, typed and immutable versioned request model;
+- mandatory client, inventory, targets, framework versions, tool profile and run settings;
+- secret-shaped request fields are forbidden;
+- inventory reference pins normalized `version_id` and `content_hash`;
+- semantic validation reloads the current inventory through the loader/normalizer;
+- stale requests fail with `inventory_hash_mismatch` or `inventory_version_mismatch`;
+- the same execution-boundary validation applies to CLI, HTTP, direct
+  `AuditorGraph.arun_request()` and saved-request replay;
+- rejection occurs before jobs, sessions or external calls;
+- regression tests verify secret-safe errors and persisted request handling.
+
 - [ ] `INPUT-002` — Enforce strict framework validation.
-- [ ] `INPUT-003` — Introduce a validated inventory model.
+- [x] `INPUT-003` — Introduce a validated inventory model.
+
+Acceptance evidence:
+
+- canonical `ClientInventory`, `InventoryHost`, `InventoryService`,
+  `InventoryFact` and `CredentialReference` models;
+- Markdown, YAML and JSON loading with error/warning/information validation levels;
+- stable normalized inventory `version_id` and `content_hash`;
+- separate `CREDENTIALS.md` parsing, merge, duplicate handling and host mapping;
+- plaintext secrets are excluded from inventory, plan, request, API response and
+  persisted secret-free artifacts;
+- missing OS becomes `needs_discovery`, not a blocking validation error;
+- Testcompany fixtures cover five hosts, multiple formats, credentials and version changes.
+
+The incomplete YAML/JSON execution path does not block `INPUT-003`; it belongs to
+execution integration rather than the validated inventory domain model.
+
 - [ ] `INPUT-004` — Introduce a tool registry and capability policy.
 - [~] `INPUT-005` — Implement deterministic preflight and `AuditPlan`.
+
+Partial evidence:
+
+- typed `AuditPlan` with mandatory explicit confirmation;
+- deterministic technology detection and framework selection with select/reject reasons;
+- stale-plan rejection on confirm/start;
+- secret-safe `CREDENTIALS.md` integration;
+- injectable read-only discovery and deterministic reconciliation;
+- conflicting facts request clarification;
+- weak port-only PostgreSQL evidence does not select a PostgreSQL framework;
+- CLI and async HTTP start create a validated `AuditRequest`, invoke
+  `arun_request` and return `audit_run_id`.
+
+Remaining work:
+
+- production SSH discovery collector;
+- production WinRM discovery collector;
+- discovered evidence persistence;
+- discovery timeout, retry and error taxonomy;
+- YAML/JSON execution support.
 
 ### M3 — LangGraph orchestration and evidence collection
 
@@ -208,21 +222,16 @@ Do not mark complete based on class existence alone.
 
 ## Current blockers
 
+- `INPUT-005`: wire production SSH/WinRM discovery and complete YAML/JSON execution integration.
 - `FLOW-007`: remove deprecated process-wide graph getters after independent review.
-- `DOC-001`: synchronize `docs/baseline.md` with the accepted `AUD-002`/`CORE-001`
-  state and update stale evidence-layout examples to
-  `artifacts/<client_slug>/<audit_run_id>/`.
-- `CI-001` remains open even though current quality gates are green: its release
-  acceptance also requires workflow/report/review E2E and migration coverage.
+- `DOC-001`: synchronize baseline and evidence-layout documentation.
+- `CI-001`: complete workflow/report/review E2E and migration coverage.
 
 ## Status rules
 
 - `[ ]` Open: no acceptance review has confirmed the task.
-- `[~]` Partial: meaningful implementation exists, but at least one acceptance
-  criterion or proof is missing.
-- `[x]` Complete: every acceptance criterion has code/test evidence and the
-  required verification has passed.
+- `[~]` Partial: meaningful implementation exists, but at least one acceptance criterion or proof is missing.
+- `[x]` Complete: every acceptance criterion has code/test evidence and required verification has passed.
 
-The Russian checklist is the detailed canonical version. This English version
-is its synchronized status and task register for implementation planning and
-handoff.
+The Russian checklist is the synchronized translated status register. Both files
+must be updated together.
