@@ -11,15 +11,14 @@ Total tasks: **71**
 
 | Status | Count |
 | --- | ---: |
-| Complete `[x]` | **4 / 71 (5.6%)** |
-| Partially complete `[~]` | **7 / 71 (9.9%)** |
+| Complete `[x]` | **6 / 71 (8.5%)** |
+| Partially complete `[~]` | **5 / 71 (7.0%)** |
 | Open `[ ]` | **60 / 71 (84.5%)** |
-| Not fully complete | **67 / 71 (94.4%)** |
+| Not fully complete | **65 / 71 (91.5%)** |
 
-Completed: `AUD-002`, `AUD-003`, `CORE-002`, `CORE-003`.
+Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`.
 
-Partially complete: `AUD-001`, `CORE-001`, `CORE-006`, `INPUT-005`,
-`FLOW-007`, `OPS-004`, `DOC-001`.
+Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Latest verification
 
@@ -32,11 +31,11 @@ mandatory gates are green.
 | Format | 115 files already formatted |
 | Lint | Passed |
 | Type check | Passed, 67 files |
-| Unit tests | 302 passed |
-| PostgreSQL integration tests | 6 passed |
-| Full suite | 308 passed |
+| Unit tests | 313 passed |
+| PostgreSQL integration tests | 7 passed |
+| Full suite | 320 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | [Run 30197042283](https://github.com/whatelseek/psql_auditor/actions/runs/30197042283), all jobs passed |
+| Clean CI | pending CORE-001 push |
 
 Controlled negative runs:
 
@@ -60,12 +59,12 @@ Controlled negative runs:
 
 ### M0 — Baseline, tests, and CI
 
-- [~] `AUD-001` — Record the current reproducible baseline.
+- [x] `AUD-001` — Record the current reproducible baseline.
 - [x] `AUD-002` — Establish unified local and CI quality gates.
 - [x] `AUD-003` — Prepare shared deterministic test fixtures.
 
-`AUD-001` remains partial because the defect-to-module map does not yet cover
-every checklist item.
+`AUD-001` is complete: the defect-to-module map covers all 71 checklist IDs
+with `make validate-defect-map` enforced in CI.
 
 `AUD-003` closure evidence:
 
@@ -92,7 +91,17 @@ every checklist item.
 
 ### M1 — Identifiers and domain model
 
-- [~] `CORE-001` — Separate `client_id` from `audit_run_id`.
+- [x] `CORE-001` — Separate `client_id` from `audit_run_id`.
+
+`CORE-001` closure evidence:
+
+- `require_client_id` / `require_audit_run_id` reject empty and swapped ids;
+- warehouse `start_session` / upsert paths require both identifiers;
+- `AuditRegistry.save_run` rejects client reassignment;
+- resume/bootstrap reject conflicting client ownership;
+- legacy API `run_id` means evidence folder, not `audit_run_id`;
+- tests reuse AUD-003 fixtures in `tests/test_client_audit_run_identity.py`.
+
 - [x] `CORE-002` — Separate `AuditRun` from `AuditJob`.
 - [x] `CORE-003` — Introduce canonical result identity.
 - [ ] `CORE-004` — Introduce structured `AssessmentResult`.
@@ -184,12 +193,9 @@ every checklist item.
 
 ## Current blockers
 
-- `AUD-001`: map every defect to an existing production module or explicitly
-  mark the module as not implemented.
-- `CORE-001`: require `audit_run_id` throughout production warehouse
-  update/resume paths and reject empty `client_id` on new writes.
-- `DOC-001`: synchronize `docs/baseline.md` with the accepted `AUD-002` state
-  and update stale evidence-layout examples to
+- `CORE-006`: remove process-wide mutable graph/settings singletons.
+- `DOC-001`: synchronize `docs/baseline.md` with the accepted `AUD-002`/`CORE-001`
+  state and update stale evidence-layout examples to
   `artifacts/<client_slug>/<audit_run_id>/`.
 - `CI-001` remains open even though current quality gates are green: its release
   acceptance also requires workflow/report/review E2E and migration coverage.

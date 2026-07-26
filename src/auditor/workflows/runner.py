@@ -20,7 +20,7 @@ from auditor.frameworks import get_framework
 from auditor.hitl import format_continue_assistant_message
 from auditor.intake import client_slug
 from auditor.language import detect_report_language
-from auditor.legacy_compat import require_audit_run_id
+from auditor.legacy_compat import assert_client_owns_run, require_audit_run_id
 from auditor.progress import emit_phase
 from auditor.result_identity_bind import attach_result_identity
 from auditor.runtime_target import bind_runtime_credentials
@@ -105,6 +105,12 @@ async def arun_one(
             )
             registry.mark_run_started(audit_run_id)
         else:
+            assert_client_owns_run(
+                audit_run_id=audit_run_id,
+                run_client_id=existing.client_id,
+                requested_client_id=client_id,
+                context="arun_one",
+            )
             if not existing.evidence_run_id:
                 existing.evidence_run_id = store.run_id
                 registry.save_run(existing)
@@ -327,8 +333,19 @@ async def acontinue(
         if audit_run_id:
             registry = get_audit_registry(runtime.settings.evidence_dir)
             arun = registry.get_run(audit_run_id)
-            if arun is not None and arun.status.value == "cancelled":
-                registry.resume_run(audit_run_id)
+            if arun is not None:
+                meta_client = ""
+                if store is not None:
+                    meta_client = str(store.read_run_meta().get("client_id") or "").strip()
+                if meta_client:
+                    assert_client_owns_run(
+                        audit_run_id=audit_run_id,
+                        run_client_id=arun.client_id,
+                        requested_client_id=meta_client,
+                        context="acontinue",
+                    )
+                if arun.status.value == "cancelled":
+                    registry.resume_run(audit_run_id)
     else:
         store = None
 

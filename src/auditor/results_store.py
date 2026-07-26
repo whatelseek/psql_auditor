@@ -386,9 +386,10 @@ class ResultsStore:
         """
         if not self.enabled:
             return None
-        from auditor.legacy_compat import require_audit_run_id
+        from auditor.legacy_compat import require_audit_run_id, require_client_id
 
         arun = require_audit_run_id(audit_run_id, context="ResultsStore.start_session")
+        cid = require_client_id(client_id, context="ResultsStore.start_session")
         client = (client_name or evidence_run_id or "client").strip()
         slug = make_client_slug(client) or "client"
         run_id = (evidence_run_id or "").strip()
@@ -434,7 +435,7 @@ class ResultsStore:
                     int(next_num),
                     client,
                     slug,
-                    (client_id or "").strip(),
+                    cid,
                     arun,
                     run_id,
                     continue_thread_id or "",
@@ -889,10 +890,13 @@ class ResultsStore:
         """
         if not self.enabled or not requirements:
             return
-        from auditor.legacy_compat import require_audit_run_id
+        from auditor.legacy_compat import require_audit_run_id, require_client_id
 
         arun = require_audit_run_id(
             audit_run_id, context="ResultsStore.snapshot_framework_checklist"
+        )
+        client_id = require_client_id(
+            client_id, context="ResultsStore.snapshot_framework_checklist"
         )
         client = (client_name or "").strip() or "client"
         run_id = (evidence_run_id or "").strip()
@@ -1133,7 +1137,7 @@ class ResultsStore:
             return
         if not findings and not requirements:
             return
-        from auditor.legacy_compat import require_audit_run_id
+        from auditor.legacy_compat import require_audit_run_id, require_client_id
 
         sample_arun = (audit_run_id or "").strip()
         sample_cid = (client_id or "").strip()
@@ -1145,6 +1149,9 @@ class ResultsStore:
             if sample_arun and sample_cid:
                 break
         arun = require_audit_run_id(sample_arun, context="ResultsStore.record_host_framework_audit")
+        sample_cid = require_client_id(
+            sample_cid, context="ResultsStore.record_host_framework_audit"
+        )
         client = (client_name or "").strip() or "client"
         run_id = (evidence_run_id or "").strip()
         if not run_id:
@@ -1318,13 +1325,16 @@ class ResultsStore:
         """
         if not self.enabled:
             return
-        from auditor.legacy_compat import require_audit_run_id
+        from auditor.legacy_compat import require_audit_run_id, require_client_id
 
         arun = require_audit_run_id(
             audit_run_id or getattr(finding, "audit_run_id", "") or "",
             context="ResultsStore.upsert_requirement_result",
         )
-        cid = (client_id or "").strip() or str(getattr(finding, "client_id", "") or "").strip()
+        cid = require_client_id(
+            (client_id or "").strip() or str(getattr(finding, "client_id", "") or "").strip(),
+            context="ResultsStore.upsert_requirement_result",
+        )
         client = (client_name or "").strip() or "client"
         run_id = (evidence_run_id or "").strip()
         if not run_id:
@@ -1800,9 +1810,15 @@ class ResultsStore:
         Returns:
             asyncpg record for the resolved session row.
         """
-        from auditor.legacy_compat import MissingAuditRunIdError, require_audit_run_id
+        from auditor.legacy_compat import (
+            ClientOwnershipError,
+            MissingAuditRunIdError,
+            require_audit_run_id,
+            require_client_id,
+        )
 
         arun = require_audit_run_id(audit_run_id, context="ResultsStore._resolve_session_row")
+        cid = require_client_id(client_id, context="ResultsStore._resolve_session_row")
         row = await conn.fetchrow(
             """
             SELECT * FROM audit_sessions
@@ -1811,6 +1827,25 @@ class ResultsStore:
             arun,
         )
         if row:
+            stored_cid = str(row.get("client_id") or "").strip()
+            if stored_cid and stored_cid != cid:
+                raise ClientOwnershipError(
+                    f"audit_run_id {arun!r} belongs to client_id={stored_cid!r}, not {cid!r}"
+                )
+            if not stored_cid:
+                await conn.execute(
+                    """
+                    UPDATE audit_sessions SET client_id = $1 WHERE id = $2
+                    """,
+                    cid,
+                    int(row["id"]),
+                )
+                refreshed = await conn.fetchrow(
+                    "SELECT * FROM audit_sessions WHERE id = $1",
+                    int(row["id"]),
+                )
+                if refreshed:
+                    return refreshed
             return row
         if session_number is not None:
             row = await conn.fetchrow(
@@ -1828,17 +1863,23 @@ class ResultsStore:
                         f"session #{session_number} for {slug!r} belongs to "
                         f"audit_run_id={stored!r}, not {arun!r}"
                     )
+                stored_cid = str(row.get("client_id") or "").strip()
+                if stored_cid and stored_cid != cid:
+                    raise ClientOwnershipError(
+                        f"session #{session_number} for {slug!r} belongs to "
+                        f"client_id={stored_cid!r}, not {cid!r}"
+                    )
                 if not stored:
                     await conn.execute(
                         """
                         UPDATE audit_sessions SET
                             audit_run_id = $1,
-                            client_id = COALESCE(NULLIF($2, ''), client_id),
+                            client_id = $2,
                             evidence_run_id = COALESCE(NULLIF($3, ''), evidence_run_id)
                         WHERE id = $4
                         """,
                         arun,
-                        (client_id or "").strip(),
+                        cid,
                         run_id,
                         int(row["id"]),
                     )
@@ -1869,7 +1910,7 @@ class ResultsStore:
             int(next_num),
             client,
             slug,
-            (client_id or "").strip(),
+            cid,
             arun,
             run_id,
             framework_id,

@@ -1,4 +1,21 @@
-"""Compatibility adapter for pre-CORE-001 evidence / session records.
+"""Compatibility adapter and CORE-001 identity helpers.
+
+Identity field meanings
+-----------------------
+``client_id``
+    Durable client registry id (typically ``client_<hex>``). Permanently
+    identifies one client across many audits. Never an execution id.
+``audit_run_id``
+    Business id of one audit execution (``arun_<hex>``). One client may own
+    many runs; runs are never interchangeable by client alone.
+``evidence_run_id`` / API ``run_id``
+    On-disk evidence folder key, normally ``<client_slug>/<audit_run_id>``.
+    Legacy flat layouts used the client folder name as this value. This is
+    **not** a substitute for ``audit_run_id`` and must not be copied into
+    ``client_id``.
+``thread_id`` / ``checkpoint_id``
+    LangGraph checkpoint thread identifiers. Resume must also bind an
+    explicit ``audit_run_id``; thread id alone must not select "latest" run.
 
 Legacy layouts used the client folder name as the evidence "run id". This
 module never guesses a single active run from client name/slug/latest —
@@ -28,6 +45,14 @@ class AmbiguousLegacyRunError(ValueError):
 
 class MissingAuditRunIdError(ValueError):
     """Raised when a run-scoped operation lacks an explicit audit_run_id."""
+
+
+class MissingClientIdError(ValueError):
+    """Raised when a client-scoped operation lacks an explicit client_id."""
+
+
+class ClientOwnershipError(ValueError):
+    """Raised when an audit run's client ownership would be violated."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,3 +189,43 @@ def require_audit_run_id(audit_run_id: str | None, *, context: str = "") -> str:
         + (f" for {context}" if context else "")
         + "; client name/slug cannot be used as a run id"
     )
+
+
+def require_client_id(client_id: str | None, *, context: str = "") -> str:
+    """Validate an explicit non-empty ``client_id`` (CORE-001).
+
+    Rejects ``None``, empty, whitespace-only, and values that look like an
+    ``audit_run_id`` so identifiers are never silently swapped.
+    """
+    value = (client_id or "").strip()
+    if not value:
+        raise MissingClientIdError("client_id is required" + (f" for {context}" if context else ""))
+    if looks_like_audit_run_id(value):
+        raise MissingClientIdError(
+            f"invalid client_id {value!r}"
+            + (f" for {context}" if context else "")
+            + "; audit_run_id cannot be used as client_id"
+        )
+    return value
+
+
+def assert_client_owns_run(
+    *,
+    audit_run_id: str,
+    run_client_id: str | None,
+    requested_client_id: str | None,
+    context: str = "",
+) -> str:
+    """Ensure ``requested_client_id`` matches the run's stored client ownership.
+
+    Returns the normalized requested client id. Empty stored ownership may be
+    backfilled once; a non-empty mismatch raises :class:`ClientOwnershipError`.
+    """
+    requested = require_client_id(requested_client_id, context=context or "client ownership")
+    stored = (run_client_id or "").strip()
+    if stored and stored != requested:
+        raise ClientOwnershipError(
+            f"audit_run_id {audit_run_id!r} belongs to client_id={stored!r}, "
+            f"not {requested!r}" + (f" ({context})" if context else "")
+        )
+    return requested

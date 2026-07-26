@@ -104,9 +104,12 @@ class AuditRegistry:
         audit_run_id: str | None = None,
     ) -> AuditRun:
         """Create a new pending audit run (full restart → new id)."""
+        from auditor.legacy_compat import require_client_id
+
+        cid = require_client_id(client_id, context="AuditRegistry.create_run")
         run = AuditRun(
             audit_run_id=audit_run_id or new_audit_run_id(),
-            client_id=client_id,
+            client_id=cid,
             scope=dict(scope or {}),
             evidence_run_id=evidence_run_id,
             base_thread_id=base_thread_id,
@@ -154,6 +157,17 @@ class AuditRegistry:
         return self._row_to_run(rows[0])
 
     def save_run(self, run: AuditRun) -> None:
+        from auditor.legacy_compat import ClientOwnershipError, require_client_id
+
+        cid = require_client_id(run.client_id, context="AuditRegistry.save_run")
+        existing = self.get_run(run.audit_run_id)
+        if existing is not None:
+            prev = (existing.client_id or "").strip()
+            if prev and prev != cid:
+                raise ClientOwnershipError(
+                    f"cannot reassign audit_run_id {run.audit_run_id!r} from "
+                    f"client_id={prev!r} to {cid!r}"
+                )
         with self._lock:
             with self._connect() as conn:
                 conn.execute(
@@ -170,7 +184,7 @@ class AuditRegistry:
                     WHERE audit_run_id = ?
                     """,
                     (
-                        run.client_id,
+                        cid,
                         json.dumps(run.scope, ensure_ascii=False),
                         run.status.value,
                         run.started_at.isoformat() if run.started_at else None,

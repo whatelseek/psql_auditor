@@ -6,7 +6,7 @@ import pytest
 
 from auditor.checklist import Requirement
 from auditor.domain.result_identity import new_result_id
-from auditor.legacy_compat import MissingAuditRunIdError
+from auditor.legacy_compat import MissingAuditRunIdError, MissingClientIdError
 from auditor.state import Finding
 
 pytestmark = pytest.mark.integration
@@ -216,3 +216,23 @@ async def test_two_disposable_databases_do_not_share_state(isolated_results_db) 
             await cleanup.execute(f'DROP DATABASE IF EXISTS "{db_b}"')
         finally:
             await cleanup.close()
+
+
+@pytest.mark.asyncio
+async def test_reject_run_scoped_write_without_client_id(isolated_results_db) -> None:
+    """Warehouse session allocation requires a non-empty client_id (CORE-001)."""
+    _settings, store, _db = isolated_results_db
+    with pytest.raises(MissingClientIdError):
+        await store.start_session(
+            client_name="NoClientId",
+            evidence_run_id="client_slug/arun_integ0000000d",
+            audit_run_id="arun_integ0000000d",
+            client_id="",
+        )
+    with pytest.raises(MissingClientIdError):
+        await store.start_session(
+            client_name="WhitespaceClient",
+            evidence_run_id="client_slug/arun_integ0000000e",
+            audit_run_id="arun_integ0000000e",
+            client_id="   ",
+        )

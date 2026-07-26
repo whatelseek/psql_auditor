@@ -33,6 +33,7 @@ from auditor.intake import (
     resolve_scope_decision,
     resolve_yes_no,
 )
+from auditor.legacy_compat import assert_client_owns_run, require_audit_run_id
 from auditor.prompts import (
     INTAKE_INTERPRET_AUDIT_TYPE_PROMPT,
     INTAKE_INTERPRET_AUDIT_TYPE_SYSTEM,
@@ -103,6 +104,28 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                 )
                 registry.mark_run_started(arun.audit_run_id)
                 audit_run_id = arun.audit_run_id
+            else:
+                require_audit_run_id(audit_run_id, context="intake_gate")
+                existing = registry.get_run(audit_run_id)
+                if existing is None:
+                    registry.create_run(
+                        client_id=client.client_id,
+                        scope={
+                            "client_name": name,
+                            "client_slug": client.slug,
+                        },
+                        evidence_run_id="",
+                        base_thread_id=thread_hint or "",
+                        audit_run_id=audit_run_id,
+                    )
+                    registry.mark_run_started(audit_run_id)
+                else:
+                    assert_client_owns_run(
+                        audit_run_id=audit_run_id,
+                        run_client_id=existing.client_id,
+                        requested_client_id=client.client_id,
+                        context="intake_gate",
+                    )
             intake["audit_run_id"] = audit_run_id
 
             # Evidence root = <client_slug>/<audit_run_id> (never client name alone).

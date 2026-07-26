@@ -645,7 +645,7 @@ class EvidenceStore:
         Returns:
             Path to ``finding.json``.
         """
-        from auditor.legacy_compat import MissingAuditRunIdError, require_audit_run_id
+        from auditor.legacy_compat import require_audit_run_id, require_client_id
 
         if not isinstance(finding, dict):
             raise TypeError("finding payload must be a dict")
@@ -653,8 +653,10 @@ class EvidenceStore:
             str(finding.get("audit_run_id") or ""),
             context="EvidenceStore.write_finding",
         )
-        if not str(finding.get("client_id") or "").strip():
-            raise MissingAuditRunIdError("client_id is required for EvidenceStore.write_finding")
+        require_client_id(
+            str(finding.get("client_id") or ""),
+            context="EvidenceStore.write_finding",
+        )
         path = self.requirement_dir(framework_id, req_id) / "finding.json"
         path.write_text(
             json.dumps(finding, indent=2, ensure_ascii=False) + "\n",

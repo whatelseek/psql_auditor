@@ -30,7 +30,7 @@ from auditor.intake import (
     frameworks_for_audit_type,
 )
 from auditor.language import detect_report_language
-from auditor.legacy_compat import MissingAuditRunIdError, require_audit_run_id
+from auditor.legacy_compat import ClientOwnershipError, MissingAuditRunIdError, require_audit_run_id
 from auditor.report_archive import package_and_publish_archive
 from auditor.results_store import start_session_safe
 from auditor.secrets_file import InventorySshTarget, list_client_ssh_targets
@@ -345,8 +345,9 @@ def _bootstrap_audit_run(
         if arun is None:
             raise MissingAuditRunIdError(f"unknown audit_run_id {audit_run_id!r} in bootstrap")
         if arun.client_id and arun.client_id != client.client_id:
-            raise MissingAuditRunIdError(
-                f"audit_run_id {audit_run_id!r} belongs to a different client"
+            raise ClientOwnershipError(
+                f"audit_run_id {audit_run_id!r} belongs to client_id={arun.client_id!r}, "
+                f"not {client.client_id!r}"
             )
         if not arun.evidence_run_id:
             arun.evidence_run_id = run_id
