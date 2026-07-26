@@ -1,4 +1,4 @@
-"""Technology detection from inventory-declared evidence."""
+"""Technology detection from inventory-declared and discovered evidence."""
 
 from __future__ import annotations
 
@@ -13,18 +13,41 @@ _PORT_ONLY_CONFIDENCE = 0.4
 
 
 def detect_technologies(inventory: ClientInventory) -> list[TechnologyDetection]:
-    """Detect technologies from inventory fields and declared services/ports.
+    """Detect technologies from reconciled inventory + discovery facts.
 
-    Inventory-declared services are treated as confirmed. Port-only evidence
-    without a matching service name yields ``possible``, not ``confirmed``.
+    Confirmed inventory or discovered services → ``confirmed``.
+    Port-only evidence without a matching service name → ``possible``.
+    Conflicting OS evidence → ``unknown`` for OS technologies.
     """
+    conflicted_os = {c.host_id for c in inventory.conflicts if c.fact in {"os_family", "os_name"}}
     detections: list[TechnologyDetection] = []
     for host in inventory.hosts_without_errors():
         service_names = {s.name for s in host.services}
-        ports = {s.port for s in host.services if s.port is not None}
+        confirmed_services = {
+            s.name for s in host.services if s.status == "confirmed" and s.confidence >= 1.0
+        }
+        ports = {
+            int(f.value)
+            for f in host.facts
+            if f.fact == "listening_port" and isinstance(f.value, int)
+        }
+        ports |= {s.port for s in host.services if s.port is not None}
 
-        if host.os_family == "linux" or "ubuntu" in (host.os_name or "").lower():
+        if host.host_id in conflicted_os:
+            detections.append(
+                TechnologyDetection(
+                    technology_id="os",
+                    target_id=host.host_id,
+                    status="unknown",
+                    confidence=0.0,
+                    evidence=("fact_conflict:os_family",),
+                    source="unknown",
+                )
+            )
+        elif host.os_family == "linux" or "ubuntu" in (host.os_name or "").lower():
             tech = "ubuntu" if "ubuntu" in (host.os_name or "").lower() else "linux"
+            os_fact = next((f for f in host.facts if f.fact == "os_family"), None)
+            source = os_fact.source if os_fact else "inventory"
             detections.append(
                 TechnologyDetection(
                     technology_id=tech,
@@ -32,10 +55,12 @@ def detect_technologies(inventory: ClientInventory) -> list[TechnologyDetection]
                     status="confirmed",
                     confidence=1.0,
                     evidence=(f"os={host.os_name or host.os_family}",),
-                    source="inventory",
+                    source=source,
                 )
             )
         elif host.os_family == "windows":
+            os_fact = next((f for f in host.facts if f.fact == "os_family"), None)
+            source = os_fact.source if os_fact else "inventory"
             detections.append(
                 TechnologyDetection(
                     technology_id="windows_server",
@@ -43,19 +68,20 @@ def detect_technologies(inventory: ClientInventory) -> list[TechnologyDetection]
                     status="confirmed",
                     confidence=1.0,
                     evidence=(f"os={host.os_name or host.os_family}",),
-                    source="inventory",
+                    source=source,
                 )
             )
 
-        if "postgresql" in service_names:
+        if "postgresql" in confirmed_services or "postgresql" in service_names:
+            svc = next(s for s in host.services if s.name == "postgresql")
             detections.append(
                 TechnologyDetection(
                     technology_id="postgresql",
                     target_id=f"{host.host_id}/postgresql",
-                    status="confirmed",
-                    confidence=1.0,
-                    evidence=("service=postgresql",),
-                    source="inventory",
+                    status="confirmed" if svc.confidence >= 1.0 else "probable",
+                    confidence=float(svc.confidence),
+                    evidence=(f"service=postgresql source={svc.source}",),
+                    source=svc.source,
                 )
             )
         elif 5432 in ports:
@@ -66,7 +92,7 @@ def detect_technologies(inventory: ClientInventory) -> list[TechnologyDetection]
                     status="possible",
                     confidence=_PORT_ONLY_CONFIDENCE,
                     evidence=("port=5432",),
-                    source="inventory",
+                    source="discovered",
                 )
             )
 

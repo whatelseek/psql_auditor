@@ -19,6 +19,7 @@ from auditor.domain.inventory import (
     InventoryService,
     InventoryVersion,
     ValidationIssue,
+    ValidationLevel,
 )
 from auditor.inventory.client_name import validate_client_name
 from auditor.inventory.loaders import list_side_files
@@ -126,6 +127,23 @@ def normalize_inventory(
     """Build a validated ``ClientInventory`` from a raw loaded document."""
     client_id = validate_client_name(str(raw.get("client") or client_name))
     issues: list[ValidationIssue] = []
+    for load_issue in raw.get("_load_issues") or []:
+        if isinstance(load_issue, dict) and load_issue.get("code"):
+            level_raw = str(load_issue.get("level") or "warning")
+            level: ValidationLevel = (
+                level_raw  # type: ignore[assignment]
+                if level_raw in {"error", "warning", "information"}
+                else "warning"
+            )
+            issues.append(
+                ValidationIssue(
+                    level=level,
+                    code=str(load_issue["code"]),
+                    message=str(load_issue.get("message") or load_issue["code"]),
+                    host_id=load_issue.get("host_id"),
+                    location=str(load_issue.get("location") or ""),
+                )
+            )
     hosts_raw = raw.get("hosts") or []
     if not isinstance(hosts_raw, list):
         issues.append(
@@ -182,11 +200,16 @@ def normalize_inventory(
         os_name = str(item.get("os") or item.get("os_name") or item.get("operating_system") or "")
         os_family = _os_family(os_name)
         if not os_name:
+            # IP/port/credentials-only hosts are valid; OS comes from discovery.
             issues.append(
                 ValidationIssue(
-                    level="error",
-                    code="missing_os",
-                    message=f"operating system missing for host {host_id}",
+                    level="information",
+                    code="needs_discovery",
+                    message=(
+                        f"operating system missing for host {host_id}; "
+                        "live read-only discovery is required before final "
+                        "framework selection"
+                    ),
                     host_id=host_id,
                     location=f"hosts[{index}].os",
                 )

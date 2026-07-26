@@ -538,7 +538,7 @@ def list_client_ssh_targets(
     client_dir = resolve_client_dir(Path(inventory_dir), client_slug_name)
     targets: list[InventorySshTarget] = []
     seen: set[str] = set()
-    for name in ("INVENTORY.md", "connection.md"):
+    for name in ("INVENTORY.md", "CREDENTIALS.md", "credentials.md", "connection.md"):
         path = client_dir / name
         if not path.is_file():
             continue
@@ -570,7 +570,7 @@ def list_client_access_endpoints(
     client_dir = resolve_client_dir(Path(inventory_dir), client_slug_name)
     out: list[dict[str, str]] = []
     seen: set[str] = set()
-    for name in ("INVENTORY.md", "connection.md"):
+    for name in ("INVENTORY.md", "CREDENTIALS.md", "credentials.md", "connection.md"):
         path = client_dir / name
         if not path.is_file():
             continue
@@ -772,14 +772,15 @@ def read_client_credentials(
 ) -> dict[str, str]:
     """Parse SSH/PG keys from the client inventory without mutating env.
 
-    Same file order as :func:`load_inventory_credentials` (``INVENTORY.md`` then
-    ``connection.md``), but returns a new dict only — safe for concurrent runs.
+    Same file order as :func:`load_inventory_credentials`
+    (``INVENTORY.md``, ``CREDENTIALS.md``, then ``connection.md``), but returns
+    a new dict only — safe for concurrent runs.
     """
     from auditor.host_facts import resolve_client_dir
 
     client_dir = resolve_client_dir(Path(inventory_dir), client_slug_name)
     applied: dict[str, str] = {}
-    for name in ("INVENTORY.md", "connection.md"):
+    for name in ("INVENTORY.md", "CREDENTIALS.md", "credentials.md", "connection.md"):
         path = client_dir / name
         if not path.is_file():
             continue
@@ -858,7 +859,8 @@ def load_inventory_credentials(
     ``override_existing`` is true within this load):
 
     1. ``inventory/<client>/INVENTORY.md`` (credentials table, or legacy env)
-    2. ``inventory/<client>/connection.md`` (optional dedicated secrets file)
+    2. ``inventory/<client>/CREDENTIALS.md`` (optional dedicated credentials)
+    3. ``inventory/<client>/connection.md`` (optional dedicated secrets file)
 
     Client inventory credentials are meant to be the source of truth per
     engagement; pass ``override_existing=True`` (default) so they win over
@@ -870,7 +872,7 @@ def load_inventory_credentials(
     target = environ if environ is not None else os.environ
     applied: dict[str, str] = {}
 
-    for name in ("INVENTORY.md", "connection.md"):
+    for name in ("INVENTORY.md", "CREDENTIALS.md", "credentials.md", "connection.md"):
         path = client_dir / name
         if not path.is_file():
             continue

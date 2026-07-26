@@ -67,10 +67,40 @@ def select_frameworks_for_inventory(
             )
         )
 
+    conflicted_os = {c.host_id for c in inventory.conflicts if c.fact in {"os_family", "os_name"}}
+
     for host in inventory.hosts_without_errors():
-        # OS frameworks
-        if host.os_family == "linux" or "ubuntu" in (host.os_name or "").lower():
+        if host.host_id in conflicted_os:
+            decisions.append(
+                FrameworkSelectionDecision(
+                    framework_id="ubuntu_cis_24_l2",
+                    framework_version="",
+                    target_id=host.host_id,
+                    reason=(
+                        "OS evidence conflicts between inventory and discovery; "
+                        "clarification required before OS framework selection"
+                    ),
+                    status="considered",
+                )
+            )
+            decisions.append(
+                FrameworkSelectionDecision(
+                    framework_id="windows_server",
+                    framework_version="",
+                    target_id=host.host_id,
+                    reason=(
+                        "OS evidence conflicts between inventory and discovery; "
+                        "clarification required before OS framework selection"
+                    ),
+                    status="rejected",
+                )
+            )
+        elif host.os_family == "linux" or "ubuntu" in (host.os_name or "").lower():
             fw = _pick_available(available, _TECH_FRAMEWORK_PREFERENCES["ubuntu"])
+            os_source = next(
+                (f.source for f in host.facts if f.fact == "os_family"),
+                "inventory",
+            )
             if fw is not None:
                 decisions.append(
                     FrameworkSelectionDecision(
@@ -78,7 +108,7 @@ def select_frameworks_for_inventory(
                         framework_version=_framework_version(fw),
                         target_id=host.host_id,
                         reason=(
-                            f"Linux/Ubuntu host confirmed from inventory "
+                            f"Linux/Ubuntu host confirmed from {os_source} "
                             f"(os={host.os_name or host.os_family})"
                         ),
                         status="selected",
@@ -96,6 +126,10 @@ def select_frameworks_for_inventory(
                 )
         elif host.os_family == "windows":
             fw = _pick_available(available, _TECH_FRAMEWORK_PREFERENCES["windows_server"])
+            os_source = next(
+                (f.source for f in host.facts if f.fact == "os_family"),
+                "inventory",
+            )
             if fw is not None:
                 decisions.append(
                     FrameworkSelectionDecision(
@@ -103,7 +137,7 @@ def select_frameworks_for_inventory(
                         framework_version=_framework_version(fw),
                         target_id=host.host_id,
                         reason=(
-                            f"Windows Server host confirmed from inventory "
+                            f"Windows Server host confirmed from {os_source} "
                             f"(os={host.os_name or host.os_family})"
                         ),
                         status="selected",
@@ -119,8 +153,18 @@ def select_frameworks_for_inventory(
                         status="rejected",
                     )
                 )
+        elif not host.os_family:
+            decisions.append(
+                FrameworkSelectionDecision(
+                    framework_id="host_facts",
+                    framework_version="",
+                    target_id=host.host_id,
+                    reason="OS unknown after inventory load; discovery/clarification required",
+                    status="considered",
+                )
+            )
 
-        # PostgreSQL
+        # PostgreSQL — confirmed inventory/discovery only; port-only rejected.
         pg_status = detection_status_for(detections, "postgresql", host.host_id)
         pg_target = f"{host.host_id}/postgresql"
         fw = _pick_available(available, _TECH_FRAMEWORK_PREFERENCES["postgresql"])
@@ -130,7 +174,7 @@ def select_frameworks_for_inventory(
                     framework_id=fw.id,
                     framework_version=_framework_version(fw),
                     target_id=pg_target,
-                    reason=("PostgreSQL service confirmed from inventory and connection data"),
+                    reason="PostgreSQL service confirmed from inventory or discovery",
                     status="selected",
                 )
             )

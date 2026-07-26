@@ -22,8 +22,11 @@ Client names must contain only Latin letters, digits, and underscores
 psql-auditor inventory validate Testcompany
 psql-auditor inventory analyze Testcompany
 psql-auditor audit plan Testcompany
-psql-auditor audit start Testcompany --confirm
+psql-auditor audit start Testcompany --confirm   # executes via arun_request
 ```
+
+`audit start --confirm` rejects with `plan_stale` when inventory changed since
+the draft plan was generated. Prefer secret references in `CREDENTIALS.md`.
 
 See [`docs/inventory-driven-audit.md`](../docs/inventory-driven-audit.md).
 

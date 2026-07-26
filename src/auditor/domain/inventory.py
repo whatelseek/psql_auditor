@@ -130,6 +130,18 @@ class ValidationIssue(BaseModel):
     location: StrictStr = ""
 
 
+class FactConflict(BaseModel):
+    """Inventory vs discovered fact conflict (inventory facts are never overwritten)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    host_id: StrictStr = Field(min_length=1)
+    fact: StrictStr = Field(min_length=1)
+    inventory_value: Any
+    discovered_value: Any
+    message: StrictStr = Field(min_length=1)
+
+
 class InventoryVersion(BaseModel):
     """Immutable inventory snapshot identity for audit reproducibility."""
 
@@ -157,6 +169,7 @@ class ClientInventory(BaseModel):
     questionnaires: tuple[StrictStr, ...] = ()
     exceptions: tuple[StrictStr, ...] = ()
     facts: tuple[InventoryFact, ...] = ()
+    conflicts: tuple[FactConflict, ...] = ()
     version: InventoryVersion
     issues: tuple[ValidationIssue, ...] = ()
 
@@ -171,6 +184,10 @@ class ClientInventory(BaseModel):
     def hosts_without_errors(self) -> list[InventoryHost]:
         blocked = {i.host_id for i in self.issues if i.level == "error" and i.host_id}
         return [h for h in self.hosts if h.host_id not in blocked]
+
+    def hosts_needing_discovery(self) -> list[InventoryHost]:
+        need = {i.host_id for i in self.issues if i.code == "needs_discovery" and i.host_id}
+        return [h for h in self.hosts if h.host_id in need or not h.os_family]
 
     @model_validator(mode="after")
     def _unique_hosts(self) -> ClientInventory:

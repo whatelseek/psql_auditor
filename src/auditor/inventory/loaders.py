@@ -98,6 +98,15 @@ def load_raw_inventory(
     else:
         raw = _load_markdown(text, client)
     raw.setdefault("client", client)
+    raw.setdefault("credentials", [])
+    # Merge dedicated CREDENTIALS.md / connection.md credential tables.
+    merged_creds, cred_issues = merge_credential_files(
+        list(raw.get("credentials") or []),
+        client_dir,
+    )
+    raw["credentials"] = merged_creds
+    raw.setdefault("_load_issues", [])
+    raw["_load_issues"].extend(cred_issues)
     return raw, path, fmt
 
 
@@ -238,12 +247,47 @@ def _load_markdown(text: str, client: str) -> dict[str, Any]:
             }
         )
 
+    credentials = parse_credentials_markdown(text, source="INVENTORY.md")
+
+    return {
+        "client": client,
+        "hosts": hosts,
+        "credentials": credentials,
+        "questionnaires": [],
+        "exceptions": [],
+    }
+
+
+def parse_credentials_markdown(text: str, *, source: str = "credentials") -> list[dict[str, Any]]:
+    """Parse a Markdown credentials table into secret-free credential dicts.
+
+    Supported columns:
+    Access | Host / URL | Port | Username | Password / Token | Database
+
+    Asset/host tables that also have an Access column are ignored unless they
+    look like credential tables (username / secret columns present).
+    """
     cred_rows = _parse_markdown_table(text, required_headers={"access", "service", "type"})
     credentials: list[dict[str, Any]] = []
     for row in cred_rows:
         if not (row.get("access") or row.get("service") or row.get("type")):
             continue
         if not (row.get("host") or row.get("hosturl") or row.get("url") or row.get("endpoint")):
+            continue
+        # Skip in-scope host tables that reuse an Access column.
+        looks_like_credentials = any(
+            key in row
+            for key in (
+                "username",
+                "user",
+                "passwordtoken",
+                "password",
+                "token",
+                "secret",
+                "secretreference",
+            )
+        )
+        if not looks_like_credentials:
             continue
         secret = (
             row.get("secretreference")
@@ -271,16 +315,64 @@ def _load_markdown(text: str, client: str) -> dict[str, Any]:
                 "secret_ref": secret_ref,
                 "database": row.get("database") or row.get("extra") or "",
                 "has_secret": has_secret,
+                "source": source,
             }
         )
+    return credentials
 
-    return {
-        "client": client,
-        "hosts": hosts,
-        "credentials": credentials,
-        "questionnaires": [],
-        "exceptions": [],
-    }
+
+def merge_credential_files(
+    base: list[dict[str, Any]],
+    client_dir: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Merge CREDENTIALS.md / connection.md into inventory credentials.
+
+    Returns ``(merged_credentials, load_issues)`` where issues describe
+    duplicate access+host+port rows (later sources lose).
+    """
+    merged = list(base)
+    issues: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for cred in merged:
+        key = _cred_key(cred)
+        if key:
+            seen.add(key)
+
+    for name in ("CREDENTIALS.md", "credentials.md", "connection.md"):
+        path = client_dir / name
+        if not path.is_file():
+            continue
+        for cred in parse_credentials_markdown(
+            path.read_text(encoding="utf-8"),
+            source=name,
+        ):
+            key = _cred_key(cred)
+            if key and key in seen:
+                issues.append(
+                    {
+                        "level": "warning",
+                        "code": "duplicate_credential",
+                        "message": (
+                            f"duplicate credential for {cred.get('access')} "
+                            f"{cred.get('host')}:{cred.get('port')} in {name}"
+                        ),
+                        "location": name,
+                    }
+                )
+                continue
+            if key:
+                seen.add(key)
+            merged.append(cred)
+    return merged, issues
+
+
+def _cred_key(cred: dict[str, Any]) -> str:
+    access = str(cred.get("access") or "").strip().lower()
+    host = str(cred.get("host") or "").strip().lower()
+    port = str(cred.get("port") or "").strip()
+    if not access or not host:
+        return ""
+    return f"{access}|{host}|{port}"
 
 
 def list_side_files(client_dir: Path) -> dict[str, list[str]]:

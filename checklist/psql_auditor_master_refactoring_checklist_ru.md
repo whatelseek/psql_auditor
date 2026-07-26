@@ -1,6 +1,6 @@
 # `psql_auditor` — Мастер-чеклист разработки и приёмки
 
-Версия чеклиста: **1.10**  
+Версия чеклиста: **1.11**  
 Дата: **2026-07-26**  
 Репозиторий: `whatelseek/psql_auditor`  
 Базовый commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
@@ -80,8 +80,10 @@ Markdown/YAML/JSON, уровни error/warning/information, версия invento
 - [~] `INPUT-005` — Детерминированный preflight и `AuditPlan`.
 
 Частичные доказательства `INPUT-005`: типизированный `AuditPlan` с обязательным
-подтверждением; выбор фреймворков с причинами; CLI `psql-auditor` и HTTP
-confirm; запуск аудита без confirm отклоняется.
+подтверждением; stale-plan (`plan_stale`); merge `CREDENTIALS.md`;
+`needs_discovery` + injectable read-only discovery/reconcile; confirm →
+`AuditRequest` (version/hash) → `arun_request` / `audit_run_id`. Default
+discoverer — no-op до wiring live SSH/WinRM; независимая приёмка обязательна.
 
 ### M3 — Оркестрация LangGraph и сбор доказательств
 
