@@ -30,6 +30,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from auditor import __version__
+from auditor.api.inventory_routes import router as inventory_router
 from auditor.api.openai_compat import router as openai_router
 from auditor.application_runtime import ApplicationRuntime, RuntimeState, build_application_runtime
 from auditor.config import Settings, load_settings
@@ -80,6 +81,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.include_router(openai_router)
+    app.include_router(inventory_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

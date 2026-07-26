@@ -28,7 +28,18 @@ description: Ubuntu CIS host hardening
 
 No code changes required — new files are discovered from `AGENTS_DIR`.
 
-Bundled examples: `postgres_cis`, `ubuntu_cis_24_l2`, `host_facts`.
+Bundled examples: `postgres_cis`, `ubuntu_cis_24_l2`, `host_facts`, `windows_server`.
+
+**Inventory-driven launch (CLI):** place `inventory/<ClientName>/INVENTORY.md`
+(or `.yaml` / `.json`), then:
+
+```bash
+psql-auditor inventory analyze Testcompany
+psql-auditor audit plan Testcompany
+psql-auditor audit start Testcompany --confirm
+```
+
+Details: [`docs/inventory-driven-audit.md`](docs/inventory-driven-audit.md).
 
 ## Graph (cyclic + HITL)
 

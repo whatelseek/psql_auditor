@@ -28,6 +28,13 @@ from auditor.domain.audit_models import (
     validate_job_transition,
     validate_run_transition,
 )
+from auditor.domain.audit_plan import (
+    AuditPlan,
+    AuditPlanSummary,
+    AuditPlanTarget,
+    PlanConfirmationRejected,
+    PlanConfirmationRequest,
+)
 from auditor.domain.audit_request import (
     AUDIT_REQUEST_SCHEMA_VERSION,
     POC_TOOL_PROFILE,
@@ -46,6 +53,19 @@ from auditor.domain.audit_request import (
     run_settings_from_settings,
     scope_with_audit_request,
     validate_audit_request_semantics,
+)
+from auditor.domain.inventory import (
+    CLIENT_NAME_PATTERN,
+    SUPPORTED_INVENTORY_FORMATS,
+    ClientInventory,
+    CredentialReference,
+    FrameworkSelectionDecision,
+    InventoryFact,
+    InventoryHost,
+    InventoryService,
+    InventoryVersion,
+    TechnologyDetection,
+    ValidationIssue,
 )
 from auditor.domain.result_identity import (
     DuplicateLogicalKeyError,
@@ -114,4 +134,20 @@ __all__ = [
     "run_settings_from_settings",
     "scope_with_audit_request",
     "validate_audit_request_semantics",
+    "AuditPlan",
+    "AuditPlanSummary",
+    "AuditPlanTarget",
+    "PlanConfirmationRejected",
+    "PlanConfirmationRequest",
+    "CLIENT_NAME_PATTERN",
+    "SUPPORTED_INVENTORY_FORMATS",
+    "ClientInventory",
+    "CredentialReference",
+    "FrameworkSelectionDecision",
+    "InventoryFact",
+    "InventoryHost",
+    "InventoryService",
+    "InventoryVersion",
+    "TechnologyDetection",
+    "ValidationIssue",
 ]
