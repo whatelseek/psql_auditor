@@ -152,6 +152,8 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
             hostname=hostname,
             ssh_host=ssh_host or host_id or None,
             evidence_relpath=evidence_rel,
+            audit_run_id=str(state.get("audit_run_id") or ""),
+            client_id=str(state.get("client_id") or ""),
         )
 
     async def _worker(req_id: str) -> Finding:
@@ -773,6 +775,12 @@ async def warehouse_live_upsert(runtime: AuditRuntime,
         session_number=runtime._results_session_number(state, store),
         hostname=hostname,
         ssh_host=ssh_host or host_id or None,
+        audit_run_id=str(
+            getattr(finding, "audit_run_id", "") or state.get("audit_run_id") or ""
+        ),
+        client_id=str(
+            getattr(finding, "client_id", "") or state.get("client_id") or ""
+        ),
     )
 
 def results_session_number(runtime: AuditRuntime,

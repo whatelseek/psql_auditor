@@ -13,6 +13,7 @@ from langgraph.types import Command
 
 from auditor.asset_registry import get_asset_registry
 from auditor.audit_registry import get_audit_registry
+from auditor.client_registry import get_client_registry, looks_like_audit_run_id
 from auditor.context import truncate_text
 from auditor.domain.result_identity import index_by_result_id
 from auditor.evidence_store import EvidenceStore, bind_host_segment, new_run_id
@@ -20,6 +21,7 @@ from auditor.frameworks import get_framework
 from auditor.hitl import format_continue_assistant_message
 from auditor.intake import client_slug
 from auditor.language import detect_report_language
+from auditor.legacy_compat import require_audit_run_id
 from auditor.progress import emit_phase
 from auditor.result_identity_bind import attach_result_identity
 from auditor.runtime_target import bind_runtime_credentials
@@ -79,24 +81,58 @@ async def arun_one(runtime: AuditRuntime,
     client_name = str(
         (intake_state or {}).get("client_name") or meta.get("client_name") or ""
     )
-    client_id = str(
-        (intake_state or {}).get("client_id")
+    slug = str(
+        (intake_state or {}).get("client_slug")
         or (client_slug(client_name) if client_name else "")
         or "client"
     )
-    audit_run_id = str((intake_state or {}).get("audit_run_id") or "")
-    if not audit_run_id:
-        # Single-framework entry points still need a business AuditRun id.
-        arun = get_audit_registry(runtime.settings.evidence_dir).create_run(
+    client = get_client_registry(runtime.settings.evidence_dir).ensure_client(
+        display_name=client_name or slug,
+        slug=slug,
+        client_id=str((intake_state or {}).get("client_id") or "") or None,
+    )
+    client_id = client.client_id
+    registry = get_audit_registry(runtime.settings.evidence_dir)
+    audit_run_id = str((intake_state or {}).get("audit_run_id") or "").strip()
+    if audit_run_id:
+        require_audit_run_id(audit_run_id, context="arun_one")
+        existing = registry.get_run(audit_run_id)
+        if existing is None:
+            # Explicit id from caller that is not yet registered — create once.
+            registry.create_run(
+                client_id=client_id,
+                scope={"framework_id": framework_id or "", "client_slug": client.slug},
+                evidence_run_id=store.run_id,
+                base_thread_id=tid,
+                audit_run_id=audit_run_id,
+            )
+            registry.mark_run_started(audit_run_id)
+        else:
+            if not existing.evidence_run_id:
+                existing.evidence_run_id = store.run_id
+                registry.save_run(existing)
+    else:
+        # New single-framework audit → new AuditRun (never reuse by client).
+        arun = registry.create_run(
             client_id=client_id,
-            scope={"framework_id": framework_id or ""},
+            scope={"framework_id": framework_id or "", "client_slug": client.slug},
             evidence_run_id=store.run_id,
             base_thread_id=tid,
         )
-        get_audit_registry(runtime.settings.evidence_dir).mark_run_started(
-            arun.audit_run_id
-        )
+        registry.mark_run_started(arun.audit_run_id)
         audit_run_id = arun.audit_run_id
+    # Nested evidence path when client is known (isolates concurrent runs).
+    if client.slug and looks_like_audit_run_id(audit_run_id):
+        nested = f"{client.slug}/{audit_run_id}"
+        if store.run_id != nested:
+            old_id = store.run_id
+            store.rebind_run_id(nested)
+            runtime._evidence_by_run.pop(old_id, None)
+            runtime._evidence_by_run[store.run_id] = store
+            run_row = registry.get_run(audit_run_id)
+            if run_row is not None:
+                run_row.evidence_run_id = store.run_id
+                registry.save_run(run_row)
     asset_id = str((intake_state or {}).get("asset_id") or "")
     if not asset_id and ssh_target is not None:
         inv_key = ssh_target.inventory_key or ssh_target.label

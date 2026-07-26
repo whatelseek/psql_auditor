@@ -89,12 +89,14 @@ def effective_host_segment(store_segment: str | None = None) -> str | None:
 
 
 def new_run_id() -> str:
-    """Return a temporary filesystem-safe run id (renamed to client name after intake).
+    """Return a temporary filesystem-safe evidence folder id.
 
     Format: ``YYYYMMDDTHHMMSSZ_<8-hex>`` UTC timestamp plus short uuid suffix.
+    After intake this is rebound to ``<client_slug>/<audit_run_id>`` (CORE-001);
+    it is never the durable business run id by itself.
 
     Returns:
-        New run id string suitable as an evidence folder name.
+        New temporary folder name under the evidence root.
     """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{stamp}_{uuid4().hex[:8]}"
@@ -197,20 +199,40 @@ class EvidenceStore:
         return base / _safe_segment(fw, "framework")
 
     def rebind_run_id(self, new_run_id: str) -> str:
-        """Rename this run folder to ``new_run_id`` (typically the client name).
+        """Rename this evidence folder to ``new_run_id``.
+
+        CORE-001 uses nested ``<client_slug>/<audit_run_id>`` so runs for the
+        same client never share a folder. Bare client names are not valid run
+        identities.
 
         If the target folder already exists, merges contents into it and removes
         the temporary source folder.
 
         Args:
-            new_run_id: Desired folder name (sanitized).
+            new_run_id: Desired relative path under the evidence root
+                (``slug`` or ``slug/arun_…``).
 
         Returns:
-            Final sanitized ``run_id`` after rename/merge.
+            Final ``run_id`` (may contain ``/``) after rename/merge.
         """
-        new_id = _safe_segment(new_run_id, "client")
+        parts = [
+            _safe_segment(p, "x")
+            for p in str(new_run_id).replace("\\", "/").split("/")
+            if p and p not in {".", ".."}
+        ]
+        if not parts:
+            parts = ["client"]
+        new_id = "/".join(parts)
         base = self.root.parent
-        new_root = base / new_id
+        # When already nested (slug/arun), parent of current root may be slug.
+        # Always resolve relative to the configured evidence root (grandparent
+        # if current run_id already contains a slash).
+        evidence_root = base
+        if "/" in str(self.run_id):
+            evidence_root = Path(self.root)
+            for _ in str(self.run_id).split("/"):
+                evidence_root = evidence_root.parent
+        new_root = evidence_root.joinpath(*parts)
         old_root = self.root
         if new_root.resolve() == old_root.resolve():
             self.run_id = new_id
@@ -243,22 +265,68 @@ class EvidenceStore:
     def open_existing(cls, evidence_dir: Path | str, run_id: str) -> EvidenceStore:
         """Open an existing run folder (does not create a new run id).
 
+        ``run_id`` may be a nested evidence key (``slug/arun_…``), a bare
+        ``arun_…`` (resolved via :mod:`auditor.legacy_compat`), or a legacy
+        flat folder name. Client name/slug alone is rejected when it maps to
+        more than one run.
+
         Args:
             evidence_dir: Root evidence directory.
-            run_id: Existing run folder name.
+            run_id: Existing evidence path, audit_run_id, or legacy folder.
 
         Returns:
             Store instance with counters seeded from on-disk tool files.
 
         Raises:
-            FileNotFoundError: When ``<evidence_dir>/<run_id>`` does not exist.
+            FileNotFoundError: When the evidence root cannot be resolved.
         """
+        from auditor.client_registry import looks_like_audit_run_id
+        from auditor.legacy_compat import (
+            AmbiguousLegacyRunError,
+            resolve_evidence_for_audit_run,
+        )
+
         base = Path(evidence_dir)
-        path = base / run_id
-        if not path.is_dir():
-            raise FileNotFoundError(f"Evidence run not found: {path}")
-        store = cls(base, run_id=run_id)
-        return store
+        rid = (run_id or "").strip().strip("/")
+        if not rid:
+            raise FileNotFoundError("Evidence run id is required")
+        path = base / rid
+        if path.is_dir():
+            # Nested CORE-001 layout: slug/arun_… is a concrete evidence root.
+            if "/" in rid or looks_like_audit_run_id(Path(rid).name):
+                store = cls(base, run_id=rid)
+                return store
+            # Bare client slug directory — only open if uniquely resolvable.
+            nested_aruns = [
+                p
+                for p in path.iterdir()
+                if p.is_dir()
+                and not p.name.startswith(".")
+                and looks_like_audit_run_id(p.name)
+            ]
+            if len(nested_aruns) == 1:
+                nested_id = f"{rid}/{nested_aruns[0].name}"
+                store = cls(base, run_id=nested_id)
+                return store
+            if len(nested_aruns) > 1:
+                raise AmbiguousLegacyRunError(
+                    f"client folder {rid!r} has multiple audit runs; "
+                    "pass an explicit audit_run_id",
+                    candidates=[f"{rid}/{p.name}" for p in nested_aruns],
+                )
+            # Legacy flat client folder (meta / evidence at root).
+            store = cls(base, run_id=rid)
+            return store
+        if looks_like_audit_run_id(rid):
+            try:
+                hit = resolve_evidence_for_audit_run(base, rid)
+            except AmbiguousLegacyRunError:
+                raise
+            except (KeyError, ValueError) as exc:
+                raise FileNotFoundError(str(exc)) from exc
+            store = cls(base, run_id=hit.evidence_run_id)
+            return store
+        raise FileNotFoundError(f"Evidence run not found: {path}")
 
     def seed_counters_from_disk(self) -> None:
         """Initialize tool sequence counters from existing ``NNN_*.txt`` files.
@@ -580,14 +648,28 @@ class EvidenceStore:
     ) -> Path:
         """Write the filled finding cells for the requirement.
 
+        Requires ``audit_run_id`` and ``client_id`` on the payload (CORE-001).
+
         Args:
             framework_id: Evidence framework key.
             req_id: Requirement id.
-            finding: Status, observation, recommendation, and metadata.
+            finding: Status, observation, recommendation, and identity metadata.
 
         Returns:
             Path to ``finding.json``.
         """
+        from auditor.legacy_compat import MissingAuditRunIdError, require_audit_run_id
+
+        if not isinstance(finding, dict):
+            raise TypeError("finding payload must be a dict")
+        require_audit_run_id(
+            str(finding.get("audit_run_id") or ""),
+            context="EvidenceStore.write_finding",
+        )
+        if not str(finding.get("client_id") or "").strip():
+            raise MissingAuditRunIdError(
+                "client_id is required for EvidenceStore.write_finding"
+            )
         path = self.requirement_dir(framework_id, req_id) / "finding.json"
         path.write_text(
             json.dumps(finding, indent=2, ensure_ascii=False) + "\n",

@@ -376,6 +376,21 @@ async def collect_host_facts_llm(runtime: AuditRuntime,
                     pass_criteria=req_map[req_id].pass_criteria,
                 )
                 if store is not None:
+                    from auditor.result_identity_bind import attach_result_identity
+                    meta = store.read_run_meta()
+                    finding = attach_result_identity(
+                        finding,
+                        state={
+                            "client_id": str(meta.get("client_id") or ""),
+                            "audit_run_id": str(meta.get("audit_run_id") or ""),
+                            "asset_id": str(meta.get("asset_id") or ""),
+                            "framework_version": str(
+                                meta.get("framework_version") or "1"
+                            ),
+                        },
+                        framework_id="host_facts",
+                        framework_version=str(meta.get("framework_version") or "1"),
+                    )
                     store.write_finding(
                         "host_facts", req_id, finding.model_dump()
                     )

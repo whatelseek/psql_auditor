@@ -3,12 +3,18 @@
 This module optionally persists **structured audit results** to PostgreSQL:
 numbered sessions per client, host/framework result rows, checklist snapshots,
 and filled requirement cells. Raw tool stdout remains on disk under
-``artifacts/<client>/``.
+``artifacts/<client_slug>/<audit_run_id>/``.
+
+``audit_sessions`` is a **secondary** warehouse tracker (session numbers for
+UI/continue phrases). Canonical business identity is :class:`AuditRun`
+(``audit_run_id``) from :mod:`auditor.audit_registry` — sessions must store
+``audit_run_id`` and must not be used to invent a run when it is missing
+(CORE-001).
 
 Layout (when ``RESULTS_DB_PER_CLIENT=true``)::
 
     results_<client_slug>
-      audit_sessions           -- session_number 1, 2, 3… per client
+      audit_sessions           -- session_number 1, 2, 3… per client (+ audit_run_id)
       hosts
       host_results             -- tagged with session_id + session_number
       framework_requirements   -- checklist snapshot for the session/framework
@@ -23,12 +29,12 @@ Pipeline role:
     :func:`record_requirement_result_safe` dual-writes each filled REQ during
     assess; finalize and :func:`~auditor.followup.run_update_report` call
     :func:`record_results_safe` to refresh aggregates and mark completed.
-    ``continue`` resumes the same session without a new number.
+    ``continue`` resumes the same session / ``audit_run_id`` without a new run.
 
 Key entry points:
     :class:`ResultsStore` — async PostgreSQL access and schema management.
     :func:`get_results_store` — singleton when ``RESULTS_DB_ENABLED``.
-    :func:`resolve_continue_target` — map continue commands to thread/run/session.
+    :func:`resolve_continue_target` — map explicit continue targets (no latest-run).
 """
 
 from __future__ import annotations
@@ -77,6 +83,8 @@ CREATE TABLE IF NOT EXISTS audit_sessions (
     session_number      int NOT NULL,
     client_name         text NOT NULL DEFAULT '',
     client_slug         text NOT NULL DEFAULT '',
+    client_id           text NOT NULL DEFAULT '',
+    audit_run_id        text NOT NULL DEFAULT '',
     evidence_run_id     text NOT NULL DEFAULT '',
     status              text NOT NULL DEFAULT 'running',
     continue_thread_id  text NOT NULL DEFAULT '',
@@ -93,6 +101,12 @@ CREATE INDEX IF NOT EXISTS audit_sessions_status_started_idx
     ON audit_sessions (status, started_at DESC);
 CREATE INDEX IF NOT EXISTS audit_sessions_client_started_idx
     ON audit_sessions (client_slug, started_at DESC);
+CREATE INDEX IF NOT EXISTS audit_sessions_audit_run_idx
+    ON audit_sessions (audit_run_id)
+    WHERE audit_run_id <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS audit_sessions_audit_run_uidx
+    ON audit_sessions (audit_run_id)
+    WHERE audit_run_id <> '';
 
 CREATE TABLE IF NOT EXISTS hosts (
     id              bigserial PRIMARY KEY,
@@ -194,6 +208,9 @@ CREATE INDEX IF NOT EXISTS playbook_memory_source_idx
 class AuditSessionInfo:
     """Allocated or loaded audit session in the results warehouse.
 
+    Secondary to :class:`~auditor.domain.AuditRun`. Prefer ``audit_run_id``
+    for run-scoped operations (CORE-001).
+
     Attributes:
         id: Primary key in ``audit_sessions``.
         session_number: Per-client monotonic session number (1, 2, 3…).
@@ -206,6 +223,8 @@ class AuditSessionInfo:
         pending_ids: Remaining REQ ids when interrupted.
         started_at: Session start timestamp.
         finished_at: Set when status becomes terminal.
+        client_id: Durable client registry id.
+        audit_run_id: Canonical :class:`AuditRun` id for this session.
     """
 
     id: int
@@ -219,6 +238,8 @@ class AuditSessionInfo:
     pending_ids: tuple[str, ...] = ()
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    client_id: str = ""
+    audit_run_id: str = ""
 
 
 def sanitize_db_name(prefix: str, client_slug: str) -> str:
@@ -291,6 +312,8 @@ def _row_to_session(row: asyncpg.Record) -> AuditSessionInfo:
         pending_ids=tuple(pending),
         started_at=row.get("started_at"),
         finished_at=row.get("finished_at"),
+        client_id=str(row.get("client_id") or ""),
+        audit_run_id=str(row.get("audit_run_id") or ""),
     )
 
 
@@ -341,11 +364,14 @@ class ResultsStore:
         framework_id: str = "",
         report_language: str | None = None,
         evidence_path: str = "",
+        audit_run_id: str = "",
+        client_id: str = "",
     ) -> AuditSessionInfo | None:
         """Allocate the next ``session_number`` for this client (new audit).
 
         Inserts a row with status ``running`` and returns the allocated session.
-        Does not run when the results DB is disabled.
+        Requires an explicit ``audit_run_id`` (CORE-001). Does not run when the
+        results DB is disabled.
 
         Args:
             client_name: Display client name.
@@ -354,20 +380,39 @@ class ResultsStore:
             framework_id: First framework id when known.
             report_language: Report language code.
             evidence_path: Relative evidence path for the session.
+            audit_run_id: Canonical AuditRun id (required).
+            client_id: Durable client registry id.
 
         Returns:
             New :class:`AuditSessionInfo`, or ``None`` when disabled.
         """
         if not self.enabled:
             return None
+        from auditor.legacy_compat import require_audit_run_id
+
+        arun = require_audit_run_id(audit_run_id, context="ResultsStore.start_session")
         client = (client_name or evidence_run_id or "client").strip()
         slug = make_client_slug(client) or "client"
-        run_id = (evidence_run_id or client).strip()
+        run_id = (evidence_run_id or "").strip()
+        if not run_id:
+            raise ValueError(
+                "evidence_run_id is required for ResultsStore.start_session "
+                "(client name/slug is not a run id)"
+            )
         dsn = await self._connect_dsn_for_client(slug)
         conn = await asyncpg.connect(dsn)
         try:
             await self._ensure_schema(conn)
             async with conn.transaction():
+                existing = await conn.fetchrow(
+                    """
+                    SELECT * FROM audit_sessions
+                    WHERE audit_run_id = $1
+                    """,
+                    arun,
+                )
+                if existing:
+                    return _row_to_session(existing)
                 next_num = await conn.fetchval(
                     """
                     SELECT COALESCE(MAX(session_number), 0) + 1
@@ -379,17 +424,20 @@ class ResultsStore:
                 row = await conn.fetchrow(
                     """
                     INSERT INTO audit_sessions (
-                        session_number, client_name, client_slug, evidence_run_id,
+                        session_number, client_name, client_slug, client_id,
+                        audit_run_id, evidence_run_id,
                         status, continue_thread_id, framework_id, report_language,
                         evidence_path, started_at
                     ) VALUES (
-                        $1, $2, $3, $4, 'running', $5, $6, $7, $8, $9
+                        $1, $2, $3, $4, $5, $6, 'running', $7, $8, $9, $10, $11
                     )
                     RETURNING *
                     """,
                     int(next_num),
                     client,
                     slug,
+                    (client_id or "").strip(),
+                    arun,
                     run_id,
                     continue_thread_id or "",
                     framework_id or "",
@@ -399,9 +447,10 @@ class ResultsStore:
                 )
             info = _row_to_session(row)
             logger.info(
-                "Results session #%s created for client %s (db id=%s)",
+                "Results session #%s created for client %s audit_run_id=%s (db id=%s)",
                 info.session_number,
                 slug,
+                arun,
                 info.id,
             )
             return info
@@ -506,13 +555,52 @@ class ResultsStore:
         finally:
             await conn.close()
 
+    async def get_session_by_audit_run(
+        self,
+        audit_run_id: str,
+        *,
+        client_name: str = "",
+    ) -> AuditSessionInfo | None:
+        """Load warehouse session by canonical ``audit_run_id`` (CORE-001)."""
+        if not self.enabled:
+            return None
+        from auditor.legacy_compat import require_audit_run_id
+
+        arun = require_audit_run_id(
+            audit_run_id, context="ResultsStore.get_session_by_audit_run"
+        )
+        # Prefer client DSN when hint provided; otherwise scan known client DBs
+        # is out of scope — require client_name for per-client DB mode.
+        slug = make_client_slug(client_name) if client_name else ""
+        if self.settings.results_db_per_client and not slug:
+            # Without client hint, try shared DSN path only.
+            dsn = (self.settings.results_database_url or "").strip()
+            if not dsn:
+                return None
+        else:
+            dsn = await self._connect_dsn_for_client(slug or "client")
+        conn = await asyncpg.connect(dsn)
+        try:
+            await self._ensure_schema(conn)
+            row = await conn.fetchrow(
+                "SELECT * FROM audit_sessions WHERE audit_run_id = $1",
+                arun,
+            )
+            return _row_to_session(row) if row else None
+        finally:
+            await conn.close()
+
     async def get_latest_session(
         self,
         *,
         client_name: str,
         status: str | None = None,
     ) -> AuditSessionInfo | None:
-        """Return the newest session for a client (optionally filtered by status)."""
+        """Return the newest session for a client (display/list helpers only).
+
+        Not for run-scoped resume/write paths (CORE-001). Prefer an explicit
+        session number or ``audit_run_id``.
+        """
         sessions = await self.list_sessions(
             client_name=client_name, status=status, limit=1
         )
@@ -790,6 +878,8 @@ class ResultsStore:
         hostname: str | None = None,
         ssh_host: str | None = None,
         evidence_relpath: str = "",
+        audit_run_id: str = "",
+        client_id: str = "",
     ) -> None:
         """Upsert full checklist + empty host_results shell before assess.
 
@@ -806,11 +896,22 @@ class ResultsStore:
             hostname: Resolved hostname when known.
             ssh_host: SSH target / IP when known.
             evidence_relpath: Relative evidence path.
+            audit_run_id: Canonical AuditRun id (required).
+            client_id: Durable client registry id.
         """
         if not self.enabled or not requirements:
             return
-        client = (client_name or evidence_run_id or "client").strip()
-        run_id = (evidence_run_id or "").strip() or make_client_slug(client)
+        from auditor.legacy_compat import require_audit_run_id
+
+        arun = require_audit_run_id(
+            audit_run_id, context="ResultsStore.snapshot_framework_checklist"
+        )
+        client = (client_name or "").strip() or "client"
+        run_id = (evidence_run_id or "").strip()
+        if not run_id:
+            raise ValueError(
+                "evidence_run_id is required (client name/slug is not a run id)"
+            )
         fw = (framework_id or "").strip() or "framework"
         if "/" in fw:
             host_from_key, bare = fw.split("/", 1)
@@ -833,6 +934,8 @@ class ResultsStore:
                     report_language=None,
                     evidence_path=evidence_relpath or run_id,
                     framework_id=fw,
+                    audit_run_id=arun,
+                    client_id=client_id,
                 )
                 session_pk = int(sess["id"])
                 sess_num = int(sess["session_number"])
@@ -1017,6 +1120,8 @@ class ResultsStore:
         source: str = "finalize",
         report_language: str | None = None,
         session_number: int | None = None,
+        audit_run_id: str = "",
+        client_id: str = "",
     ) -> None:
         """Insert timestamped host results + cells for a known session number.
 
@@ -1035,13 +1140,33 @@ class ResultsStore:
             source: Write origin (``finalize``, ``update_report``, …).
             report_language: Report language code.
             session_number: Explicit session from run meta when known.
+            audit_run_id: Canonical AuditRun id (required; may come from findings).
+            client_id: Durable client registry id.
         """
         if not self.enabled:
             return
         if not findings and not requirements:
             return
-        client = (client_name or evidence_run_id or "client").strip()
-        run_id = (evidence_run_id or "").strip() or make_client_slug(client)
+        from auditor.legacy_compat import require_audit_run_id
+
+        sample_arun = (audit_run_id or "").strip()
+        sample_cid = (client_id or "").strip()
+        for f in findings.values():
+            if not sample_arun and getattr(f, "audit_run_id", ""):
+                sample_arun = str(f.audit_run_id)
+            if not sample_cid and getattr(f, "client_id", ""):
+                sample_cid = str(f.client_id)
+            if sample_arun and sample_cid:
+                break
+        arun = require_audit_run_id(
+            sample_arun, context="ResultsStore.record_host_framework_audit"
+        )
+        client = (client_name or "").strip() or "client"
+        run_id = (evidence_run_id or "").strip()
+        if not run_id:
+            raise ValueError(
+                "evidence_run_id is required (client name/slug is not a run id)"
+            )
         fw = (framework_id or "").strip() or "framework"
         if "/" in fw:
             host_from_key, bare = fw.split("/", 1)
@@ -1081,6 +1206,8 @@ class ResultsStore:
                     report_language=report_language,
                     evidence_path=evidence_relpath or run_id,
                     framework_id=fw,
+                    audit_run_id=arun,
+                    client_id=sample_cid,
                 )
                 session_pk = int(sess["id"])
                 sess_num = int(sess["session_number"])
@@ -1179,6 +1306,8 @@ class ResultsStore:
         session_number: int | None = None,
         hostname: str | None = None,
         ssh_host: str | None = None,
+        audit_run_id: str = "",
+        client_id: str = "",
     ) -> None:
         """Upsert one filled REQ cell during assess (does not complete session).
 
@@ -1198,11 +1327,27 @@ class ResultsStore:
             session_number: Explicit session from run meta when known.
             hostname: Resolved hostname when known.
             ssh_host: SSH target / IP when known.
+            audit_run_id: Canonical AuditRun id (required; may come from finding).
+            client_id: Durable client registry id.
         """
         if not self.enabled:
             return
-        client = (client_name or evidence_run_id or "client").strip()
-        run_id = (evidence_run_id or "").strip() or make_client_slug(client)
+        from auditor.legacy_compat import require_audit_run_id
+
+        arun = require_audit_run_id(
+            audit_run_id or getattr(finding, "audit_run_id", "") or "",
+            context="ResultsStore.upsert_requirement_result",
+        )
+        cid = (
+            (client_id or "").strip()
+            or str(getattr(finding, "client_id", "") or "").strip()
+        )
+        client = (client_name or "").strip() or "client"
+        run_id = (evidence_run_id or "").strip()
+        if not run_id:
+            raise ValueError(
+                "evidence_run_id is required (client name/slug is not a run id)"
+            )
         fw = (framework_id or "").strip() or "framework"
         if "/" in fw:
             host_from_key, bare = fw.split("/", 1)
@@ -1226,6 +1371,8 @@ class ResultsStore:
                     report_language=None,
                     evidence_path=evidence_relpath or run_id,
                     framework_id=fw,
+                    audit_run_id=arun,
+                    client_id=cid,
                 )
                 session_pk = int(sess["id"])
                 sess_num = int(sess["session_number"])
@@ -1637,11 +1784,13 @@ class ResultsStore:
         report_language: str | None,
         evidence_path: str,
         framework_id: str,
+        audit_run_id: str = "",
+        client_id: str = "",
     ) -> asyncpg.Record:
         """Resolve or create ``audit_sessions`` row for a results write.
 
-        Prefers explicit ``session_number``, then latest running/interrupted
-        session, then creates session #1 as last resort.
+        Requires explicit ``audit_run_id``. Never falls back to "latest session
+        for client slug" (CORE-001).
 
         Args:
             conn: Open database connection (within transaction).
@@ -1652,10 +1801,26 @@ class ResultsStore:
             report_language: Report language code.
             evidence_path: Relative evidence path.
             framework_id: Framework being recorded.
+            audit_run_id: Canonical AuditRun id (required).
+            client_id: Durable client registry id.
 
         Returns:
             asyncpg record for the resolved session row.
         """
+        from auditor.legacy_compat import MissingAuditRunIdError, require_audit_run_id
+
+        arun = require_audit_run_id(
+            audit_run_id, context="ResultsStore._resolve_session_row"
+        )
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM audit_sessions
+            WHERE audit_run_id = $1
+            """,
+            arun,
+        )
+        if row:
+            return row
         if session_number is not None:
             row = await conn.fetchrow(
                 """
@@ -1666,36 +1831,55 @@ class ResultsStore:
                 int(session_number),
             )
             if row:
+                stored = str(row.get("audit_run_id") or "").strip()
+                if stored and stored != arun:
+                    raise MissingAuditRunIdError(
+                        f"session #{session_number} for {slug!r} belongs to "
+                        f"audit_run_id={stored!r}, not {arun!r}"
+                    )
+                if not stored:
+                    await conn.execute(
+                        """
+                        UPDATE audit_sessions SET
+                            audit_run_id = $1,
+                            client_id = COALESCE(NULLIF($2, ''), client_id),
+                            evidence_run_id = COALESCE(NULLIF($3, ''), evidence_run_id)
+                        WHERE id = $4
+                        """,
+                        arun,
+                        (client_id or "").strip(),
+                        run_id,
+                        int(row["id"]),
+                    )
+                    refreshed = await conn.fetchrow(
+                        "SELECT * FROM audit_sessions WHERE id = $1",
+                        int(row["id"]),
+                    )
+                    if refreshed:
+                        return refreshed
                 return row
-        # Prefer latest running, else latest any for this client.
-        row = await conn.fetchrow(
+        next_num = await conn.fetchval(
             """
-            SELECT * FROM audit_sessions
+            SELECT COALESCE(MAX(session_number), 0) + 1
+            FROM audit_sessions
             WHERE client_slug = $1
-            ORDER BY
-                CASE WHEN status = 'running' THEN 0
-                     WHEN status = 'interrupted' THEN 1
-                     ELSE 2 END,
-                started_at DESC
-            LIMIT 1
             """,
             slug,
         )
-        if row:
-            return row
-        # Last resort: create session #1 so finalize still works if start was skipped.
-        next_num = 1
         return await conn.fetchrow(
             """
             INSERT INTO audit_sessions (
-                session_number, client_name, client_slug, evidence_run_id,
-                status, framework_id, report_language, evidence_path, started_at
-            ) VALUES ($1,$2,$3,$4,'running',$5,$6,$7,$8)
+                session_number, client_name, client_slug, client_id, audit_run_id,
+                evidence_run_id, status, framework_id, report_language,
+                evidence_path, started_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,'running',$7,$8,$9,$10)
             RETURNING *
             """,
-            next_num,
+            int(next_num),
             client,
             slug,
+            (client_id or "").strip(),
+            arun,
             run_id,
             framework_id,
             report_language,
@@ -1790,6 +1974,8 @@ class ResultsStore:
             """
         )
         # CORE-003: add identity columns without inventing placeholder values.
+        # CORE-001: audit_sessions carries audit_run_id / client_id (secondary
+        # to AuditRun; no silent latest-session inference).
         for stmt in (
             "ALTER TABLE requirement_results ADD COLUMN IF NOT EXISTS result_id UUID",
             "ALTER TABLE requirement_results ADD COLUMN IF NOT EXISTS client_id text",
@@ -1798,6 +1984,18 @@ class ResultsStore:
             "ALTER TABLE requirement_results ADD COLUMN IF NOT EXISTS framework_id text",
             "ALTER TABLE requirement_results ADD COLUMN IF NOT EXISTS framework_version text",
             "ALTER TABLE hosts ADD COLUMN IF NOT EXISTS asset_id text",
+            "ALTER TABLE audit_sessions ADD COLUMN IF NOT EXISTS client_id text NOT NULL DEFAULT ''",
+            "ALTER TABLE audit_sessions ADD COLUMN IF NOT EXISTS audit_run_id text NOT NULL DEFAULT ''",
+            """
+            CREATE INDEX IF NOT EXISTS audit_sessions_audit_run_idx
+                ON audit_sessions (audit_run_id)
+                WHERE audit_run_id <> ''
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS audit_sessions_audit_run_uidx
+                ON audit_sessions (audit_run_id)
+                WHERE audit_run_id <> ''
+            """,
             """
             CREATE UNIQUE INDEX IF NOT EXISTS requirement_results_result_id_uidx
                 ON requirement_results (result_id)
@@ -2158,17 +2356,25 @@ def resolve_session_evidence(
 ) -> tuple[str, str]:
     """Map a warehouse session to the real on-disk ``(thread_id, run_id)``.
 
-    After intake the evidence folder is renamed to the client slug, but the
-    warehouse may still store the temporary run id and a short base thread.
-    Prefer the client-slug folder / ``meta.json`` thread when available.
+    Prefers nested ``<client_slug>/<audit_run_id>`` and the session's stored
+    ``evidence_run_id``. Never picks a bare client folder when multiple audit
+    runs exist under it (CORE-001).
     """
+    from auditor.client_registry import looks_like_audit_run_id
+    from auditor.legacy_compat import (
+        AmbiguousLegacyRunError,
+        resolve_evidence_for_audit_run,
+    )
+
     evidence_dir = Path(settings.evidence_dir)
     candidates: list[str] = []
-    for cand in (
-        info.client_slug,
-        make_client_slug(info.client_name),
-        info.evidence_run_id,
-    ):
+    arun = (info.audit_run_id or "").strip()
+    slug = (info.client_slug or make_client_slug(info.client_name) or "").strip()
+    if arun and slug:
+        candidates.append(f"{slug}/{arun}")
+    if arun:
+        candidates.append(arun)
+    for cand in (info.evidence_run_id,):
         c = (cand or "").strip()
         if c and c not in candidates:
             candidates.append(c)
@@ -2177,17 +2383,42 @@ def resolve_session_evidence(
     meta: dict[str, Any] = {}
     for cand in candidates:
         path = evidence_dir / cand
-        if not path.is_dir():
-            continue
-        # Prefer folders that still have checklist evidence / meta.
-        m = _disk_meta_for_run(evidence_dir, cand)
-        if m or any(path.iterdir()):
+        if path.is_dir():
+            m = _disk_meta_for_run(evidence_dir, cand)
             chosen_run = cand
             meta = m
             if m:
                 break
+            continue
+        if looks_like_audit_run_id(cand):
+            try:
+                hit = resolve_evidence_for_audit_run(evidence_dir, cand)
+            except (AmbiguousLegacyRunError, KeyError, ValueError):
+                continue
+            chosen_run = hit.evidence_run_id
+            meta = _disk_meta_for_run(evidence_dir, chosen_run)
+            break
+
+    if not chosen_run and slug:
+        # Legacy flat client folder — only when a single unambiguous root.
+        flat = evidence_dir / slug
+        if flat.is_dir() and (flat / "meta.json").is_file():
+            nested = [
+                p
+                for p in flat.iterdir()
+                if p.is_dir() and looks_like_audit_run_id(p.name)
+            ]
+            if nested:
+                raise AmbiguousLegacyRunError(
+                    f"client folder {slug!r} has nested audit runs; "
+                    "session lacks a usable audit_run_id/evidence_run_id",
+                    candidates=[f"{slug}/{p.name}" for p in nested],
+                )
+            chosen_run = slug
+            meta = _disk_meta_for_run(evidence_dir, chosen_run)
+
     if not chosen_run:
-        chosen_run = (info.evidence_run_id or info.client_slug or "").strip()
+        chosen_run = (info.evidence_run_id or "").strip()
         meta = _disk_meta_for_run(evidence_dir, chosen_run) if chosen_run else {}
 
     tid = str(
@@ -2196,14 +2427,11 @@ def resolve_session_evidence(
         or info.continue_thread_id
         or ""
     ).strip()
-    # Prefer host/framework-scoped thread from session.json when warehouse
-    # only has the short base id (``audit-<hex>``).
     if chosen_run and (":" not in tid or tid.count(":") < 2):
         from auditor.session_store import load_all_multi_sessions
 
         sessions = load_all_multi_sessions(evidence_dir, chosen_run)
         if sessions:
-            # Newest / only active thread key.
             tid = next(iter(sessions.keys()))
     return tid, chosen_run
 
@@ -2698,14 +2926,17 @@ async def resolve_continue_target(
 ) -> tuple[str, str, AuditSessionInfo | None] | None:
     """Resolve ``(thread_id, run_id, session)`` for a continue request.
 
-    Prefers an explicit ``continue session N for Client`` from the warehouse,
-    then the newest interrupted warehouse session among known clients, then
-    falls back to disk ``find_interrupted_run``.
+    Requires an explicit target (CORE-001):
 
-    Always remaps warehouse ``evidence_run_id`` / short thread ids to the
-    current on-disk client folder and host-scoped LangGraph thread when possible.
+    * ``continue session N for Client`` (warehouse), or
+    * an ``arun_…`` / nested evidence path in ``user_text``.
+
+    Does **not** fall back to newest interrupted warehouse session or
+    :func:`~auditor.session_store.find_interrupted_run`.
     """
-    from auditor.session_store import find_interrupted_run
+    from auditor.client_registry import looks_like_audit_run_id
+    from auditor.legacy_compat import resolve_evidence_for_audit_run
+    from auditor.run_resolve import extract_run_id
 
     store = get_results_store(settings)
     session_num, client_hint = parse_continue_session_request(user_text)
@@ -2717,7 +2948,6 @@ async def resolve_continue_target(
         if info is not None:
             tid, run_id = resolve_session_evidence(settings, info)
             if tid and run_id:
-                # Keep warehouse pointers fresh for the next continue.
                 try:
                     await store.update_session_status(
                         client_name=client_hint,
@@ -2730,33 +2960,28 @@ async def resolve_continue_target(
                     logger.warning("Could not refresh session resume pointers: %s", exc)
                 return tid, run_id, info
 
-    if store is not None:
-        clients = (
-            [client_hint]
-            if client_hint
-            else discover_evidence_client_names(settings.evidence_dir)
-        )
-        interrupted = await store.list_interrupted_across_clients(
-            [c for c in clients if c]
-        )
-        if session_num is not None:
-            interrupted = [
-                s for s in interrupted if s.session_number == session_num
-            ]
-        if interrupted:
-            info = interrupted[0]
-            tid, run_id = resolve_session_evidence(settings, info)
-            if tid and run_id:
-                return tid, run_id, info
+    extracted = extract_run_id(user_text, evidence_dir=settings.evidence_dir)
+    if extracted and looks_like_audit_run_id(extracted.split("/")[-1]):
+        arun = extracted.split("/")[-1]
+        try:
+            hit = resolve_evidence_for_audit_run(settings.evidence_dir, arun)
+        except Exception:  # noqa: BLE001
+            hit = None
+        if hit is not None:
+            meta = _disk_meta_for_run(settings.evidence_dir, hit.evidence_run_id)
+            tid = str(
+                meta.get("continue_thread_id") or meta.get("thread_id") or ""
+            ).strip()
+            if tid:
+                info = None
+                if store is not None:
+                    try:
+                        info = await store.get_session_by_audit_run(arun)
+                    except Exception:  # noqa: BLE001
+                        info = None
+                return tid, hit.evidence_run_id, info
 
-    found = find_interrupted_run(settings.evidence_dir)
-    if not found:
-        return None
-    run_id, meta = found
-    tid = str(meta.get("continue_thread_id") or meta.get("thread_id") or "")
-    if not tid:
-        return None
-    return tid, run_id, None
+    return None
 
 
 async def sync_session_status_from_run_meta(

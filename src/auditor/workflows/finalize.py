@@ -131,6 +131,8 @@ async def finalize(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]
             source="finalize",
             report_language=report_lang.code if report_lang else None,
             session_number=session_number,
+            audit_run_id=str(state.get("audit_run_id") or ""),
+            client_id=str(state.get("client_id") or ""),
         )
     else:
         session_number = None

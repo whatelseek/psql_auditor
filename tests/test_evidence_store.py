@@ -21,7 +21,12 @@ def test_evidence_store_creates_per_requirement_folders(tmp_path: Path):
     store.write_finding(
         "postgres_cis",
         "REQ-001",
-        {"requirement_id": "REQ-001", "status": "pass"},
+        {
+            "requirement_id": "REQ-001",
+            "status": "pass",
+            "client_id": "client_test00000001",
+            "audit_run_id": "arun_test0000000001",
+        },
     )
 
     req_dir = store.root / "postgres_cis" / "REQ-001"

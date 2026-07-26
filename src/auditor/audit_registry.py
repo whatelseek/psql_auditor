@@ -130,17 +130,31 @@ class AuditRegistry:
         return self._row_to_run(row) if row else None
 
     def get_run_by_evidence_id(self, evidence_run_id: str) -> AuditRun | None:
-        """Lookup by evidence folder id (compat with existing disk layout)."""
+        """Lookup by evidence folder id.
+
+        When multiple AuditRuns share the same evidence path (legacy), raises
+        :class:`~auditor.legacy_compat.AmbiguousLegacyRunError` instead of
+        silently returning the newest row (CORE-001).
+        """
         if not evidence_run_id:
             return None
         with self._lock:
             with self._connect() as conn:
-                row = conn.execute(
+                rows = conn.execute(
                     "SELECT * FROM audit_runs WHERE evidence_run_id = ? "
-                    "ORDER BY created_at DESC LIMIT 1",
+                    "ORDER BY created_at DESC",
                     (evidence_run_id,),
-                ).fetchone()
-        return self._row_to_run(row) if row else None
+                ).fetchall()
+        if not rows:
+            return None
+        if len(rows) > 1:
+            from auditor.legacy_compat import AmbiguousLegacyRunError
+
+            raise AmbiguousLegacyRunError(
+                f"multiple AuditRuns for evidence_run_id={evidence_run_id!r}",
+                candidates=[str(r["audit_run_id"]) for r in rows],
+            )
+        return self._row_to_run(rows[0])
 
     def save_run(self, run: AuditRun) -> None:
         with self._lock:

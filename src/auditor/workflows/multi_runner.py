@@ -11,14 +11,15 @@ from langchain_core.messages import AIMessage
 
 from auditor.asset_registry import get_asset_registry
 from auditor.audit_registry import get_audit_registry
+from auditor.client_registry import get_client_registry
 from auditor.compliance import format_chat_summary_visuals, parse_report_findings
 from auditor.context import truncate_text
 from auditor.domain import (
     AuditJobStatus,
     AuditJobType,
-    AuditRunStatus,
     JobErrorInfo,
 )
+from auditor.legacy_compat import MissingAuditRunIdError, require_audit_run_id
 from auditor.evidence_store import EvidenceStore, new_run_id
 from auditor.followup import followup_footer
 from auditor.frameworks import get_framework, route_frameworks, select_frameworks_for_host
@@ -341,51 +342,97 @@ def _bootstrap_audit_run(
     intake_state: dict[str, Any],
     pending: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Create AuditRun + pending AuditJobs for this execution (outside nodes)."""
-    if intake_state.get("audit_run_id"):
-        return intake_state
-    registry = get_audit_registry(runtime.settings.evidence_dir)
-    client_id = client_slug(str(intake_state.get("client_name") or "")) or "unknown"
-    intake = intake_state.get("intake") if isinstance(intake_state.get("intake"), dict) else {}
-    scope = {
-        "audit_types": str(intake_state.get("audit_types") or ""),
-        "frameworks": [_job_dict_key(j) for j in pending],
-        "has_access": bool(intake_state.get("has_access")),
-        "client_name": str(intake_state.get("client_name") or ""),
-        "selected_jobs": list((intake or {}).get("selected_jobs") or []),
-    }
-    session_number = intake_state.get("results_session_number")
-    arun = registry.create_run(
-        client_id=client_id,
-        scope=scope,
-        evidence_run_id=run_id,
-        base_thread_id=base_thread,
-        results_session_number=(
-            int(session_number) if session_number is not None else None
-        ),
+    """Ensure AuditRun + pending AuditJobs for this execution (outside nodes).
+
+    Reuses ``client_id`` / ``audit_run_id`` from intake when present (CORE-001).
+    Never derives a run id from client name/slug.
+    """
+    updated = dict(intake_state)
+    intake = (
+        updated.get("intake") if isinstance(updated.get("intake"), dict) else {}
     )
-    registry.mark_run_started(arun.audit_run_id)
+    display = str(updated.get("client_name") or intake.get("client_name") or "")
+    slug = str(
+        updated.get("client_slug")
+        or intake.get("client_slug")
+        or client_slug(display)
+        or "client"
+    )
+    client = get_client_registry(runtime.settings.evidence_dir).ensure_client(
+        display_name=display or slug,
+        slug=slug,
+        client_id=str(updated.get("client_id") or intake.get("client_id") or "")
+        or None,
+    )
+    updated["client_id"] = client.client_id
+    updated["client_slug"] = client.slug
+
+    registry = get_audit_registry(runtime.settings.evidence_dir)
+    audit_run_id = str(updated.get("audit_run_id") or intake.get("audit_run_id") or "").strip()
+    if audit_run_id:
+        require_audit_run_id(audit_run_id, context="_bootstrap_audit_run")
+        arun = registry.get_run(audit_run_id)
+        if arun is None:
+            raise MissingAuditRunIdError(
+                f"unknown audit_run_id {audit_run_id!r} in bootstrap"
+            )
+        if arun.client_id and arun.client_id != client.client_id:
+            raise MissingAuditRunIdError(
+                f"audit_run_id {audit_run_id!r} belongs to a different client"
+            )
+        if not arun.evidence_run_id:
+            arun.evidence_run_id = run_id
+            registry.save_run(arun)
+    else:
+        # New audit without prior intake allocation (direct framework jobs).
+        scope = {
+            "audit_types": str(updated.get("audit_types") or ""),
+            "frameworks": [_job_dict_key(j) for j in pending],
+            "has_access": bool(updated.get("has_access")),
+            "client_name": display,
+            "client_slug": client.slug,
+            "selected_jobs": list((intake or {}).get("selected_jobs") or []),
+        }
+        session_number = updated.get("results_session_number")
+        arun = registry.create_run(
+            client_id=client.client_id,
+            scope=scope,
+            evidence_run_id=run_id,
+            base_thread_id=base_thread,
+            results_session_number=(
+                int(session_number) if session_number is not None else None
+            ),
+        )
+        registry.mark_run_started(arun.audit_run_id)
+        audit_run_id = arun.audit_run_id
+    updated["audit_run_id"] = audit_run_id
+
+    # Create pending jobs only once per logical task for this run.
     assets = get_asset_registry(runtime.settings.evidence_dir)
     for job in pending:
         logical = _job_dict_key(job)
-        created = registry.create_job(
-            audit_run_id=arun.audit_run_id,
-            logical_task_id=logical,
-            job_type=AuditJobType.ASSESS_FRAMEWORK,
-            mandatory=True,
-            thread_id=_job_dict_thread_id(base_thread, job),
-            framework_id=str(job.get("framework_id") or ""),
-            host_id=str(job.get("evidence_host_id") or ""),
-        )
+        existing = registry.latest_job_for_task(audit_run_id, logical)
+        if existing is None:
+            created = registry.create_job(
+                audit_run_id=audit_run_id,
+                logical_task_id=logical,
+                job_type=AuditJobType.ASSESS_FRAMEWORK,
+                mandatory=True,
+                thread_id=_job_dict_thread_id(base_thread, job),
+                framework_id=str(job.get("framework_id") or ""),
+                host_id=str(job.get("evidence_host_id") or ""),
+            )
+        else:
+            created = existing
         job["job_id"] = created.job_id
-        job["audit_run_id"] = arun.audit_run_id
+        job["audit_run_id"] = audit_run_id
         job["attempt"] = created.attempt
         label = str(job.get("ssh_label") or "").strip()
         host = str(job.get("ssh_host") or "").strip()
         inv_key = label or str(job.get("asset_id") or "").strip()
         if inv_key:
             job["asset_id"] = assets.ensure_asset(
-                client_id=client_id,
+                client_id=client.client_id,
                 inventory_key=inv_key,
                 label=label or inv_key,
                 ssh_host=host,
@@ -393,9 +440,9 @@ def _bootstrap_audit_run(
             )
         elif not job.get("asset_id"):
             job["asset_id"] = assets.ensure_asset(
-                client_id=client_id,
-                inventory_key=f"client:{client_id}",
-                label=str(intake_state.get("client_name") or client_id),
+                client_id=client.client_id,
+                inventory_key=f"client:{client.client_id}",
+                label=display or client.slug,
             )
         if not job.get("framework_version"):
             fw_obj = get_framework(
@@ -403,12 +450,15 @@ def _bootstrap_audit_run(
                 runtime.settings.agents_dir,
             )
             job["framework_version"] = str(getattr(fw_obj, "version", "") or "")
-    updated = dict(intake_state)
-    updated["audit_run_id"] = arun.audit_run_id
-    updated["client_id"] = client_id
     store = runtime._evidence_by_run.get(run_id)
     if store is not None:
-        store.write_run_meta(audit_run_id=arun.audit_run_id, status="running")
+        store.write_run_meta(
+            audit_run_id=audit_run_id,
+            client_id=client.client_id,
+            client_slug=client.slug,
+            client_name=display,
+            status="running",
+        )
     return updated
 
 async def run_framework_jobs(runtime: AuditRuntime,
@@ -861,26 +911,36 @@ async def start_frameworks_after_intake(runtime: AuditRuntime,
         "intake_complete": True,
         "intake": intake,
         "client_name": str(intake.get("client_name") or ""),
+        "client_id": str(intake.get("client_id") or ""),
+        "client_slug": str(intake.get("client_slug") or ""),
+        "audit_run_id": str(intake.get("audit_run_id") or ""),
         "has_cmdb": bool(intake.get("has_cmdb")),
         "has_access": has_access,
         "audit_types": audit_type,
     }
 
     # New audit → allocate next results warehouse session_number (Postgres tracker).
-    # Prefer the post-intake client folder name (after rebind_run_id), not the
-    # temporary ``YYYYMMDD…`` id — continue must find evidence on disk.
+    # Requires explicit audit_run_id from intake (CORE-001); evidence path is
+    # nested ``<slug>/<audit_run_id>`` after rebind.
     evidence_run = store.run_id or run_id
-    session_info = await start_session_safe(
-        runtime.settings,
-        client_name=str(intake.get("client_name") or evidence_run),
-        evidence_run_id=evidence_run,
-        continue_thread_id=base_thread,
-        evidence_path=str(store.root),
-    )
+    audit_run_id = str(intake.get("audit_run_id") or "").strip()
+    session_info = None
+    if audit_run_id:
+        session_info = await start_session_safe(
+            runtime.settings,
+            client_name=str(intake.get("client_name") or ""),
+            evidence_run_id=evidence_run,
+            continue_thread_id=base_thread,
+            evidence_path=str(store.root),
+            audit_run_id=audit_run_id,
+            client_id=str(intake.get("client_id") or ""),
+        )
     if session_info is not None:
         store.write_run_meta(
             results_session_number=session_info.session_number,
             results_session_id=session_info.id,
+            audit_run_id=audit_run_id,
+            client_id=str(intake.get("client_id") or ""),
             status="running",
         )
         intake_state["results_session_number"] = session_info.session_number

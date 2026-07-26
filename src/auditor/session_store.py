@@ -142,6 +142,10 @@ def write_run_status(
 def find_interrupted_run(evidence_dir: Path) -> tuple[str, dict[str, Any]] | None:
     """Return newest interrupted run_id + meta, if any.
 
+    Compatibility helper only — production continue/resume paths must not call
+    this (CORE-001: no implicit latest-run resolution). Prefer an explicit
+    ``audit_run_id`` or warehouse session number.
+
     Scans all run folders with ``meta.json`` where ``status == "interrupted"``.
 
     .. note::

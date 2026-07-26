@@ -541,6 +541,19 @@ async def run_refill_finding(
         ]
         response = await graph.fill_model.ainvoke(fill_messages)
         finding = graph._cells_to_finding(req_id, requirement, response, evidence)
+        from auditor.result_identity_bind import attach_result_identity
+        finding = attach_result_identity(
+            finding,
+            state={
+                "client_id": str(meta.get("client_id") or ""),
+                "client_name": str(meta.get("client_name") or ""),
+                "audit_run_id": str(meta.get("audit_run_id") or ""),
+                "asset_id": str(meta.get("asset_id") or ""),
+                "framework_version": str(meta.get("framework_version") or ""),
+            },
+            framework_id=target.framework_id,
+            framework_version=str(meta.get("framework_version") or ""),
+        )
         store.write_finding(target.framework_id, req_id, finding.model_dump())
         session_number = None
         raw_sess = meta.get("results_session_number")
@@ -567,6 +580,10 @@ async def run_refill_finding(
             evidence_relpath=evidence_rel,
             source="refill",
             session_number=session_number,
+            audit_run_id=str(
+                finding.audit_run_id or meta.get("audit_run_id") or ""
+            ),
+            client_id=str(finding.client_id or meta.get("client_id") or ""),
         )
         refilled.append(req_id)
         sections.extend(
@@ -646,7 +663,6 @@ async def run_update_report(
         from auditor.run_resolve import (
             extract_run_id,
             extract_run_id_from_messages,
-            latest_run_id,
             resolve_framework_for_req,
         )
         from auditor.evidence_store import EvidenceStore
@@ -660,11 +676,9 @@ async def run_update_report(
             if run_id:
                 source = "history"
         if not run_id:
-            run_id = latest_run_id(settings.evidence_dir)
-            source = "disk"
-        if not run_id:
             raise FileNotFoundError(
-                "No prior audit evidence found. Run a checklist audit first."
+                "No audit_run_id in your message or chat history. "
+                "Include an explicit `arun_…` id (CORE-001: no latest-run fallback)."
             )
         store = EvidenceStore.open_existing(settings.evidence_dir, run_id)
     except FileNotFoundError as exc:
@@ -826,6 +840,8 @@ async def run_update_report(
             source="update_report",
             report_language=report_lang_code or None,
             session_number=session_number,
+            audit_run_id=str(meta.get("audit_run_id") or ""),
+            client_id=str(meta.get("client_id") or ""),
         )
 
     if not completed:
@@ -986,7 +1002,6 @@ async def run_anonymize_report(
         from auditor.run_resolve import (
             extract_run_id,
             extract_run_id_from_messages,
-            latest_run_id,
         )
         from auditor.evidence_store import EvidenceStore
 
@@ -996,10 +1011,9 @@ async def run_anonymize_report(
                 messages, evidence_dir=settings.evidence_dir
             )
         if not run_id:
-            run_id = latest_run_id(settings.evidence_dir)
-        if not run_id:
             raise FileNotFoundError(
-                "No prior audit evidence found. Run an audit first."
+                "No audit_run_id in your message or chat history. "
+                "Include an explicit `arun_…` id (CORE-001: no latest-run fallback)."
             )
         source = EvidenceStore.open_existing(settings.evidence_dir, run_id)
     except FileNotFoundError as exc:

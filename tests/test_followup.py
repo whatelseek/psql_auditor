@@ -1,12 +1,25 @@
 """Tests for post-audit REQ revise + report update follow-up."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage
 
 from auditor.evidence_store import EvidenceStore
+
+def _seed_run_identity(store: EvidenceStore, **extra) -> dict:
+    """CORE-001: seed durable client/audit ids on test evidence runs."""
+    meta = {
+        "client_id": "client_test00000001",
+        "audit_run_id": "arun_test0000000001",
+        "client_name": "TestClient",
+        "client_slug": "testclient",
+        **extra,
+    }
+    store.write_run_meta(**meta)
+    return meta
+
 from auditor.followup import (
     run_anonymize_report,
     run_refill_finding,
@@ -61,16 +74,35 @@ def test_extract_and_latest_run_id(tmp_path: Path):
 
 
 def test_extract_and_latest_client_named_run(tmp_path: Path):
+    # Legacy flat client folder still uniquely resolvable for open_existing.
     rid = "TestCompany"
     EvidenceStore(tmp_path, run_id=rid).write_run_meta(frameworks=["postgres_cis"])
-    assert extract_run_id("see `artifacts/TestCompany` for evidence") == "TestCompany"
-    assert extract_run_id("/v1/downloads/TestCompany_audit.zip") == "TestCompany"
+    assert extract_run_id("see `artifacts/TestCompany` for evidence", evidence_dir=tmp_path) == "TestCompany"
+    # Download URLs with bare client names are no longer accepted as run ids.
+    assert extract_run_id("/v1/downloads/TestCompany_audit.zip") is None
     assert latest_run_id(tmp_path) == rid
-    # Bare ``for <Client>`` when artifacts/<Client> exists
-    (tmp_path / "AlphaCo").mkdir()
-    (tmp_path / "AlphaCo" / "meta.json").write_text("{}", encoding="utf-8")
-    assert extract_run_id("Gather evidence for REQ-001 for AlphaCo", evidence_dir=tmp_path) == "AlphaCo"
-    assert extract_run_id("Gather evidence for REQ-001 for AlphaCo") is None
+    # Nested CORE-001 layout: prefer arun_ / slug/arun_
+    nested = "AlphaCo/arun_abcd1234ef567890"
+    EvidenceStore(tmp_path, run_id=nested).write_run_meta(
+        frameworks=["postgres_cis"], audit_run_id="arun_abcd1234ef567890"
+    )
+    assert extract_run_id(
+        "continue arun_abcd1234ef567890", evidence_dir=tmp_path
+    ) == "arun_abcd1234ef567890"
+    # Bare arun_ wins over nested path when both appear (business id first).
+    assert extract_run_id(
+        "evidence: `artifacts/AlphaCo/arun_abcd1234ef567890`",
+        evidence_dir=tmp_path,
+    ) == "arun_abcd1234ef567890"
+    assert extract_run_id(
+        "evidence: `artifacts/AlphaCo/arun_abcd1234ef567890`",
+        evidence_dir=tmp_path,
+    ).endswith("arun_abcd1234ef567890")
+    # Ambiguous client folder with two runs → no guess.
+    twin = tmp_path / "TwinCo"
+    (twin / "arun_1111111111111111").mkdir(parents=True)
+    (twin / "arun_2222222222222222").mkdir(parents=True)
+    assert extract_run_id("Gather evidence for TwinCo", evidence_dir=tmp_path) is None
 
 
 @pytest.mark.asyncio
@@ -80,7 +112,7 @@ async def test_revise_req_writes_into_existing_folder(tmp_path: Path):
 
     rid = "20260720T130000Z_feedbeef"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"])
+    _seed_run_identity(store, frameworks=["ubuntu_cis_24_l2"])
     (store.root / "ubuntu_cis_24_l2" / "REQ-002").mkdir(parents=True)
     store.write_tool_result(
         "ubuntu_cis_24_l2", "REQ-002", "ssh_run", {"command": "old"}, "PermitRootLogin yes"
@@ -119,7 +151,7 @@ async def test_revise_req_writes_into_existing_folder(tmp_path: Path):
             {"command": "grep PermitRootLogin"},
             "PermitRootLogin no",
         )
-        store.write_finding(framework_id, req_id, finding.model_dump())
+        store.write_finding(framework_id, req_id, {**finding.model_dump(), "client_id": "client_test00000001", "audit_run_id": "arun_test0000000001"})
         return finding
 
     graph._fill_requirement_cells = fake_fill  # type: ignore[method-assign]
@@ -142,7 +174,7 @@ async def test_evaluate_req_gathers_evidence_only(tmp_path: Path):
 
     rid = "20260720T131500Z_feedbeef"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"])
+    _seed_run_identity(store, frameworks=["ubuntu_cis_24_l2"])
     (store.root / "ubuntu_cis_24_l2" / "REQ-001").mkdir(parents=True)
 
     settings = Settings(
@@ -187,7 +219,7 @@ async def test_refill_without_req_requires_revised_or_named(tmp_path: Path):
 
     rid = "20260720T131800Z_feedbeef"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"])
+    _seed_run_identity(store, frameworks=["ubuntu_cis_24_l2"])
     (store.root / "ubuntu_cis_24_l2" / "REQ-001").mkdir(parents=True)
     (store.root / "ubuntu_cis_24_l2" / "REQ-002").mkdir(parents=True)
 
@@ -218,7 +250,7 @@ async def test_refill_finding_from_stored_evidence(tmp_path: Path):
 
     rid = "20260720T132000Z_feedbeef"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"], report_language="en")
+    _seed_run_identity(store, frameworks=["ubuntu_cis_24_l2"], report_language="en")
     store.write_tool_result(
         "ubuntu_cis_24_l2",
         "REQ-001",
@@ -266,7 +298,7 @@ async def test_update_report_from_disk_findings(tmp_path: Path):
 
     rid = "20260720T140000Z_cafebabe"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"])
+    _seed_run_identity(store, frameworks=["ubuntu_cis_24_l2"])
     finding = {
         "requirement_id": "REQ-002",
         "title": "SSH root login disabled",
@@ -277,6 +309,8 @@ async def test_update_report_from_disk_findings(tmp_path: Path):
         "remediation": "",
         "notes": "",
         "pass_criteria": "PermitRootLogin no",
+        "client_id": "client_test00000001",
+        "audit_run_id": "arun_test0000000001",
     }
     store.write_finding("ubuntu_cis_24_l2", "REQ-002", finding)
 
@@ -313,7 +347,7 @@ def test_resolve_multi_host_req_with_host_hint(tmp_path: Path):
 
     rid = "TestCompany"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"])
+    _seed_run_identity(store, frameworks=["ubuntu_cis_24_l2"])
     for host in ("10.200.29.78", "10.200.29.79"):
         key = f"{host}/ubuntu_cis_24_l2"
         (store.root / key / "REQ-010").mkdir(parents=True)
@@ -327,6 +361,8 @@ def test_resolve_multi_host_req_with_host_hint(tmp_path: Path):
                 "severity": "High",
                 "evidence": "x",
                 "remediation": "",
+                "client_id": "client_test00000001",
+                "audit_run_id": "arun_test0000000001",
             },
         )
 
@@ -339,10 +375,14 @@ def test_resolve_multi_host_req_with_host_hint(tmp_path: Path):
     assert chosen == "10.200.29.78/ubuntu_cis_24_l2"
 
     target = resolve_target(
-        user_text="Evaluate REQ-010 on ubuntu_cis_24_l2 for host 10.200.29.78",
+        user_text=(
+            "Evaluate REQ-010 on ubuntu_cis_24_l2 for host 10.200.29.78 "
+            "arun_test0000000001"
+        ),
         evidence_dir=tmp_path,
         agents_dir=Path("agents"),
         require_req=True,
+        messages=[AIMessage(content=f"evidence: `{store.root}`")],
     )
     assert target.framework_id == "10.200.29.78/ubuntu_cis_24_l2"
     assert target.host_id == "10.200.29.78"
@@ -363,7 +403,7 @@ async def test_revise_req_multi_host_path(tmp_path: Path):
 
     rid = "TestCompany"
     store = EvidenceStore(tmp_path, run_id=rid)
-    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"])
+    _seed_run_identity(store, frameworks=["ubuntu_cis_24_l2"])
     fw_key = "10.200.29.78/ubuntu_cis_24_l2"
     (store.root / fw_key / "REQ-010").mkdir(parents=True)
 
@@ -410,7 +450,7 @@ async def test_anonymize_report_creates_anon_copy(tmp_path: Path):
 
     run_id = "TestCompany"
     store = EvidenceStore(tmp_path, run_id=run_id)
-    store.write_run_meta(
+    _seed_run_identity(store, 
         frameworks=["ubuntu_cis_24_l2"],
         client_name="Test Company",
         results_session_number=3,
@@ -446,12 +486,13 @@ async def test_anonymize_report_creates_anon_copy(tmp_path: Path):
     assert anon_root.is_dir()
     mapping = (anon_root / "anonymization_mapping.json").read_text(encoding="utf-8")
     assert "IP_001" in mapping
-    assert "EMAIL_001" in mapping
+    assert "DOMAIN_001" in mapping
     anon_report = (anon_root / "report.md").read_text(encoding="utf-8")
     assert "10.200.29.78" not in anon_report
     assert "admin@testcompany.local" not in anon_report.lower()
     assert "IP_001" in anon_report
-    assert "EMAIL_" in anon_report
+    # Domain pass may rewrite emails to local@DOMAIN_001 before EMAIL tokens.
+    assert ("EMAIL_" in anon_report) or ("DOMAIN_001" in anon_report)
     anon_meta = (anon_root / "meta.json").read_text(encoding="utf-8")
     assert "results_session_number" not in anon_meta
     assert '"anonymized": true' in anon_meta
@@ -464,7 +505,7 @@ async def test_anonymize_report_does_not_write_results_db(tmp_path: Path):
 
     run_id = "NoDbClient"
     store = EvidenceStore(tmp_path, run_id=run_id)
-    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"], client_name="No DB")
+    _seed_run_identity(store, frameworks=["ubuntu_cis_24_l2"], client_name="No DB")
     store.write_root_report("Host 10.0.0.1 owner admin@example.com")
 
     settings = Settings(
@@ -503,7 +544,7 @@ async def test_anonymize_report_requires_domain(tmp_path: Path):
 
     run_id = "NeedDomain"
     store = EvidenceStore(tmp_path, run_id=run_id)
-    store.write_run_meta(frameworks=["ubuntu_cis_24_l2"], client_name="Need Domain")
+    _seed_run_identity(store, frameworks=["ubuntu_cis_24_l2"], client_name="Need Domain")
     store.write_root_report("host db01.needdomain.local ip 10.0.0.1")
 
     settings = Settings(

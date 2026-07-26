@@ -9,7 +9,6 @@ from auditor.domain.result_identity import (
     new_result_id,
     validate_result_identity,
 )
-from auditor.intake import client_slug
 from auditor.state import Finding
 
 
@@ -20,20 +19,23 @@ def identity_from_state(
     framework_version: str = "",
     requirement_id: str = "",
 ) -> dict[str, str]:
-    """Collect identity dimensions from graph state / intake."""
+    """Collect identity dimensions from graph state / intake.
+
+    ``client_id`` must be the durable registry id — never a client slug/name
+    (CORE-001). Callers that only have a display name must resolve via
+    :mod:`auditor.client_registry` before binding.
+    """
     st = state or {}
     intake = st.get("intake") if isinstance(st.get("intake"), dict) else {}
-    client_name = str(st.get("client_name") or intake.get("client_name") or "")
     client_id = str(
-        st.get("client_id")
-        or intake.get("client_id")
-        or (client_slug(client_name) if client_name else "")
-        or ""
+        st.get("client_id") or intake.get("client_id") or ""
     ).strip()
     audit_run_id = str(st.get("audit_run_id") or intake.get("audit_run_id") or "").strip()
     intake_state = st.get("intake_state")
     if not audit_run_id and isinstance(intake_state, dict):
         audit_run_id = str(intake_state.get("audit_run_id") or "").strip()
+    if not client_id and isinstance(intake_state, dict):
+        client_id = str(intake_state.get("client_id") or "").strip()
     asset_id = str(st.get("asset_id") or "").strip()
     fw = (framework_id or str(st.get("framework_id") or "")).strip()
     if "/" in fw:

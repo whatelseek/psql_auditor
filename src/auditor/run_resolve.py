@@ -206,36 +206,68 @@ def _key_matches_host(evidence_key: str, host_hint: str) -> bool:
 
 
 def extract_run_id(text: str, *, evidence_dir: Path | str | None = None) -> str | None:
-    """Pull a run id (timestamp or client folder name) from free text.
+    """Pull an evidence / audit run id from free text.
 
-    Matches ISO timestamp run ids, explicit evidence paths, artifact folder
-    names, Open WebUI download URL segments, and ``for <Client>`` when that
-    client folder exists under ``evidence_dir``.
+    Prefers ``arun_…`` and nested ``<slug>/arun_…`` paths (CORE-001). Client
+    display names / slugs are never returned as run ids when they are
+    ambiguous (multiple nested runs). Legacy flat client folders are returned
+    only when they uniquely identify a single evidence root.
 
     Args:
         text: Operator or assistant message content.
         evidence_dir: Optional artifacts root used to validate client names.
 
     Returns:
-        Run id string, or ``None`` when not found.
+        Run id string, or ``None`` when not found / ambiguous.
     """
+    from auditor.client_registry import looks_like_audit_run_id
+
     if not text:
         return None
+    # Prefer explicit business AuditRun ids (CORE-001).
+    arun = re.search(r"\b(arun_[0-9a-fA-F]{8,})\b", text)
+    if arun:
+        return arun.group(1)
+    # Nested evidence path: <slug>/arun_…
+    nested = re.search(
+        r"(?:artifacts/)?([A-Za-z0-9._-]+/(arun_[0-9a-fA-F]{8,}))",
+        text,
+    )
+    if nested:
+        return nested.group(1)
     match = _RUN_ID.search(text)
     if match:
         return match.group(1)
     path_match = _EVIDENCE_PATH.search(text)
     if path_match:
-        segment = Path(path_match.group(1).rstrip("/")).name
-        if segment and segment not in {".", ".."}:
-            return segment
+        raw = path_match.group(1).rstrip("/")
+        parts = [p for p in Path(raw).parts if p not in {".", ".."}]
+        for i, part in enumerate(parts):
+            if looks_like_audit_run_id(part):
+                if i > 0:
+                    return f"{parts[i - 1]}/{part}"
+                return part
+        # Bare client folder in a path — resolve only if uniquely mappable.
+        segment = parts[-1] if parts else ""
+        if segment and evidence_dir is not None:
+            resolved = _resolve_unique_client_evidence(Path(evidence_dir), segment)
+            return resolved
+        return None
+    # artifacts/<folder> — resolve uniquely (nested arun_ or legacy flat).
     client = _CLIENT_RUN.search(text)
     if client:
-        return client.group(1)
+        folder = client.group(1)
+        if looks_like_audit_run_id(folder):
+            return folder
+        if evidence_dir is not None:
+            resolved = _resolve_unique_client_evidence(Path(evidence_dir), folder)
+            if resolved:
+                return resolved
+    # Download URLs: only accept when the segment is an audit_run_id.
     dl = _DOWNLOAD.search(text)
-    if dl:
+    if dl and looks_like_audit_run_id(dl.group(1)):
         return dl.group(1)
-    # ``for AlphaCo`` / ``для AlphaCo`` when artifacts/<name> exists
+    # ``for AlphaCo`` when uniquely resolvable under evidence_dir.
     if evidence_dir is not None:
         root = Path(evidence_dir)
         for m in re.finditer(
@@ -244,13 +276,39 @@ def extract_run_id(text: str, *, evidence_dir: Path | str | None = None) -> str 
             re.I,
         ):
             name = m.group(1)
+            folder = None
             if (root / name).is_dir():
-                return name
-            # Case-insensitive folder match
-            lowered = name.lower()
-            for child in root.iterdir() if root.is_dir() else []:
-                if child.is_dir() and child.name.lower() == lowered:
-                    return child.name
+                folder = name
+            else:
+                lowered = name.lower()
+                for child in root.iterdir() if root.is_dir() else []:
+                    if child.is_dir() and child.name.lower() == lowered:
+                        folder = child.name
+                        break
+            if folder:
+                return _resolve_unique_client_evidence(root, folder)
+    return None
+
+
+def _resolve_unique_client_evidence(root: Path, folder: str) -> str | None:
+    """Return evidence key for ``folder`` only when uniquely resolvable."""
+    from auditor.client_registry import looks_like_audit_run_id
+
+    path = root / folder
+    if not path.is_dir():
+        return None
+    nested = [
+        p
+        for p in path.iterdir()
+        if p.is_dir() and looks_like_audit_run_id(p.name)
+    ]
+    if len(nested) == 1:
+        return f"{folder}/{nested[0].name}"
+    if len(nested) > 1:
+        return None  # Ambiguous — caller must pass audit_run_id
+    # Legacy flat client folder (meta at root).
+    if (path / "meta.json").is_file() or any(path.iterdir()):
+        return folder
     return None
 
 
@@ -495,22 +553,28 @@ def resolve_target(
     if require_req and not req_ids:
         raise ValueError("Name at least one requirement id, e.g. `REQ-002`.")
 
+    from auditor.legacy_compat import AmbiguousLegacyRunError
+
     source = "explicit"
     run_id = extract_run_id(user_text, evidence_dir=evidence_dir)
     if not run_id and messages:
         run_id = extract_run_id_from_messages(messages, evidence_dir=evidence_dir)
         if run_id:
             source = "history"
-    if not run_id:
-        run_id = latest_run_id(evidence_dir)
-        source = "disk"
+    # CORE-001: never fall back to newest evidence folder on disk.
     if not run_id:
         raise FileNotFoundError(
-            "No prior audit evidence found. Run a checklist audit first, "
-            "or include the run id in your message."
+            "No audit_run_id in your message or chat history. "
+            "Include an explicit `arun_…` id (CORE-001: no latest-run fallback)."
         )
-
-    store = EvidenceStore.open_existing(evidence_dir, run_id)
+    try:
+        store = EvidenceStore.open_existing(evidence_dir, run_id)
+    except AmbiguousLegacyRunError:
+        raise
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"No evidence found for {run_id!r}. Pass an explicit audit_run_id."
+        ) from None
     req_id = req_ids[0] if req_ids else ""
     framework_id = resolve_framework_for_req(
         user_text=user_text,

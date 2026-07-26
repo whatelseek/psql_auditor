@@ -31,7 +31,6 @@ from auditor.frameworks import route_framework
 from auditor.intent import extract_req_ids
 from auditor.language import detect_report_language, language_instruction
 from auditor.prompts import ADHOC_FORCE_PROMPT, ADHOC_USER_PROMPT
-from auditor.run_resolve import latest_run_id
 
 if TYPE_CHECKING:
     from auditor.graph import AuditorGraph
@@ -117,9 +116,15 @@ async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, A
     report_lang = detect_report_language(user_request)
     lang_instr = language_instruction(report_lang)
 
-    # Prefer appending into the latest checklist audit run when one exists.
-    prior_run = latest_run_id(settings.evidence_dir)
+    # CORE-001: attach only when the operator names an explicit audit_run_id /
+    # evidence path — never the newest folder on disk.
+    from auditor.client_registry import get_client_registry, looks_like_audit_run_id
+    from auditor.run_resolve import extract_run_id
+    from auditor.audit_registry import get_audit_registry
+
     attached_to_prior = False
+    prior_run = extract_run_id(user_request, evidence_dir=settings.evidence_dir)
+    store = None  # type: ignore[assignment]
     if prior_run:
         try:
             store = EvidenceStore.open_existing(settings.evidence_dir, prior_run)
@@ -142,12 +147,32 @@ async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, A
                 store = None  # type: ignore[assignment]
         except FileNotFoundError:
             store = None  # type: ignore[assignment]
-    else:
-        store = None  # type: ignore[assignment]
 
     if not attached_to_prior or store is None:
         run_id = new_run_id()
         store = EvidenceStore(settings.evidence_dir, run_id=run_id)
+        # Fresh ad-hoc execution still gets a durable client + AuditRun.
+        client = get_client_registry(settings.evidence_dir).ensure_client(
+            display_name="adhoc",
+            slug="adhoc",
+        )
+        arun = get_audit_registry(settings.evidence_dir).create_run(
+            client_id=client.client_id,
+            scope={"mode": "adhoc"},
+            evidence_run_id=run_id,
+        )
+        get_audit_registry(settings.evidence_dir).mark_run_started(arun.audit_run_id)
+        nested = f"{client.slug}/{arun.audit_run_id}"
+        store.rebind_run_id(nested)
+        run_id = store.run_id
+        graph._evidence_by_run[run_id] = store
+        store.write_run_meta(
+            client_id=client.client_id,
+            client_slug=client.slug,
+            audit_run_id=arun.audit_run_id,
+            status="running",
+            mode="adhoc",
+        )
         graph._evidence_by_run[run_id] = store
         store.write_run_meta(
             user_request=user_request,
@@ -242,10 +267,28 @@ async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, A
             framework_id=framework_id,
             req_label=req_label,
         )
+        meta_ids = store.read_run_meta()
+
         store.write_finding(
+
             framework_id,
+
             req_label,
-            {"status": "executed", "observation": body[:2000], "mode": "playbook"},
+
+            {
+
+                "status": "executed",
+
+                "observation": body[:2000],
+
+                "mode": "playbook",
+
+                "client_id": str(meta_ids.get("client_id") or ""),
+
+                "audit_run_id": str(meta_ids.get("audit_run_id") or ""),
+
+            },
+
         )
         return {
             "report": report,
@@ -326,10 +369,28 @@ async def run_adhoc_commands(graph: AuditorGraph, user_text: str) -> dict[str, A
         framework_id=framework_id,
         req_label=req_label,
     )
+    meta_ids = store.read_run_meta()
+
     store.write_finding(
+
         framework_id,
+
         req_label,
-        {"status": "executed", "observation": body[:2000], "mode": "freeform"},
+
+        {
+
+            "status": "executed",
+
+            "observation": body[:2000],
+
+            "mode": "freeform",
+
+            "client_id": str(meta_ids.get("client_id") or ""),
+
+            "audit_run_id": str(meta_ids.get("audit_run_id") or ""),
+
+        },
+
     )
     return {
         "report": report,

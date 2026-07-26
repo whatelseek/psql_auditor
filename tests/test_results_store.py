@@ -147,13 +147,14 @@ def test_format_session_results_markdown() -> None:
     assert "57.1" in text
 
 
-def test_resolve_session_evidence_prefers_client_folder(tmp_path) -> None:
-    client_dir = tmp_path / "testcompany"
-    client_dir.mkdir()
-    (client_dir / "meta.json").write_text(
+def test_resolve_session_evidence_prefers_nested_audit_run(tmp_path) -> None:
+    arun = "arun_deadbeefcafebabe"
+    nested = tmp_path / "testcompany" / arun
+    nested.mkdir(parents=True)
+    (nested / "meta.json").write_text(
         '{"thread_id":"audit-abc:10.0.0.1:ubuntu_cis_24_l2",'
         '"continue_thread_id":"audit-abc:10.0.0.1:ubuntu_cis_24_l2",'
-        '"client_name":"TestCompany"}',
+        '"client_name":"TestCompany","audit_run_id":"arun_deadbeefcafebabe"}',
         encoding="utf-8",
     )
     # Stale temp folder left behind after rename
@@ -168,9 +169,11 @@ def test_resolve_session_evidence_prefers_client_folder(tmp_path) -> None:
         evidence_run_id="20260722T043018Z_deadbeef",
         status="running",
         continue_thread_id="audit-abc",
+        audit_run_id=arun,
+        client_id="client_deadbeefcafe01",
     )
     tid, run_id = resolve_session_evidence(settings, info)  # type: ignore[arg-type]
-    assert run_id == "testcompany"
+    assert run_id == f"testcompany/{arun}"
     assert tid == "audit-abc:10.0.0.1:ubuntu_cis_24_l2"
 
 
@@ -287,7 +290,9 @@ async def test_start_session_allocates_next_number() -> None:
         session_number=2,
         client_name="Acme",
         client_slug="acme",
-        evidence_run_id="Acme",
+        client_id="client_deadbeefcafe01",
+        audit_run_id="arun_deadbeefcafebabe",
+        evidence_run_id="acme/arun_deadbeefcafebabe",
         status="running",
         continue_thread_id="t1",
         framework_id="",
@@ -297,7 +302,8 @@ async def test_start_session_allocates_next_number() -> None:
     )
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=2)
-    conn.fetchrow = AsyncMock(return_value=row)
+    # First fetchrow: lookup by audit_run_id (miss); second: INSERT RETURNING
+    conn.fetchrow = AsyncMock(side_effect=[None, row])
     tx = MagicMock()
     tx.__aenter__ = AsyncMock(return_value=None)
     tx.__aexit__ = AsyncMock(return_value=None)
@@ -311,8 +317,10 @@ async def test_start_session_allocates_next_number() -> None:
     ):
         info = await store.start_session(
             client_name="Acme",
-            evidence_run_id="Acme",
+            evidence_run_id="acme/arun_deadbeefcafebabe",
             continue_thread_id="t1",
+            audit_run_id="arun_deadbeefcafebabe",
+            client_id="client_deadbeefcafe01",
         )
 
     assert info is not None
@@ -371,6 +379,8 @@ async def test_record_host_framework_audit_tags_session_number() -> None:
         session_number=3,
         client_name="Acme",
         client_slug="acme",
+        client_id="acme",
+        audit_run_id="arun_test",
         evidence_run_id="Acme",
         status="running",
         continue_thread_id="",
@@ -470,6 +480,8 @@ async def test_upsert_requirement_result_live() -> None:
         session_number=1,
         client_name="Acme",
         client_slug="acme",
+        client_id="acme",
+        audit_run_id="arun_live",
         evidence_run_id="Acme",
         status="running",
         continue_thread_id="",

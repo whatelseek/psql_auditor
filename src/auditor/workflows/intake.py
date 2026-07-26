@@ -9,8 +9,10 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.types import interrupt
 
-from auditor.evidence_store import client_artifacts_id
 from auditor.access_probe import probe_access_endpoints, probe_access_services
+from auditor.audit_registry import get_audit_registry
+from auditor.client_registry import get_client_registry
+from auditor.evidence_store import client_artifacts_id
 from auditor.frameworks import get_framework, prefer_framework_ids, select_frameworks_for_host
 from auditor.host_facts import resolve_client_dir, resolve_client_inventory
 from auditor.intake import (
@@ -76,36 +78,75 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                 intake["client_slug"],
                 display_name=name,
             )
-            # Artifacts folder = inventory client folder name (e.g. TestCompany).
+            # Inventory folder for credentials / PLAN.md (display slug only).
             if not client_dir.is_dir():
                 client_dir = (
                     Path(runtime.settings.inventory_dir) / client_artifacts_id(name)
                 )
             client_dir.mkdir(parents=True, exist_ok=True)
-            artifacts_id = client_dir.name
+
+            # CORE-001: durable client_id + new AuditRun for this execution.
+            client = get_client_registry(runtime.settings.evidence_dir).ensure_client(
+                display_name=name,
+                slug=intake["client_slug"],
+                client_id=str(intake.get("client_id") or state.get("client_id") or "")
+                or None,
+            )
+            intake["client_id"] = client.client_id
+            audit_run_id = str(
+                intake.get("audit_run_id") or state.get("audit_run_id") or ""
+            ).strip()
+            registry = get_audit_registry(runtime.settings.evidence_dir)
+            if not audit_run_id:
+                arun = registry.create_run(
+                    client_id=client.client_id,
+                    scope={
+                        "client_name": name,
+                        "client_slug": client.slug,
+                    },
+                    evidence_run_id="",
+                    base_thread_id=thread_hint or "",
+                )
+                registry.mark_run_started(arun.audit_run_id)
+                audit_run_id = arun.audit_run_id
+            intake["audit_run_id"] = audit_run_id
+
+            # Evidence root = <client_slug>/<audit_run_id> (never client name alone).
+            evidence_key = f"{client.slug}/{audit_run_id}"
             store = runtime._store_from_state(state)
             if store is not None:
                 old_id = store.run_id
-                store.rebind_run_id(artifacts_id)
+                store.rebind_run_id(evidence_key)
                 runtime._evidence_by_run.pop(old_id, None)
                 runtime._evidence_by_run[store.run_id] = store
-                # Временный id как алиас, пока state intake не переписан.
                 runtime._evidence_by_run[old_id] = store
                 for sess in runtime._multi_sessions.values():
                     if sess.get("run_id") == old_id:
                         sess["run_id"] = store.run_id
+                        sess["audit_run_id"] = audit_run_id
                 intake["artifacts_run_id"] = store.run_id
-                # Обновить live-ключи state на оставшуюся часть узла.
                 state["evidence_run_id"] = store.run_id  # type: ignore[typeddict-item]
                 state["evidence_run_dir"] = str(store.root)  # type: ignore[typeddict-item]
+                state["client_id"] = client.client_id  # type: ignore[typeddict-item]
+                state["audit_run_id"] = audit_run_id  # type: ignore[typeddict-item]
+                store.write_run_meta(
+                    client_id=client.client_id,
+                    client_name=name,
+                    client_slug=client.slug,
+                    audit_run_id=audit_run_id,
+                    status="running",
+                )
+                # Keep AuditRun.evidence_run_id in sync with nested path.
+                run_row = registry.get_run(audit_run_id)
+                if run_row is not None:
+                    run_row.evidence_run_id = store.run_id
+                    registry.save_run(run_row)
 
             applied = read_client_credentials(
                 runtime.settings.inventory_dir,
                 intake["client_slug"],
             )
             intake["credentials_loaded"] = sorted(applied.keys())
-            # Учётные данные — run-scoped через ContextVar на invoke/resume;
-            # не мутировать process os.environ (параллельные аудиты).
             runtime._persist_intake_progress(
                 state, intake, thread_id=thread_hint
             )
