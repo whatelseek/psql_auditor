@@ -637,6 +637,9 @@ class AuditorGraph:
             return await self.arun(user_text)
         return await run_adhoc_commands(self, user_text)
 
+    async def arun_request(self, request, **kwargs):
+        return await _wf_multi_runner.arun_request(self, request, **kwargs)
+
     async def arun(self, *args, **kwargs):
         return await _wf_multi_runner.arun(self, *args, **kwargs)
 

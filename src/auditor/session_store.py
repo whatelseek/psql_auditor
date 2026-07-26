@@ -3,7 +3,8 @@
 This module stores **in-progress audit session state** on disk so LangGraph
 checkpoints can be resumed after process restarts. Multi-host / multi-framework
 job queues and SSH target descriptors are written to ``session.json`` under
-each evidence run (passwords retained for trusted resume contexts).
+each evidence run. Passwords are **not** retained; credentials are re-resolved
+from inventory on resume.
 
 Pipeline role:
     Used by the graph during long audits to persist ``remaining_jobs``,
@@ -224,12 +225,63 @@ def find_run_for_thread(evidence_dir: Path, thread_id: str) -> tuple[str, dict[s
     return None
 
 
+_CREDENTIAL_KEYS = frozenset(
+    {
+        "password",
+        "ssh_password",
+        "ssh_key",
+        "private_key_path",
+        "ssh_private_key_path",
+        "winrm_password",
+        "pg_password",
+        "token",
+        "api_key",
+        "database_url",
+        "secret",
+        "credentials",
+    }
+)
+
+
+def _strip_credential_keys(obj: Any) -> Any:
+    """Recursively remove credential keys from dict/list structures."""
+    if isinstance(obj, dict):
+        return {
+            k: _strip_credential_keys(v)
+            for k, v in obj.items()
+            if str(k).lower() not in _CREDENTIAL_KEYS
+        }
+    if isinstance(obj, list):
+        return [_strip_credential_keys(v) for v in obj]
+    return obj
+
+
+def _sanitize_ssh_target(value: Any) -> Any:
+    """Serialize ssh_target without passwords or private key paths."""
+    if value is None:
+        return None
+    if hasattr(value, "host"):
+        return {
+            "host": getattr(value, "host", ""),
+            "port": getattr(value, "port", ""),
+            "user": getattr(value, "user", ""),
+            "strict_host_key": getattr(value, "strict_host_key", ""),
+            "label": getattr(value, "label", ""),
+            "transport": getattr(value, "transport", "ssh"),
+            "winrm_transport": getattr(value, "winrm_transport", ""),
+            "winrm_use_ssl": getattr(value, "winrm_use_ssl", ""),
+            "winrm_verify_ssl": getattr(value, "winrm_verify_ssl", ""),
+        }
+    if isinstance(value, dict):
+        return _strip_credential_keys(dict(value))
+    return str(value)
+
+
 def _sanitize_session(session: dict[str, Any]) -> dict[str, Any]:
     """Drop non-serializable values; normalize SSH target for resume.
 
-    Preserves ``remaining_jobs``, ``completed``, and ``intake_state`` verbatim.
-    Serializes ``ssh_target`` to a plain dict (password retained for trusted
-    resume inside the secrets volume context).
+    Preserves ``remaining_jobs``, ``completed``, and ``intake_state`` after
+    stripping credential fields. Serializes ``ssh_target`` without secrets.
 
     Args:
         session: Raw in-memory session dict from the graph.
@@ -240,31 +292,15 @@ def _sanitize_session(session: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in session.items():
         if key == "ssh_target":
-            # InventorySshTarget or similar — store dict fields without assuming type
-            if value is None:
-                out[key] = None
-            elif hasattr(value, "__dict__"):
-                raw = {
-                    k: getattr(value, k, None)
-                    for k in (
-                        "host",
-                        "port",
-                        "user",
-                        "password",
-                        "private_key_path",
-                        "strict_host_key",
-                        "label",
-                    )
-                }
-                # Keep password for resume inside trusted secrets volume context;
-                # operators already store it in INVENTORY.md.
-                out[key] = raw
-            elif isinstance(value, dict):
-                out[key] = dict(value)
-            else:
-                out[key] = str(value)
+            out[key] = _sanitize_ssh_target(value)
+        elif key == "remaining_jobs" and isinstance(value, list):
+            out[key] = [
+                _strip_credential_keys(dict(j)) if isinstance(j, dict) else j for j in value
+            ]
+        elif key == "intake_state" and isinstance(value, dict):
+            out[key] = _strip_credential_keys(dict(value))
         elif key in {"remaining_jobs", "completed", "intake_state"}:
-            out[key] = value
+            out[key] = _strip_credential_keys(value)
         else:
             try:
                 json.dumps(value)

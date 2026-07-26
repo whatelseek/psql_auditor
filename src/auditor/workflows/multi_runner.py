@@ -13,21 +13,29 @@ from auditor.asset_registry import get_asset_registry
 from auditor.audit_registry import get_audit_registry
 from auditor.client_registry import get_client_registry
 from auditor.compliance import format_chat_summary_visuals, parse_report_findings
+from auditor.config import Settings
 from auditor.context import truncate_text
 from auditor.domain import (
     AuditJobStatus,
     AuditJobType,
+    AuditRequest,
+    AuditRequestIssue,
+    AuditRequestRejected,
+    AuditRunStatus,
     JobErrorInfo,
+    build_audit_request_from_selected_jobs,
+    persistable_audit_request,
+    resolve_inventory_target,
+    scope_with_audit_request,
+    validate_audit_request_semantics,
 )
 from auditor.evidence_store import EvidenceStore, new_run_id
 from auditor.followup import followup_footer
-from auditor.frameworks import get_framework, route_frameworks, select_frameworks_for_host
+from auditor.frameworks import get_framework
 from auditor.host_facts import HostFacts, parse_host_facts_json
 from auditor.intake import (
     client_slug,
-    domains_for_audit_type,
     filter_scope_framework_ids,
-    frameworks_for_audit_type,
 )
 from auditor.language import detect_report_language
 from auditor.legacy_compat import ClientOwnershipError, MissingAuditRunIdError, require_audit_run_id
@@ -93,7 +101,7 @@ async def schedule_framework_jobs(
             "framework_title": str(job.get("framework_title") or job.get("framework_id") or ""),
             "job_key": _job_dict_key(job),
             "evidence_host_id": str(job.get("evidence_host_id") or ""),
-            "ssh_target": _target_from_job_dict(job),
+            "ssh_target": _target_from_job_dict(job, runtime.settings),
             "remaining_jobs": list(remaining),
             "remaining": [str(j.get("framework_id") or "") for j in remaining],
             "completed": list(completed_list),
@@ -163,7 +171,7 @@ async def schedule_framework_jobs(
                 thread_id=tid,
                 intake_state=job_intake,
                 evidence_host_id=host_id or None,
-                ssh_target=_target_from_job_dict(job),
+                ssh_target=_target_from_job_dict(job, runtime.settings),
             )
         except Exception as exc:  # noqa: BLE001
             if active_job is not None:
@@ -338,6 +346,23 @@ def _bootstrap_audit_run(
     updated["client_id"] = client.client_id
     updated["client_slug"] = client.slug
 
+    # INPUT-001: bind validated request before allocating/creating jobs.
+    from auditor.domain import load_persisted_audit_request
+
+    audit_request_raw = updated.get("audit_request") or (intake or {}).get("audit_request")
+    bound_request = None
+    if audit_request_raw:
+        bound_request = load_persisted_audit_request(audit_request_raw)
+        if bound_request.client_id != client.client_id:
+            raise AuditRequestRejected(
+                issues=[
+                    AuditRequestIssue(
+                        location="client_id",
+                        code="client_ownership_mismatch",
+                        message="AuditRequest.client_id does not own this audit run",
+                    )
+                ],
+            )
     registry = get_audit_registry(runtime.settings.evidence_dir)
     audit_run_id = str(updated.get("audit_run_id") or intake.get("audit_run_id") or "").strip()
     if audit_run_id:
@@ -353,8 +378,32 @@ def _bootstrap_audit_run(
         if not arun.evidence_run_id:
             arun.evidence_run_id = run_id
             registry.save_run(arun)
+
+        audit_request_raw = updated.get("audit_request") or (intake or {}).get("audit_request")
+        if audit_request_raw:
+            try:
+                from auditor.domain import load_persisted_audit_request
+
+                req = load_persisted_audit_request(audit_request_raw)
+                arun.scope = scope_with_audit_request(arun.scope, req)
+                registry.save_run(arun)
+            except AuditRequestRejected:
+                pass
     else:
         # New audit without prior intake allocation (direct framework jobs).
+        if pending and bound_request is None:
+            raise AuditRequestRejected(
+                issues=[
+                    AuditRequestIssue(
+                        location="audit_request",
+                        code="typed_request_required",
+                        message=(
+                            "new AuditJob rows require a validated AuditRequest; "
+                            "legacy free-text job creation is not allowed"
+                        ),
+                    )
+                ],
+            )
         scope = {
             "audit_types": str(updated.get("audit_types") or ""),
             "frameworks": [_job_dict_key(j) for j in pending],
@@ -363,6 +412,15 @@ def _bootstrap_audit_run(
             "client_slug": client.slug,
             "selected_jobs": list((intake or {}).get("selected_jobs") or []),
         }
+        audit_request_raw = updated.get("audit_request") or (intake or {}).get("audit_request")
+        if audit_request_raw:
+            try:
+                from auditor.domain import load_persisted_audit_request
+
+                req = load_persisted_audit_request(audit_request_raw)
+                scope = scope_with_audit_request(scope, req)
+            except AuditRequestRejected:
+                pass
         session_number = updated.get("results_session_number")
         arun = registry.create_run(
             client_id=client.client_id,
@@ -409,6 +467,19 @@ def _bootstrap_audit_run(
         logical = _job_dict_key(job)
         existing = registry.latest_job_for_task(audit_run_id, logical)
         if existing is None:
+            if bound_request is None:
+                raise AuditRequestRejected(
+                    issues=[
+                        AuditRequestIssue(
+                            location="audit_request",
+                            code="typed_request_required",
+                            message=(
+                                "new AuditJob rows require a validated AuditRequest; "
+                                "legacy free-text job creation is not allowed"
+                            ),
+                        )
+                    ],
+                )
             created = registry.create_job(
                 audit_run_id=audit_run_id,
                 logical_task_id=logical,
@@ -476,7 +547,10 @@ async def run_framework_jobs(
             "awaiting_hitl": False,
         }
 
-    pending = [_serialize_host_job(target, fw) for target, _facts, fw in jobs]
+    job_client_slug = str(intake_state.get("client_slug") or "")
+    pending = [
+        _serialize_host_job(target, fw, client_slug=job_client_slug) for target, _facts, fw in jobs
+    ]
     intake_state = _bootstrap_audit_run(
         runtime,
         run_id=run_id,
@@ -831,11 +905,11 @@ async def continue_multi_after_resume(
                     "framework_id": str(fw_id),
                     "framework_title": fw.title if fw else str(fw_id),
                     "evidence_host_id": "",
+                    "inventory_target_ref": "",
+                    "client_slug": str(intake_state.get("client_slug") or ""),
                     "ssh_host": "",
                     "ssh_port": "",
                     "ssh_user": "",
-                    "ssh_password": "",
-                    "ssh_key": "",
                     "ssh_strict": "",
                     "ssh_label": "",
                 }
@@ -867,148 +941,139 @@ async def start_frameworks_after_intake(
     run_id: str,
     intake: dict[str, Any],
 ) -> dict[str, Any]:
-    """Discover hosts, select frameworks, and start sequential audit jobs.
+    """Start framework jobs from confirmed intake ``selected_jobs`` (INPUT-001).
 
-    Allocates a results-warehouse session, builds host-driven or NLP-routed
-    framework jobs, and delegates to ``_run_framework_jobs``.
-
-    Args:
-        user_text: Original operator request.
-        base_thread: Parent LangGraph thread id.
-        run_id: Shared evidence run id from intake.
-        intake: Completed intake answers dict.
-
-    Returns:
-        Single-framework result or merged multi-framework report.
+    Builds a typed :class:`~auditor.domain.AuditRequest`, persists it on the
+    evidence run and AuditRun scope, then schedules host/framework jobs without
+    NLP routing or inventory auto-discovery fallbacks.
     """
-    audit_type = str(intake.get("audit_types") or "both")
-    domains = domains_for_audit_type(audit_type)
-    has_access = bool(intake.get("has_access"))
+    selected_rows = list(intake.get("selected_jobs") or [])
+    client_id = str(intake.get("client_id") or "").strip()
+    client_slug_val = str(intake.get("client_slug") or "").strip()
+    audit_run_id = str(intake.get("audit_run_id") or "").strip()
+
+    if not selected_rows or not client_id or not client_slug_val:
+        raise AuditRequestRejected(
+            issues=[
+                AuditRequestIssue(
+                    location="intake",
+                    code="missing_confirmed_scope",
+                    message=(
+                        "confirmed selected_jobs, client_id, and client_slug "
+                        "are required before starting production audit jobs"
+                    ),
+                )
+            ],
+        )
 
     store = runtime._evidence_by_run.get(run_id)
     if store is None:
         store = EvidenceStore(runtime.settings.evidence_dir, run_id=run_id)
         runtime._evidence_by_run[run_id] = store
 
-    intake_state = {
-        "intake_complete": True,
-        "intake": intake,
-        "client_name": str(intake.get("client_name") or ""),
-        "client_id": str(intake.get("client_id") or ""),
-        "client_slug": str(intake.get("client_slug") or ""),
-        "audit_run_id": str(intake.get("audit_run_id") or ""),
-        "has_cmdb": bool(intake.get("has_cmdb")),
-        "has_access": has_access,
-        "audit_types": audit_type,
-    }
-
-    # New audit → allocate next results warehouse session_number (Postgres tracker).
-    # Requires explicit audit_run_id from intake (CORE-001); evidence path is
-    # nested ``<slug>/<audit_run_id>`` after rebind.
-    evidence_run = store.run_id or run_id
-    audit_run_id = str(intake.get("audit_run_id") or "").strip()
-    session_info = None
-    if audit_run_id:
-        session_info = await start_session_safe(
-            runtime.settings,
-            client_name=str(intake.get("client_name") or ""),
-            evidence_run_id=evidence_run,
-            continue_thread_id=base_thread,
-            evidence_path=str(store.root),
-            audit_run_id=audit_run_id,
-            client_id=str(intake.get("client_id") or ""),
-        )
-    if session_info is not None:
-        store.write_run_meta(
-            results_session_number=session_info.session_number,
-            results_session_id=session_info.id,
-            audit_run_id=audit_run_id,
-            client_id=str(intake.get("client_id") or ""),
-            status="running",
-        )
-        intake_state["results_session_number"] = session_info.session_number
-
-    # Jobs: (ssh_target, facts, framework)
-    jobs: list[tuple[InventorySshTarget, HostFacts, Any]] = []
     preferred_lang = detect_report_language(user_text).code
-    selected_rows = list(intake.get("selected_jobs") or [])
-    if has_access and selected_rows:
+    registry = get_audit_registry(runtime.settings.evidence_dir)
+
+    try:
+        request = build_audit_request_from_selected_jobs(
+            client_id=client_id,
+            client_slug=client_slug_val,
+            selected_jobs=selected_rows,
+            settings=runtime.settings,
+            report_language=preferred_lang,
+        )
+
         jobs = runtime._jobs_from_selected_intake(
             intake=intake, store=store, selected_rows=selected_rows
         )
-    elif has_access:
-        discovered = await runtime._discover_inventory_hosts(intake=intake, store=store)
-        for target, facts in discovered:
-            if facts.error:
-                # Still allow it_audit if domain includes IT
-                matched = []
-                if "it" in domains:
-                    it_fw = get_framework("it_audit", runtime.settings.agents_dir)
-                    if it_fw is not None:
-                        matched = [it_fw]
-            else:
-                matched = select_frameworks_for_host(
-                    facts,
-                    domains=domains,
-                    agents_dir=runtime.settings.agents_dir,
-                    preferred_language=preferred_lang,
-                )
-            for fw in matched:
-                jobs.append((target, facts, fw))
-
-    if not jobs:
-        # Fallback: NLP routing without per-host discovery
-        fw_ids = frameworks_for_audit_type(
-            audit_type,  # type: ignore[arg-type]
-            user_request=user_text,
-            agents_dir=runtime.settings.agents_dir,
-        )
-        selected = []
-        for fid in fw_ids:
-            framework = get_framework(fid, runtime.settings.agents_dir)
-            if framework is not None:
-                selected.append(framework)
-        if not selected:
-            selected = route_frameworks(
-                user_text,
-                runtime.settings.agents_dir,
-                preferred_language=preferred_lang,
+        if not jobs:
+            raise AuditRequestRejected(
+                issues=[
+                    AuditRequestIssue(
+                        location="targets",
+                        code="empty_framework_scope",
+                        message="no runnable jobs could be built from confirmed selected_jobs",
+                    )
+                ],
             )
+
+        # Persist secret-free request only after structural+semantic validation
+        # and after runnable jobs are confirmed — before warehouse session / graphs.
         store.write_run_meta(
-            frameworks=[fw.id for fw in selected],
+            input_contract_version=1,
+            audit_request=persistable_audit_request(request),
             intake_complete=True,
             intake=intake,
             client_name=intake.get("client_name"),
-            audit_types=audit_type,
-            host_driven=False,
+            client_id=client_id,
+            client_slug=client_slug_val,
+            audit_types=str(intake.get("audit_types") or "both"),
+            host_driven=True,
+        )
+
+        if audit_run_id:
+            arun = registry.get_run(audit_run_id)
+            if arun is not None:
+                arun.scope = scope_with_audit_request(arun.scope, request)
+                registry.save_run(arun)
+
+        evidence_run = store.run_id or run_id
+        session_info = None
+        if audit_run_id:
+            session_info = await start_session_safe(
+                runtime.settings,
+                client_name=str(intake.get("client_name") or ""),
+                evidence_run_id=evidence_run,
+                continue_thread_id=base_thread,
+                evidence_path=str(store.root),
+                audit_run_id=audit_run_id,
+                client_id=client_id,
+            )
+        if session_info is not None:
+            store.write_run_meta(
+                results_session_number=session_info.session_number,
+                results_session_id=session_info.id,
+                audit_run_id=audit_run_id,
+                client_id=client_id,
+                status="running",
+            )
+
+        intake_state = {
+            "intake_complete": True,
+            "intake": intake,
+            "client_name": str(intake.get("client_name") or ""),
+            "client_id": client_id,
+            "client_slug": client_slug_val,
+            "audit_run_id": audit_run_id,
+            "has_cmdb": bool(intake.get("has_cmdb")),
+            "has_access": bool(intake.get("has_access")),
+            "audit_types": str(intake.get("audit_types") or "both"),
+            "audit_request": persistable_audit_request(request),
+        }
+        if session_info is not None:
+            intake_state["results_session_number"] = session_info.session_number
+
+        plan_md = runtime._format_host_framework_plan(jobs)
+        store.write_run_meta(
+            frameworks=[f"{t.slug}/{fw.id}" for t, _f, fw in jobs],
+            host_plan=plan_md,
         )
         return await runtime._run_framework_jobs(
             user_text=user_text,
             base_thread=base_thread,
             run_id=run_id,
             intake_state=intake_state,
-            jobs=[(None, None, fw) for fw in selected],
-            plan_md="",
+            jobs=jobs,
+            plan_md=plan_md,
         )
-
-    plan_md = runtime._format_host_framework_plan(jobs)
-    store.write_run_meta(
-        frameworks=[f"{t.slug}/{fw.id}" for t, _f, fw in jobs],
-        intake_complete=True,
-        intake=intake,
-        client_name=intake.get("client_name"),
-        audit_types=audit_type,
-        host_driven=True,
-        host_plan=plan_md,
-    )
-    return await runtime._run_framework_jobs(
-        user_text=user_text,
-        base_thread=base_thread,
-        run_id=run_id,
-        intake_state=intake_state,
-        jobs=jobs,
-        plan_md=plan_md,
-    )
+    except AuditRequestRejected:
+        if audit_run_id:
+            try:
+                registry.transition_run(audit_run_id, AuditRunStatus.FAILED)
+                store.write_run_meta(audit_run_id=audit_run_id, status="failed")
+            except Exception:  # noqa: BLE001
+                pass
+        raise
 
 
 def multi_progress_preamble(
@@ -1063,18 +1128,29 @@ def _host_lock_key_from_job(job: dict[str, Any]) -> str:
 def _serialize_host_job(
     target: InventorySshTarget | None,
     fw: Any,
+    *,
+    client_slug: str = "",
 ) -> dict[str, Any]:
     """Serialize one (host, framework) job for multi-session persistence."""
+    inv_ref = ""
+    if target is not None:
+        # Prefer stable host identity over generic table labels (e.g. "SSH").
+        inv_ref = (
+            str(getattr(target, "slug", "") or "").strip()
+            or str(getattr(target, "host", "") or "").strip()
+            or str(getattr(target, "inventory_key", "") or "").strip()
+            or str(getattr(target, "label", "") or "").strip()
+        )
     return {
         "framework_id": fw.id,
         "framework_title": fw.title,
         "framework_version": str(getattr(fw, "version", "") or ""),
         "evidence_host_id": target.slug if target else "",
+        "inventory_target_ref": inv_ref,
+        "client_slug": client_slug,
         "ssh_host": target.host if target else "",
         "ssh_port": target.port if target else "",
         "ssh_user": target.user if target else "",
-        "ssh_password": target.password if target else "",
-        "ssh_key": target.private_key_path if target else "",
         "ssh_strict": target.strict_host_key if target else "",
         "ssh_label": target.label if target else "",
         "asset_id": str(getattr(target, "asset_id", "") or "") if target else "",
@@ -1099,8 +1175,21 @@ def _job_dict_thread_id(base_thread: str, job: dict[str, Any]) -> str:
     return f"{base_thread}:{host}:{fw}" if host else f"{base_thread}:{fw}"
 
 
-def _target_from_job_dict(job: dict[str, Any]) -> InventorySshTarget | None:
+def _target_from_job_dict(
+    job: dict[str, Any],
+    settings: Settings | None = None,
+) -> InventorySshTarget | None:
     """Rebuild ``InventorySshTarget`` from a serialized multi-session job."""
+    slug = str(job.get("client_slug") or "").strip()
+    inv_ref = str(job.get("inventory_target_ref") or "").strip()
+    if settings is not None and slug and inv_ref:
+        resolved = resolve_inventory_target(
+            settings,
+            client_slug=slug,
+            inventory_target_ref=inv_ref,
+        )
+        if resolved is not None:
+            return resolved
     host = str(job.get("ssh_host") or "").strip()
     if not host:
         return None
@@ -1108,8 +1197,8 @@ def _target_from_job_dict(job: dict[str, Any]) -> InventorySshTarget | None:
         host=host,
         port=str(job.get("ssh_port") or "22"),
         user=str(job.get("ssh_user") or ""),
-        password=str(job.get("ssh_password") or ""),
-        private_key_path=str(job.get("ssh_key") or ""),
+        password="",
+        private_key_path="",
         strict_host_key=str(job.get("ssh_strict") or ""),
         label=str(job.get("ssh_label") or ""),
         transport=str(job.get("transport") or "ssh"),
@@ -1194,7 +1283,7 @@ def format_host_framework_plan(
         "",
     ]
     if not jobs:
-        lines.append("_No hosts discovered — falling back to NLP framework routing._")
+        lines.append("_No hosts discovered — empty scope (typed AuditRequest required)._")
         return "\n".join(lines)
     by_host: dict[str, list[str]] = {}
     labels: dict[str, str] = {}
@@ -1262,6 +1351,86 @@ def reload_multi_sessions(runtime: AuditRuntime, run_id: str) -> None:
             runtime._multi_sessions[tid] = sess
 
 
+async def arun_request(
+    runtime: AuditRuntime,
+    request: AuditRequest,
+    *,
+    thread_id: str | None = None,
+    operator_context: str = "",
+) -> dict[str, Any]:
+    """Run a production audit from a validated typed :class:`AuditRequest`."""
+    validated = validate_audit_request_semantics(request, runtime.settings)
+    run_id = new_run_id()
+    base_thread = thread_id or f"audit-{uuid.uuid4().hex[:12]}"
+    shared = EvidenceStore(runtime.settings.evidence_dir, run_id=run_id)
+    runtime._evidence_by_run[run_id] = shared
+
+    client = get_client_registry(runtime.settings.evidence_dir).get(validated.client_id)
+    client_slug_val = client.slug if client is not None else validated.client_id
+
+    shared.write_run_meta(
+        input_contract_version=1,
+        audit_request=persistable_audit_request(validated),
+        user_request=truncate_text(
+            operator_context,
+            runtime.settings.max_user_request_chars,
+            "user_request",
+        ),
+        thread_id=base_thread,
+        client_id=validated.client_id,
+        client_slug=client_slug_val,
+    )
+
+    intake_state: dict[str, Any] = {
+        "client_id": validated.client_id,
+        "client_slug": client_slug_val,
+        "audit_request": persistable_audit_request(validated),
+        "audit_types": "both",
+        "has_access": True,
+    }
+
+    jobs: list[tuple[InventorySshTarget, HostFacts, Any]] = []
+    for target in validated.targets:
+        inv_target = resolve_inventory_target(
+            runtime.settings,
+            client_slug=client_slug_val,
+            inventory_target_ref=target.inventory_target_ref,
+        )
+        if inv_target is None:
+            continue
+        facts = HostFacts(ssh_host=inv_target.host)
+        for fw_ref in target.frameworks:
+            fw = get_framework(fw_ref.framework_id, runtime.settings.agents_dir)
+            if fw is not None:
+                jobs.append((inv_target, facts, fw))
+
+    if not jobs:
+        raise AuditRequestRejected(
+            issues=[
+                AuditRequestIssue(
+                    location="targets",
+                    code="empty_framework_scope",
+                    message="no runnable jobs could be built from AuditRequest targets",
+                )
+            ],
+        )
+
+    plan_md = runtime._format_host_framework_plan(jobs)
+    shared.write_run_meta(
+        frameworks=[f"{t.slug}/{fw.id}" for t, _f, fw in jobs],
+        host_driven=True,
+        host_plan=plan_md,
+    )
+    return await runtime._run_framework_jobs(
+        user_text=operator_context,
+        base_thread=base_thread,
+        run_id=run_id,
+        intake_state=intake_state,
+        jobs=jobs,
+        plan_md=plan_md,
+    )
+
+
 async def arun(
     runtime: AuditRuntime,
     user_text: str,
@@ -1316,80 +1485,17 @@ async def arun(
             intake=intake if isinstance(intake, dict) else {},
         )
 
-    try:
-        selected = route_frameworks(user_text, runtime.settings.agents_dir)
-    except FileNotFoundError as exc:
-        return {
-            "report": str(exc),
-            "messages": [AIMessage(content=str(exc))],
-            "error": str(exc),
-        }
-
-    shared.write_run_meta(frameworks=[fw.id for fw in selected])
-
-    if len(selected) == 1:
-        return await runtime.arun_one(
-            user_text,
-            framework_id=selected[0].id,
-            run_id=run_id,
-            thread_id=f"{base_thread}:{selected[0].id}",
-        )
-
-    # HITL-friendly sequential graphs (parallel would tangle chat interrupts).
-    if runtime.settings.hitl_enabled:
-        completed: list[tuple[str, str, str]] = []
-        for index, fw in enumerate(selected):
-            fw_tid = f"{base_thread}:{fw.id}"
-            remaining = [f.id for f in selected[index + 1 :]]
-            runtime._remember_multi_session(
-                fw_tid,
-                {
-                    "base_thread": base_thread,
-                    "run_id": run_id,
-                    "user_text": user_text,
-                    "framework_id": fw.id,
-                    "framework_title": fw.title,
-                    "remaining": remaining,
-                    "completed": list(completed),
-                },
+    raise AuditRequestRejected(
+        issues=[
+            AuditRequestIssue(
+                location="request",
+                code="typed_request_required",
+                message=(
+                    "Production audits require a typed AuditRequest; "
+                    "call arun_request() instead of free-text arun()."
+                ),
             )
-            result = await runtime.arun_one(
-                user_text,
-                framework_id=fw.id,
-                run_id=run_id,
-                thread_id=fw_tid,
-            )
-            if result.get("awaiting_hitl"):
-                prefix = runtime._multi_progress_preamble(completed, fw.id)
-                result["report"] = f"{prefix}{result.get('report') or ''}"
-                return result
-            runtime._forget_multi_session(fw_tid)
-            completed.append((fw.id, fw.title, result.get("report") or ""))
-        return await runtime._merge_multi_reports(
-            completed,
-            run_id=run_id,
-            base_thread=base_thread,
-        )
-
-    results = await asyncio.gather(
-        *[
-            runtime.arun_one(
-                user_text,
-                framework_id=fw.id,
-                run_id=run_id,
-                thread_id=f"{base_thread}:{fw.id}",
-            )
-            for fw in selected
-        ]
-    )
-    completed = [
-        (fw.id, fw.title, result.get("report") or "")
-        for fw, result in zip(selected, results, strict=True)
-    ]
-    return await runtime._merge_multi_reports(
-        completed,
-        run_id=run_id,
-        base_thread=base_thread,
+        ],
     )
 
 

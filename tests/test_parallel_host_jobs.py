@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from tests.helpers.audit_request import intake_with_request
 
+from auditor.client_registry import get_client_registry
 from auditor.config import Settings
 from auditor.evidence_store import EvidenceStore, bind_host_segment, effective_host_segment
 from auditor.graph import AuditorGraph
@@ -42,14 +44,16 @@ async def test_bind_host_segment_context_isolated(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_schedule_respects_host_lock_and_concurrency():
+async def test_schedule_respects_host_lock_and_concurrency(tmp_path: Path):
     """Jobs on A,A,B with cap 2: B overlaps first A; second A waits; peak ≤ 2."""
     settings = Settings(
         _env_file=None,
+        evidence_dir=tmp_path,
         max_parallel_host_jobs=2,
         agents_dir=Path("agents"),
     )
     graph = AuditorGraph(settings=settings)
+    client = get_client_registry(tmp_path).ensure_client(display_name="Acme", slug="acme")
 
     current = 0
     peak = 0
@@ -107,7 +111,7 @@ async def test_schedule_respects_host_lock_and_concurrency():
             user_text="audit",
             base_thread="t-parallel",
             run_id="run-parallel",
-            intake_state={"intake_complete": True},
+            intake_state=intake_with_request(client.client_id, host="host-a", framework_id="fw1"),
             jobs=jobs,
             plan_md="",
         )
@@ -124,14 +128,16 @@ async def test_schedule_respects_host_lock_and_concurrency():
 
 
 @pytest.mark.asyncio
-async def test_schedule_hitl_drains_inflight_and_keeps_remaining():
+async def test_schedule_hitl_drains_inflight_and_keeps_remaining(tmp_path: Path):
     """HITL on one job stops new starts, drains peers, keeps remaining queue."""
     settings = Settings(
         _env_file=None,
+        evidence_dir=tmp_path,
         max_parallel_host_jobs=2,
         agents_dir=Path("agents"),
     )
     graph = AuditorGraph(settings=settings)
+    client = get_client_registry(tmp_path).ensure_client(display_name="Acme", slug="acme")
     calls: list[str] = []
 
     async def fake_arun_one(user_text, **kwargs):
@@ -166,7 +172,7 @@ async def test_schedule_hitl_drains_inflight_and_keeps_remaining():
             user_text="audit",
             base_thread="t-hitl",
             run_id="run-hitl",
-            intake_state={"intake_complete": True},
+            intake_state=intake_with_request(client.client_id, host="host-a", framework_id="fw1"),
             jobs=jobs,
             plan_md="# Plan",
         )

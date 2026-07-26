@@ -43,6 +43,7 @@ from auditor.api.stream_progress import (
 )
 from auditor.application_runtime import ApplicationRuntime
 from auditor.config import Settings, get_settings
+from auditor.domain import AuditRequestRejected
 from auditor.hitl import is_continue_reply, resolve_pause_resume
 from auditor.intent import classify_intent
 from auditor.progress import ProgressSink, bind_progress_sink
@@ -768,7 +769,16 @@ async def _run_or_resume_once(
             return await auditor.acontinue(thread_id_pause, **resume_kw)
         return await auditor.aresume(thread_id_pause, user_text, **resume_kw)
 
-    return await auditor.arun(user_text, thread_id=thread_id)
+    try:
+        return await auditor.arun(user_text, thread_id=thread_id)
+    except AuditRequestRejected as exc:
+        msg = exc.operator_message()
+        return {
+            "report": msg,
+            "messages": [AIMessage(content=msg)],
+            "awaiting_hitl": False,
+            "error": exc.code,
+        }
 
 
 @router.post("/chat/completions")
@@ -1014,24 +1024,11 @@ async def _stream_audit(
             completion_id,
         )
     else:
-        from auditor.frameworks import route_frameworks
-
-        try:
-            selected = route_frameworks(user_text, settings.agents_dir)
-            names = ", ".join(f"`{fw.id}`" for fw in selected)
-            yield _sse_chunk(
-                f"Starting audit for {len(selected)} framework(s): {names} "
-                f"(REQ workers={settings.max_parallel_assessments}; "
-                f"host jobs={settings.max_parallel_host_jobs}; "
-                f"HITL={'on' if settings.hitl_enabled else 'off'})…\n\n",
-                model,
-                completion_id,
-            )
-        except Exception as exc:  # noqa: BLE001
-            yield _sse_chunk(f"Routing error: {exc}\n", model, completion_id)
-            yield _sse_chunk(None, model, completion_id, finish="stop")
-            yield "data: [DONE]\n\n"
-            return
+        yield _sse_chunk(
+            "Starting audit (typed AuditRequest required for production scope)…\n\n",
+            model,
+            completion_id,
+        )
 
     sink = ProgressSink()
     progress_q: asyncio.Queue[Any] = asyncio.Queue()
@@ -1103,6 +1100,11 @@ async def _stream_audit(
                 model,
                 completion_id,
             )
+    except AuditRequestRejected as exc:
+        yield _sse_chunk(f"\n\n{exc.operator_message()}\n", model, completion_id)
+        yield _sse_chunk(None, model, completion_id, finish="stop")
+        yield "data: [DONE]\n\n"
+        return
     except Exception as exc:  # noqa: BLE001
         yield _sse_chunk(f"\n\nAudit error: {exc}\n", model, completion_id)
         yield _sse_chunk(None, model, completion_id, finish="stop")

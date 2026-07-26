@@ -16,6 +16,7 @@ from tests.fixtures.canonical_audit import (
     RUN_BETA_CURRENT_ID,
     build_canonical_scenario,
 )
+from tests.helpers.audit_request import intake_with_request
 
 from auditor.audit_registry import get_audit_registry
 from auditor.client_registry import get_client_registry, looks_like_audit_run_id
@@ -96,12 +97,13 @@ async def test_two_audits_same_client_reuse_client_id_new_run(tmp_path: Path):
                 user_text="audit",
                 base_thread=f"t-{i}",
                 run_id=ev,
-                intake_state={
-                    "client_name": "Acme Corp",
-                    "client_slug": "acme_corp",
-                    "client_id": c1.client_id,
-                    "intake_complete": True,
-                },
+                intake_state=intake_with_request(
+                    c1.client_id,
+                    client_name="Acme Corp",
+                    client_slug="acme_corp",
+                    host="h1",
+                    framework_id="fw1",
+                ),
                 jobs=jobs,
                 plan_md="",
             )

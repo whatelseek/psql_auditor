@@ -8,8 +8,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from tests.helpers.audit_request import intake_with_request
 
 from auditor.audit_registry import get_audit_registry
+from auditor.client_registry import get_client_registry
 from auditor.config import Settings
 from auditor.domain import (
     AuditJobStatus,
@@ -81,7 +83,13 @@ async def test_worker_retry_new_job_same_run(tmp_path: Path):
             user_text="audit",
             base_thread="t-retry",
             run_id="ev-retry",
-            intake_state={"client_name": "Acme", "intake_complete": True},
+            intake_state=intake_with_request(
+                get_client_registry(tmp_path)
+                .ensure_client(display_name="Acme", slug="acme")
+                .client_id,
+                host="h1",
+                framework_id="fw1",
+            ),
             jobs=jobs,
             plan_md="",
         )
@@ -100,11 +108,14 @@ async def test_worker_retry_new_job_same_run(tmp_path: Path):
             user_text="audit",
             base_thread="t-retry",
             run_id="ev-retry",
-            intake_state={
-                "client_name": "Acme",
-                "intake_complete": True,
-                "audit_run_id": run_id,
-            },
+            intake_state=intake_with_request(
+                get_client_registry(tmp_path)
+                .ensure_client(display_name="Acme", slug="acme")
+                .client_id,
+                host="h1",
+                framework_id="fw1",
+                audit_run_id=run_id,
+            ),
             pending_jobs=[
                 {
                     "framework_id": "fw1",
@@ -158,7 +169,13 @@ async def test_full_restart_creates_new_run(tmp_path: Path):
             user_text="audit",
             base_thread="t1",
             run_id="ev-a",
-            intake_state={"client_name": "Acme", "intake_complete": True},
+            intake_state=intake_with_request(
+                get_client_registry(tmp_path)
+                .ensure_client(display_name="Acme", slug="acme")
+                .client_id,
+                host="_none_",
+                framework_id="fw1",
+            ),
             jobs=[(None, None, _fw("fw1"))],
             plan_md="",
         )
@@ -166,7 +183,13 @@ async def test_full_restart_creates_new_run(tmp_path: Path):
             user_text="audit again",
             base_thread="t2",
             run_id="ev-b",
-            intake_state={"client_name": "Acme", "intake_complete": True},
+            intake_state=intake_with_request(
+                get_client_registry(tmp_path)
+                .ensure_client(display_name="Acme", slug="acme")
+                .client_id,
+                host="_none_",
+                framework_id="fw1",
+            ),
             jobs=[(None, None, _fw("fw1"))],
             plan_md="",
         )
@@ -238,7 +261,15 @@ async def test_concurrent_runs_do_not_mix_jobs(tmp_path: Path):
                 user_text="a",
                 base_thread="ta",
                 run_id="ev-1",
-                intake_state={"client_name": "A", "intake_complete": True},
+                intake_state=intake_with_request(
+                    get_client_registry(tmp_path)
+                    .ensure_client(display_name="A", slug="a")
+                    .client_id,
+                    client_name="A",
+                    client_slug="a",
+                    host="h1",
+                    framework_id="fw1",
+                ),
                 jobs=[(_target("ha"), None, _fw("fw1"))],
                 plan_md="",
             ),
@@ -246,7 +277,15 @@ async def test_concurrent_runs_do_not_mix_jobs(tmp_path: Path):
                 user_text="b",
                 base_thread="tb",
                 run_id="ev-2",
-                intake_state={"client_name": "B", "intake_complete": True},
+                intake_state=intake_with_request(
+                    get_client_registry(tmp_path)
+                    .ensure_client(display_name="B", slug="b")
+                    .client_id,
+                    client_name="B",
+                    client_slug="b",
+                    host="h2",
+                    framework_id="fw1",
+                ),
                 jobs=[(_target("hb"), None, _fw("fw1"))],
                 plan_md="",
             ),
@@ -351,7 +390,13 @@ async def test_production_path_records_audit_run_in_meta(tmp_path: Path):
             user_text="audit",
             base_thread="t-meta",
             run_id="ev-meta",
-            intake_state={"client_name": "Acme", "intake_complete": True},
+            intake_state=intake_with_request(
+                get_client_registry(tmp_path)
+                .ensure_client(display_name="Acme", slug="acme")
+                .client_id,
+                host="h1",
+                framework_id="fw1",
+            ),
             jobs=[(None, None, _fw("fw1"))],
             plan_md="",
         )
