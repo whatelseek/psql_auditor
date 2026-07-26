@@ -44,9 +44,6 @@ SUPPORTED_ASSESSMENT_STATUSES: frozenset[str] = frozenset(
     }
 )
 
-# Statuses that may carry a structured execution error.
-_ERROR_CAPABLE_STATUSES: frozenset[str] = frozenset({"error"})
-
 
 class ResultIdentity(BaseModel):
     """Physical + logical identity from CORE-003."""
@@ -197,12 +194,47 @@ class AssessmentResult(BaseModel):
 
     @model_validator(mode="after")
     def _error_consistency(self) -> AssessmentResult:
-        if self.error is not None and self.status not in _ERROR_CAPABLE_STATUSES:
+        """Enforce ``error`` present iff ``status == "error"``."""
+        if self.status == "error":
+            if self.error is None:
+                raise ValueError(
+                    "status='error' requires a structured AssessmentError; "
+                    "do not encode execution failures in observation"
+                )
+        elif self.error is not None:
             raise ValueError(
                 f"status {self.status!r} cannot carry AssessmentError; "
                 "only status='error' may include structured error state"
             )
         return self
+
+    @classmethod
+    def from_execution_error(
+        cls,
+        *,
+        identity: ResultIdentity,
+        exc: BaseException,
+        recommendation: str = "",
+        title: str = "",
+        severity: str = "",
+        category: str = "",
+        pass_criteria: str = "",
+        notes: str = "",
+    ) -> AssessmentResult:
+        """Build a failed result with structured error and empty observation."""
+        return cls(
+            identity=identity,
+            status="error",
+            observation="",
+            recommendation=recommendation,
+            evidence_refs=[],
+            error=AssessmentError.from_exception(exc),
+            title=title,
+            severity=severity,
+            category=category,
+            pass_criteria=pass_criteria,
+            notes=notes,
+        )
 
     # --- identity accessors (duck-type compatible with Finding / maps) --------
 
@@ -340,6 +372,14 @@ class AssessmentResult(BaseModel):
         error: AssessmentError | None = None
         if err_raw is not None:
             error = AssessmentError.model_validate(err_raw)
+        elif status == "error":
+            # Legacy Finding/report rows lack structured error — synthesize once.
+            msg = observation.strip() or "Legacy error result without structured AssessmentError"
+            error = AssessmentError(
+                error_type="LegacyError",
+                message=msg[:500],
+                details={"source": "from_finding"},
+            )
         refs_raw = data.get("evidence_refs") or []
         return cls(
             identity=identity,
@@ -408,13 +448,23 @@ class AssessmentResult(BaseModel):
                 refs = [EvidenceRef.model_validate(r) for r in refs_raw]
             else:
                 raise TypeError("evidence_refs must be a list")
+            err_raw = payload.get("error")
+            error: AssessmentError | None = None
+            if err_raw is not None:
+                error = AssessmentError.model_validate(err_raw)
+            elif status_raw == "error":
+                error = AssessmentError(
+                    error_type="ModelReportedError",
+                    message="Model reported status=error",
+                    details={},
+                )
             return cls(
                 identity=identity,
                 status=status_raw,  # type: ignore[arg-type]
                 observation=observation,
                 recommendation=recommendation,
                 evidence_refs=refs,
-                error=None,
+                error=error,
                 title=title,
                 severity=severity,
                 category=category,

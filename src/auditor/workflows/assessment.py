@@ -246,16 +246,26 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
                     )
                 raise
             except Exception as exc:  # noqa: BLE001
+                from auditor.domain.result_identity import new_result_id
+
                 req = requirements.get(req_id)
-                finding = Finding(
-                    requirement_id=req_id,
+                bare_fw = framework_id.split("/", 1)[-1] if framework_id else ""
+                finding = AssessmentResult.from_execution_error(
+                    identity=ResultIdentity(
+                        result_id=new_result_id(),
+                        client_id="",
+                        audit_run_id="",
+                        asset_id="",
+                        framework_id=bare_fw,
+                        framework_version="",
+                        requirement_id=req_id,
+                    ),
+                    exc=exc,
+                    recommendation="Retry after restoring SSH/MCP session",
                     title=req.title if req else "",
-                    status="error",
                     severity=req.severity if req else "",
                     category=req.category if req else "",
                     pass_criteria=req.pass_criteria if req else "",
-                    evidence=f"Cell fill failed: {type(exc).__name__}: {exc}",
-                    remediation="Retry after restoring SSH/MCP session",
                 )
                 finding = _bind_finding(
                     runtime, state, finding, framework_id=framework_id, store=store

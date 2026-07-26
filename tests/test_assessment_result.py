@@ -127,6 +127,27 @@ def test_structured_execution_error():
         )
 
 
+def test_error_status_requires_structured_error():
+    with pytest.raises(ValidationError):
+        AssessmentResult(
+            identity=_identity(),
+            status="error",
+            observation="",
+            recommendation="",
+            error=None,
+        )
+
+
+def test_non_error_status_rejects_structured_error():
+    with pytest.raises(ValidationError):
+        AssessmentResult(
+            identity=_identity(),
+            status="fail",
+            observation="x",
+            error=AssessmentError(error_type="X", message="y"),
+        )
+
+
 def test_identity_preserved_after_correction():
     original = AssessmentResult(
         identity=_identity(result_id="a0000001-0001-4001-8001-000000000098"),
@@ -211,6 +232,43 @@ def test_malformed_llm_output_cannot_bypass_validation():
     missing = AssessmentResult.from_llm_payload(None, identity=ident)
     assert missing.status == "error"
     assert missing.error is not None
+
+
+def test_llm_status_error_gets_structured_error():
+    ident = _identity()
+    result = AssessmentResult.from_llm_payload(
+        {"status": "error", "observation": "could not verify", "remediation": "retry"},
+        identity=ident,
+    )
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.error_type == "ModelReportedError"
+    assert result.observation == "could not verify"
+
+
+def test_from_finding_synthesizes_legacy_error():
+    scenario = build_canonical_scenario()
+    legacy = scenario.result_by_status("error")
+    assert isinstance(legacy, Finding)
+    result = AssessmentResult.from_finding(legacy)
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.error_type == "LegacyError"
+    assert result.identity.result_id == legacy.result_id
+
+
+def test_from_execution_error_keeps_observation_empty():
+    exc = RuntimeError("boom")
+    result = AssessmentResult.from_execution_error(
+        identity=_identity(),
+        exc=exc,
+        recommendation="retry",
+    )
+    assert result.status == "error"
+    assert result.observation == ""
+    assert result.error is not None
+    assert result.error.error_type == "RuntimeError"
+    assert result.error.message == "boom"
 
 
 def test_req001_separated_across_assets_frameworks_runs():

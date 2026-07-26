@@ -16,7 +16,8 @@ from langchain_core.messages import (
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from auditor.context import count_tool_rounds, truncate_text
-from auditor.domain.assessment_result import AssessmentResult
+from auditor.domain.assessment_result import AssessmentResult, ResultIdentity
+from auditor.domain.result_identity import new_result_id
 from auditor.evidence_store import EvidenceStore
 from auditor.frameworks import (
     frameworks_catalog_text,
@@ -359,20 +360,26 @@ async def collect_host_facts_llm(
             except Exception as exc:  # noqa: BLE001
                 from auditor.result_identity_bind import attach_result_identity
 
-                err_finding = Finding(
-                    requirement_id=req_id,
+                err_result = AssessmentResult.from_execution_error(
+                    identity=ResultIdentity(
+                        result_id=new_result_id(),
+                        client_id="",
+                        audit_run_id="",
+                        asset_id="",
+                        framework_id="host_facts",
+                        framework_version="",
+                        requirement_id=req_id,
+                    ),
+                    exc=exc,
                     title=req_map[req_id].title,
-                    status="error",
                     severity=req_map[req_id].severity,
                     category=req_map[req_id].category,
-                    evidence=f"{type(exc).__name__}: {exc}",
-                    remediation="",
                     pass_criteria=req_map[req_id].pass_criteria,
                 )
                 if store is not None:
                     meta = store.read_run_meta()
                     finding = attach_result_identity(
-                        err_finding,
+                        err_result,
                         state={
                             "client_id": str(meta.get("client_id") or ""),
                             "audit_run_id": str(meta.get("audit_run_id") or ""),
@@ -384,7 +391,7 @@ async def collect_host_facts_llm(
                     )
                     store.write_finding("host_facts", req_id, finding.to_persist_dict())
                 else:
-                    finding = AssessmentResult.from_finding(err_finding)
+                    finding = err_result
             emit_req_status(
                 req_id,
                 finding.status,

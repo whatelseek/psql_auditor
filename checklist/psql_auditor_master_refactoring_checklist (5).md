@@ -4,7 +4,7 @@ Checklist version: **1.8**
 Date: **2026-07-26**  
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
-Latest reviewed revision: [`63e9b0f`](https://github.com/whatelseek/psql_auditor/commit/63e9b0f8c28672f3eb9b077f303ca7cb1cdfa384)  
+Latest reviewed revision: *(set after structured-error fix commit)*  
 Total tasks: **71**
 
 ## Status summary
@@ -22,20 +22,20 @@ Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Latest verification
 
-`CORE-004` introduces canonical typed `AssessmentResult` (reusing CORE-003
-identity). Local development and GitHub Actions use the same Make targets. All
-mandatory gates are green locally; CI URL recorded after push.
+`CORE-004` enforces `status="error"` ↔ structured `AssessmentError` (no free-text
+exception embedding in `observation`). Local and CI gates share the same Make
+targets.
 
 | Check | Verified result |
 | --- | --- |
 | Format | 117 files already formatted |
 | Lint | Passed |
 | Type check | Passed, 68 files |
-| Unit tests | 329 passed |
+| Unit tests | 336 passed |
 | PostgreSQL integration tests | 7 passed |
-| Full suite | 336 passed |
+| Full suite | 343 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | [Run 30198271737](https://github.com/whatelseek/psql_auditor/actions/runs/30198271737), all jobs passed |
+| Clean CI | *(pending push)* |
 
 Controlled negative runs:
 
