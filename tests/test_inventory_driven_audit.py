@@ -5,20 +5,32 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
+import httpx
 import pytest
 import yaml
 
+from auditor.api.app import create_app
+from auditor.application_runtime import ApplicationRuntime
 from auditor.audit_registry import get_audit_registry
 from auditor.client_registry import get_client_registry
 from auditor.config import Settings
 from auditor.domain.audit_models import new_audit_run_id
 from auditor.domain.audit_plan import PlanConfirmationRejected
+from auditor.domain.audit_request import (
+    AuditRequestRejected,
+    parse_audit_request,
+    validate_audit_request_semantics,
+)
+from auditor.graph import AuditorGraph
 from auditor.inventory.client_name import InvalidClientNameError, validate_client_name
 from auditor.inventory.discovery import DiscoveredHostFacts, StaticDiscoveryCollector
 from auditor.inventory.loaders import InventoryLoadError
+from auditor.inventory.plan import persist_plan
 from auditor.inventory.service import (
     analyze_client_inventory,
+    astart_confirmed_audit,
     confirm_audit_plan,
     load_client_inventory,
     plan_to_audit_request_payload,
@@ -640,3 +652,287 @@ def test_confirmed_start_creates_real_audit_run(tmp_path: Path):
     blob = json.dumps(started["audit_request"])
     assert CANARY not in blob
     assert "vault://" not in blob
+
+
+def _settings_for(tmp_path: Path, root: Path) -> Settings:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir(exist_ok=True)
+    return Settings(
+        _env_file=None,
+        evidence_dir=evidence,
+        inventory_dir=root,
+        agents_dir=AGENTS,
+        intake_enabled=False,
+        hitl_enabled=False,
+        archive_enabled=False,
+        max_parallel_assessments=5,
+        max_parallel_host_jobs=2,
+    )
+
+
+class _FakeGraph:
+    """Minimal graph stand-in for API start tests."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    async def arun_request(self, request, operator_context: str = "") -> dict:
+        run_id = new_audit_run_id()
+        get_audit_registry(self.settings.evidence_dir).create_run(
+            client_id=request.client_id,
+            audit_run_id=run_id,
+        )
+        return {
+            "audit_run_id": run_id,
+            "evidence_run_id": "ev_api",
+            "audit_run_status": "running",
+            "awaiting_hitl": False,
+            "thread_id": "t-api",
+        }
+
+    async def aclose_runtime_resources(self, timeout: float | None = None) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_api_start_true_works_in_active_event_loop(tmp_path: Path):
+    """API start=true must await astart (no asyncio.run) inside FastAPI loop."""
+    root = _copy_client(tmp_path, fmt="md")
+    settings = _settings_for(tmp_path, root)
+    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    plans = root / "Testcompany" / ".audit_plans"
+    plans.mkdir(parents=True)
+    persist_plan(plan, plans / "latest.json")
+
+    async def _runtime_factory():
+        runtime = ApplicationRuntime(
+            settings,
+            graph_factory=lambda rt: _FakeGraph(rt.settings),  # type: ignore[arg-type, return-value]
+            shutdown_timeout=0.5,
+        )
+        await runtime.start()
+        return runtime
+
+    app = create_app(settings=settings, runtime_factory=_runtime_factory)
+
+    with patch(
+        "auditor.inventory.service.asyncio.run",
+        side_effect=AssertionError("asyncio.run must not be called from API start"),
+    ):
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    f"/audit-plans/{plan.plan_id}/confirm",
+                    json={"action": "approve", "start": True, "note": "api-start"},
+                )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["audit_run_id"]
+    assert body["audit_request"]["inventory"]["version_id"] == inventory.version.version_id
+    assert body["audit_request"]["inventory"]["content_hash"] == inventory.version.content_hash
+    assert get_audit_registry(settings.evidence_dir).get_run(body["audit_run_id"]) is not None
+    blob = json.dumps(body)
+    assert CANARY not in blob
+    assert "vault://" not in blob
+
+
+@pytest.mark.asyncio
+async def test_astart_confirmed_audit_direct_async(tmp_path: Path):
+    root = _copy_client(tmp_path, fmt="md")
+    settings = _settings_for(tmp_path, root)
+    _inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+
+    async def _executor(request):
+        run_id = new_audit_run_id()
+        get_audit_registry(settings.evidence_dir).create_run(
+            client_id=request.client_id,
+            audit_run_id=run_id,
+        )
+        return {"audit_run_id": run_id, "audit_run_status": "running"}
+
+    with patch(
+        "auditor.inventory.service.asyncio.run",
+        side_effect=AssertionError("asyncio.run must not be called from astart"),
+    ):
+        started = await astart_confirmed_audit(
+            root,
+            "Testcompany",
+            plan,
+            settings=settings,
+            agents_dir=AGENTS,
+            note="async",
+            executor=_executor,
+        )
+    assert started["audit_run_id"]
+
+
+def test_cli_sync_start_still_works(tmp_path: Path):
+    root = _copy_client(tmp_path, fmt="md")
+    settings = _settings_for(tmp_path, root)
+    _inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+
+    async def _executor(request):
+        run_id = new_audit_run_id()
+        get_audit_registry(settings.evidence_dir).create_run(
+            client_id=request.client_id,
+            audit_run_id=run_id,
+        )
+        return {"audit_run_id": run_id, "audit_run_status": "running"}
+
+    started = start_confirmed_audit(
+        root,
+        "Testcompany",
+        plan,
+        settings=settings,
+        agents_dir=AGENTS,
+        note="cli",
+        executor=_executor,
+    )
+    assert started["audit_run_id"]
+    assert started["status"] == "started"
+
+
+def test_unchanged_inventory_request_passes_semantic_validation(tmp_path: Path):
+    root = _copy_client(tmp_path, fmt="md")
+    settings = _settings_for(tmp_path, root)
+    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    confirmed = confirm_audit_plan(plan, action="approve", note="ok", inventory=inventory)
+    client = get_client_registry(settings.evidence_dir).ensure_client(
+        display_name="Testcompany", slug="Testcompany"
+    )
+    payload = plan_to_audit_request_payload(
+        confirmed,
+        inventory=inventory,
+        client_id=client.client_id,
+        client_slug=client.slug,
+    )
+    validated = validate_audit_request_semantics(parse_audit_request(payload), settings)
+    assert validated.inventory.version_id == inventory.version.version_id
+    assert validated.inventory.content_hash == inventory.version.content_hash
+
+
+def test_changed_inventory_rejects_inventory_hash_mismatch(tmp_path: Path):
+    root = _copy_client(tmp_path, fmt="md")
+    settings = _settings_for(tmp_path, root)
+    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    confirmed = confirm_audit_plan(plan, action="approve", note="ok", inventory=inventory)
+    client = get_client_registry(settings.evidence_dir).ensure_client(
+        display_name="Testcompany", slug="Testcompany"
+    )
+    payload = plan_to_audit_request_payload(
+        confirmed,
+        inventory=inventory,
+        client_id=client.client_id,
+        client_slug=client.slug,
+    )
+    # Keep pinned version_id but force a wrong content_hash.
+    payload["inventory"]["content_hash"] = "0" * 64
+    with pytest.raises(AuditRequestRejected) as exc:
+        validate_audit_request_semantics(parse_audit_request(payload), settings)
+    assert any(i.code == "inventory_hash_mismatch" for i in exc.value.issues)
+    detail = exc.value.operator_message()
+    assert CANARY not in detail
+    assert "vault://" not in detail
+
+
+def test_changed_version_rejects_inventory_version_mismatch(tmp_path: Path):
+    root = _copy_client(tmp_path, fmt="md")
+    settings = _settings_for(tmp_path, root)
+    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    confirmed = confirm_audit_plan(plan, action="approve", note="ok", inventory=inventory)
+    client = get_client_registry(settings.evidence_dir).ensure_client(
+        display_name="Testcompany", slug="Testcompany"
+    )
+    payload = plan_to_audit_request_payload(
+        confirmed,
+        inventory=inventory,
+        client_id=client.client_id,
+        client_slug=client.slug,
+    )
+    # Hash matches current inventory; version_id alone is stale/wrong.
+    payload["inventory"]["version_id"] = "inv-deadbeef0000"
+    with pytest.raises(AuditRequestRejected) as exc:
+        validate_audit_request_semantics(parse_audit_request(payload), settings)
+    assert any(i.code == "inventory_version_mismatch" for i in exc.value.issues)
+    assert CANARY not in exc.value.operator_message()
+
+
+@pytest.mark.asyncio
+async def test_saved_request_cannot_execute_after_inventory_modification(tmp_path: Path):
+    root = _copy_client(tmp_path, fmt="md")
+    settings = _settings_for(tmp_path, root)
+    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    confirmed = confirm_audit_plan(plan, action="approve", note="ok", inventory=inventory)
+    client = get_client_registry(settings.evidence_dir).ensure_client(
+        display_name="Testcompany", slug="Testcompany"
+    )
+    payload = plan_to_audit_request_payload(
+        confirmed,
+        inventory=inventory,
+        client_id=client.client_id,
+        client_slug=client.slug,
+    )
+    saved = root / "Testcompany" / ".audit_plans" / "audit_request.json"
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    saved.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    # Modify normalized inventory identity after the request was saved
+    # (host address change alters ClientInventory.version content_hash).
+    inv_path = root / "Testcompany" / "INVENTORY.md"
+    text = inv_path.read_text(encoding="utf-8")
+    inv_path.write_text(
+        text.replace("10.200.29.71", "10.200.29.171"),
+        encoding="utf-8",
+    )
+    mutated = load_client_inventory(root, "Testcompany")
+    assert mutated.version.content_hash != inventory.version.content_hash
+
+    replay = parse_audit_request(json.loads(saved.read_text(encoding="utf-8")))
+    with pytest.raises(AuditRequestRejected) as exc:
+        validate_audit_request_semantics(replay, settings)
+    assert any(
+        i.code in {"inventory_hash_mismatch", "inventory_version_mismatch"} for i in exc.value.issues
+    )
+
+    graph = AuditorGraph(settings=settings)
+
+    async def _must_not_run(*_a, **_k):
+        raise AssertionError("jobs must not start for stale inventory request")
+
+    with patch.object(AuditorGraph, "_run_framework_jobs", _must_not_run):
+        with pytest.raises(AuditRequestRejected) as exc2:
+            await graph.arun_request(replay, operator_context="replay stale request")
+    assert any(
+        i.code in {"inventory_hash_mismatch", "inventory_version_mismatch"}
+        for i in exc2.value.issues
+    )
+    err = json.dumps(exc2.value.to_dict())
+    assert CANARY not in err
+    assert "vault://" not in err
+
+
+def test_identity_rejection_errors_do_not_expose_secrets(tmp_path: Path):
+    root = _copy_client(tmp_path, fmt="md")
+    settings = _settings_for(tmp_path, root)
+    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    confirmed = confirm_audit_plan(plan, action="approve", note="ok", inventory=inventory)
+    client = get_client_registry(settings.evidence_dir).ensure_client(
+        display_name="Testcompany", slug="Testcompany"
+    )
+    payload = plan_to_audit_request_payload(
+        confirmed,
+        inventory=inventory,
+        client_id=client.client_id,
+        client_slug=client.slug,
+    )
+    payload["inventory"]["content_hash"] = "f" * 64
+    with pytest.raises(AuditRequestRejected) as exc:
+        validate_audit_request_semantics(parse_audit_request(payload), settings)
+    blob = json.dumps(exc.value.to_dict()) + exc.value.operator_message()
+    assert CANARY not in blob
+    assert "vault://" not in blob
+    assert "changeme" not in blob
+    for issue in exc.value.issues:
+        assert "password" not in issue.message.lower() or "content_hash" in issue.location

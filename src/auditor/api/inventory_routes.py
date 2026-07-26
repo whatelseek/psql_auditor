@@ -16,11 +16,11 @@ from auditor.inventory.loaders import InventoryLoadError
 from auditor.inventory.plan import persist_plan, plan_confirmation_prompt
 from auditor.inventory.service import (
     analyze_client_inventory,
+    astart_confirmed_audit,
     confirm_audit_plan,
     load_client_inventory,
     load_plan,
     plan_to_audit_request_payload,
-    start_confirmed_audit,
     validate_client_inventory,
 )
 
@@ -112,7 +112,7 @@ async def confirm_plan(plan_id: str, body: ConfirmBody, request: Request) -> dic
     try:
         inventory = load_client_inventory(settings.inventory_dir, client_name)
         if body.action == "approve" and body.start:
-            started = start_confirmed_audit(
+            started = await astart_confirmed_audit(
                 settings.inventory_dir,
                 client_name,
                 load_plan(plan_path),

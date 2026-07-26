@@ -81,6 +81,13 @@ On `--confirm` / API approve:
 Confirmed plans map to an INPUT-001 `AuditRequest` that embeds the expected
 inventory `version_id` and `content_hash`, then execute via `arun_request`.
 
+At the execution boundary, `validate_audit_request_semantics()` reloads the
+current inventory through the loader/normalizer and rejects with
+`inventory_hash_mismatch` / `inventory_version_mismatch` when the pinned
+identity diverges (CLI start, HTTP start, direct `arun_request`, and replay of
+saved `audit_request.json`). Identity is the normalized
+`ClientInventory.version`, not raw file bytes.
+
 ## API
 
 | Method | Path | Notes |
@@ -88,7 +95,7 @@ inventory `version_id` and `content_hash`, then execute via `arun_request`.
 | POST | `/clients/{client_id}/inventory` | Validate |
 | POST | `/clients/{client_id}/inventory/analyze` | Analyze + draft plan |
 | POST | `/clients/{client_id}/audit-plans` | Same as analyze |
-| POST | `/audit-plans/{plan_id}/confirm` | Stale-checked; `start=true` executes |
+| POST | `/audit-plans/{plan_id}/confirm` | Stale-checked; `start=true` awaits `astart_confirmed_audit` (no `asyncio.run`) |
 
 ## Module map
 

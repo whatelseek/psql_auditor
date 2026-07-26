@@ -1,6 +1,6 @@
 # `psql_auditor` — Master Development and Acceptance Checklist
 
-Checklist version: **1.11**  
+Checklist version: **1.12**  
 Date: **2026-07-26**  
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
@@ -129,6 +129,11 @@ Do not mark complete based on class existence alone.
 `INPUT-001` remains open until independent acceptance. Implementation commit
 [`5286a4d`](https://github.com/whatelseek/psql_auditor/commit/5286a4d773f62d0bc796b205ddd18994bdfc89af)
 is an acceptance candidate only (green CI alone is not sufficient).
+Additional evidence: `validate_audit_request_semantics()` requires pinned
+`inventory.version_id` / `content_hash` and compares them to the current
+normalized `ClientInventory.version` (`inventory_hash_mismatch` /
+`inventory_version_mismatch`); stale saved requests fail closed before
+`arun_request` execution.
 
 - [ ] `INPUT-002` — Enforce strict framework validation.
 - [~] `INPUT-003` — Introduce a validated inventory model.
@@ -154,8 +159,11 @@ is an acceptance candidate only (green CI alone is not sufficient).
 - `CREDENTIALS.md` merge + secret redaction; `needs_discovery` for IP/port-only hosts;
 - injectable read-only discovery + reconcile (conflicts → clarification; port-only
   PostgreSQL does not select frameworks);
-- CLI/API confirm → `AuditRequest` (with inventory version/hash) → `arun_request`
-  execution returning `audit_run_id`.
+- CLI sync `start_confirmed_audit` / API `await astart_confirmed_audit` →
+  `AuditRequest` (with inventory version/hash) → `arun_request` returning
+  `audit_run_id` (FastAPI never calls `asyncio.run` on start);
+- execution-boundary inventory identity revalidation rejects stale saved
+  requests (`inventory_hash_mismatch` / `inventory_version_mismatch`).
   Default analyze discoverer is no-op until live SSH/WinRM collector is wired;
   independent acceptance still required.
 
