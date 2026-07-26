@@ -4,7 +4,7 @@ Checklist version: **1.9**
 Date: **2026-07-26**  
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
-Latest reviewed revision: [](https://github.com/whatelseek/psql_auditor/commit/3153d56703d39398fc0c1f5c24c24ceacaad554c)  
+Latest reviewed revision: [`3153d56`](https://github.com/whatelseek/psql_auditor/commit/3153d56703d39398fc0c1f5c24c24ceacaad554c)  
 Total tasks: **71**
 
 ## Status summary
@@ -38,7 +38,7 @@ compatibility getters. Local and CI gates share the same Make targets.
 | PostgreSQL integration tests | 7 passed |
 | Full suite | 370 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | Pending push of CORE-006 commit |
+| Clean CI | [Run 30202005287](https://github.com/whatelseek/psql_auditor/actions/runs/30202005287), all jobs passed |
 
 Controlled negative runs:
 
