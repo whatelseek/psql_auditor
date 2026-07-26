@@ -21,6 +21,7 @@ remain visible in the catalog with errors but are not routed or executed.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -238,13 +239,17 @@ def _parse_agent_file(path: Path) -> Framework:
         detect = FrameworkDetect(always=True)
 
     version = str(meta.get("version") or meta.get("framework_version") or "").strip()
+    if not version:
+        # Match FrameworkRegistry: optional frontmatter → source-hash version.
+        source_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        version = f"src-{source_hash[:12]}"
     applicability = str(
         meta.get("applicability") or meta.get("applies_to") or meta.get("scope") or ""
     ).strip()
     discovery_guidance = str(meta.get("discovery_guidance") or meta.get("discovery") or "").strip()
 
     return Framework(
-        id=fw_id,
+        id=fw_id or path.stem,
         title=title,
         path=path,
         description=description,

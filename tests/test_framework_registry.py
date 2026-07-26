@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from auditor.framework_registry import (
     FrameworkNotExecutable,
     FrameworkRegistry,
+    deterministic_framework_version,
     load_framework_registry,
 )
 from auditor.frameworks import (
@@ -26,11 +28,14 @@ def _write_fw(
     directory: Path,
     name: str,
     *,
-    frontmatter: str,
+    frontmatter: str | None,
     body: str,
 ) -> Path:
     path = directory / name
-    path.write_text(f"---\n{frontmatter}\n---\n{body}", encoding="utf-8")
+    if frontmatter is None:
+        path.write_text(body, encoding="utf-8")
+    else:
+        path.write_text(f"---\n{frontmatter}\n---\n{body}", encoding="utf-8")
     return path
 
 
@@ -84,24 +89,77 @@ def test_parse_req_and_win_headings(tmp_path: Path) -> None:
     assert win.content_hash
 
 
-def test_validate_missing_version_not_executable(tmp_path: Path) -> None:
+def test_no_frontmatter_derives_id_title_and_source_version(tmp_path: Path) -> None:
+    body = """# Derived Title Framework
+
+## REQ-001: Control
+**Category:** Demo
+**Severity:** Low
+**How to verify:** echo ok
+**Pass criteria:** ok
+"""
+    path = _write_fw(tmp_path, "derived_fw.md", frontmatter=None, body=body)
+    text = path.read_text(encoding="utf-8")
+    expected_version = deterministic_framework_version(
+        hashlib.sha256(text.encode("utf-8")).hexdigest()
+    )
+    entry = load_framework_registry(tmp_path).require_executable("derived_fw")
+    assert entry.framework.id == "derived_fw"
+    assert entry.framework.title == "Derived Title Framework"
+    assert entry.version == expected_version
+    assert entry.version.startswith("src-")
+    assert entry.source_hash
+    assert entry.executable
+
+
+def test_frontmatter_without_version_uses_source_hash(tmp_path: Path) -> None:
     _write_fw(
         tmp_path,
         "no_ver.md",
         frontmatter="id: no_ver\ndescription: Missing version\ndomain: it\n",
         body=_VALID_BODY,
     )
-    registry = load_framework_registry(tmp_path)
-    entry = registry.get("no_ver")
-    assert entry is not None
-    assert not entry.executable
-    assert any(i.code == "missing_framework_version" for i in entry.issues)
-    with pytest.raises(FrameworkNotExecutable):
-        registry.require_executable("no_ver")
-    listed = list_frameworks(tmp_path, include_invalid=True)
-    assert listed[0].executable is False
-    assert listed[0].validation_errors
-    assert list_executable_frameworks(tmp_path) == []
+    entry = load_framework_registry(tmp_path).require_executable("no_ver")
+    assert entry.version.startswith("src-")
+    assert entry.executable
+
+
+def test_multiline_sections_and_lists(tmp_path: Path) -> None:
+    body = """# Multiline Framework
+
+## REQ-001: Multi control
+**Category:** Access Control
+**Severity:** High
+**How to verify:**
+1. Collect evidence
+2. Inspect configuration
+- Confirm remote trust is absent
+
+**Pass criteria:**
+All remote rules use scram-sha-256
+or certificate authentication
+
+**Recommendation:**
+- Prefer scram-sha-256
+- Document exceptions
+"""
+    _write_fw(
+        tmp_path,
+        "multi.md",
+        frontmatter='id: multi\nversion: "1.0"\ndomain: cybersecurity\n',
+        body=body,
+    )
+    entry = load_framework_registry(tmp_path).require_executable("multi")
+    req = entry.get_requirement("REQ-001")
+    assert req is not None
+    assert "1. Collect evidence" in req.verification_guidance
+    assert "- Confirm remote trust is absent" in req.verification_guidance
+    assert "scram-sha-256" in req.pass_criteria
+    assert "certificate authentication" in req.pass_criteria
+    assert "- Prefer scram-sha-256" in req.recommendation
+    block = req.to_prompt_block()
+    assert "1. Collect evidence" in block
+    assert "REQ-002" not in block
 
 
 def test_validate_duplicate_requirement_ids(tmp_path: Path) -> None:
@@ -166,12 +224,12 @@ def test_validate_empty_required_fields(tmp_path: Path) -> None:
     assert "missing_pass_criteria" in codes
 
 
-def test_invalid_visible_but_not_routed(tmp_path: Path) -> None:
+def test_invalid_visible_but_not_executable(tmp_path: Path) -> None:
     _write_fw(
         tmp_path,
         "bad.md",
-        frontmatter="id: bad_fw\ndescription: no version\ndomain: cybersecurity\n",
-        body=_VALID_BODY,
+        frontmatter='id: bad_fw\nversion: "1.0"\ndomain: cybersecurity\n',
+        body="# Bad\n\nNo requirements here.\n",
     )
     _write_fw(
         tmp_path,
@@ -195,8 +253,11 @@ def test_invalid_visible_but_not_routed(tmp_path: Path) -> None:
     assert fw.executable
 
     bad = next(f for f in list_frameworks(tmp_path) if f.id == "bad_fw")
+    assert bad.executable is False
     with pytest.raises(FrameworkNotExecutable):
         load_framework_checklist(bad)
+    with pytest.raises(FrameworkNotExecutable):
+        load_framework_registry(tmp_path).require_executable("bad_fw")
 
 
 def test_catalog_index_and_single_requirement_retrieval(tmp_path: Path) -> None:
@@ -271,30 +332,34 @@ def test_new_framework_drop_in_without_python_changes(tmp_path: Path) -> None:
     _write_fw(
         tmp_path,
         "brand_new.md",
-        frontmatter=(
-            "id: brand_new\n"
-            'version: "0.1"\n'
-            "description: Drop-in only\n"
-            "domain: it\n"
-            "aliases: [brandnew]\n"
-            "detect:\n"
-            "  always: true\n"
-        ),
-        body=_VALID_BODY,
+        frontmatter=None,
+        body="""# Brand New Drop In
+
+## REQ-001: Example
+**Category:** Demo
+**Severity:** Low
+**How to verify:** echo brandnew
+**Pass criteria:** ok
+""",
     )
     frameworks = list_executable_frameworks(tmp_path)
     assert [f.id for f in frameworks] == ["brand_new"]
+    assert frameworks[0].version.startswith("src-")
     checklist = load_framework_checklist(frameworks[0])
     assert checklist.ids() == ["REQ-001"]
 
 
 def test_bundled_agents_remain_executable() -> None:
     registry = load_framework_registry("agents")
-    executable = registry.list_executable()
-    assert {e.id for e in executable} >= {
+    executable = {e.id: e for e in registry.list_executable()}
+    assert {
         "postgres_cis",
         "ubuntu_cis_24_l2",
         "host_facts",
-    }
-    assert all(e.version for e in executable)
-    assert all(e.requirements for e in executable)
+        "windows_server",
+    } <= set(executable)
+    assert all(e.version for e in executable.values())
+    assert all(e.requirements for e in executable.values())
+    # Bundled agents keep explicit frontmatter versions where authored.
+    assert executable["postgres_cis"].version == "1.0"
+    assert executable["windows_server"].version

@@ -327,6 +327,17 @@ def load_framework_registry(agents_dir: Path | str | None = None) -> FrameworkRe
     return FrameworkRegistry.load(agents_dir)
 
 
+def deterministic_framework_version(source_hash: str) -> str:
+    """Stable version token derived from the Markdown source hash.
+
+    Used when YAML frontmatter omits ``version`` (frontmatter is optional).
+    """
+    digest = (source_hash or "").strip().lower()
+    if not digest:
+        digest = hashlib.sha256(b"").hexdigest()
+    return f"src-{digest[:12]}"
+
+
 def _parse_registered_framework(path: Path) -> RegisteredFramework:
     text = path.read_text(encoding="utf-8")
     source_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -334,6 +345,8 @@ def _parse_registered_framework(path: Path) -> RegisteredFramework:
     body = text
     match = _FRONTMATTER.match(text)
     yaml_error = ""
+    # YAML frontmatter is optional. When present it must be a mapping; when
+    # absent, id/title/version are derived from filename, H1, and source hash.
     if match:
         try:
             loaded = yaml.safe_load(match.group(1)) or {}
@@ -347,8 +360,10 @@ def _parse_registered_framework(path: Path) -> RegisteredFramework:
         body = match.group(2)
 
     title_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
-    title = str(meta.get("title") or (title_match.group(1).strip() if title_match else path.stem))
-    fw_id = str(meta.get("id") or path.stem).strip()
+    title = str(
+        meta.get("title") or (title_match.group(1).strip() if title_match else path.stem)
+    ).strip()
+    fw_id = str(meta.get("id") or path.stem).strip() or path.stem
     description = str(meta.get("description") or title).strip()
     language = _normalize_framework_language(meta.get("language") or meta.get("lang"))
     family_id = str(meta.get("family_id") or "").strip()
@@ -380,6 +395,8 @@ def _parse_registered_framework(path: Path) -> RegisteredFramework:
         detect = FrameworkDetect(always=True)
 
     version = str(meta.get("version") or meta.get("framework_version") or "").strip()
+    if not version:
+        version = deterministic_framework_version(source_hash)
     applicability = str(
         meta.get("applicability") or meta.get("applies_to") or meta.get("scope") or ""
     ).strip()
@@ -391,7 +408,7 @@ def _parse_registered_framework(path: Path) -> RegisteredFramework:
     ).strip()
 
     framework = Framework(
-        id=fw_id or path.stem,
+        id=fw_id,
         title=title,
         path=path,
         description=description,
@@ -483,16 +500,7 @@ def _validate_framework(
                 location=str(path),
             )
         )
-    if not framework.version.strip():
-        issues.append(
-            FrameworkValidationIssue(
-                level="error",
-                code="missing_framework_version",
-                message="framework version is required",
-                framework_id=framework.id,
-                location="frontmatter.version",
-            )
-        )
+    # Version is always populated (explicit frontmatter or source-hash fallback).
     if not requirements:
         issues.append(
             FrameworkValidationIssue(
@@ -593,5 +601,6 @@ __all__ = [
     "RegisteredFramework",
     "RegisteredRequirement",
     "RequirementIndexEntry",
+    "deterministic_framework_version",
     "load_framework_registry",
 ]

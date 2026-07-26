@@ -18,6 +18,7 @@ uses a stable heading id plus metadata fields. Supported heading shapes:
     **Insufficient evidence criteria:** …
     **Recommendation:** …
 
+Metadata values may be single-line or multiline (paragraphs and Markdown lists).
 ``parse_checklist_markdown`` extracts these blocks; ``load_checklist`` reads a
 file from disk. Assessment prompts receive only the current requirement via
 :meth:`Requirement.to_prompt_block` — never the entire framework body.
@@ -39,10 +40,8 @@ _REQ_HEADING = re.compile(
     re.MULTILINE,
 )
 
-# Bold metadata lines inside a requirement block (aliases allowed).
-# Value may be empty so registry validation can reject blank required fields.
-# Use horizontal whitespace only so an empty value does not swallow the next line.
-_META = re.compile(
+# Bold metadata key line; value may continue on following lines until the next key.
+_META_KEY = re.compile(
     r"^\*\*("
     r"Category|Severity|Applicability|"
     r"Evidence required|Evidence Required|"
@@ -50,7 +49,7 @@ _META = re.compile(
     r"Pass criteria|Fail criteria|"
     r"Insufficient evidence criteria|Insufficient-evidence criteria|"
     r"Insufficient evidence|Recommendation"
-    r"):\*\*[^\S\n]*(.*?)[^\S\n]*$",
+    r"):\*\*[^\S\n]*(.*)$",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -121,21 +120,29 @@ class Requirement:
         """
         lines = [
             f"### {self.id}: {self.title}",
-            f"- Category: {self.category}",
-            f"- Severity: {self.severity}",
         ]
+        _append_prompt_field(lines, "Category", self.category)
+        _append_prompt_field(lines, "Severity", self.severity)
         if self.applicability:
-            lines.append(f"- Applicability: {self.applicability}")
+            _append_prompt_field(lines, "Applicability", self.applicability)
         if self.evidence_required:
-            lines.append(f"- Evidence required: {self.evidence_required}")
-        lines.append(f"- How to verify: {self.how_to_verify or self.verification_guidance}")
-        lines.append(f"- Pass criteria: {self.pass_criteria}")
+            _append_prompt_field(lines, "Evidence required", self.evidence_required)
+        _append_prompt_field(
+            lines,
+            "How to verify",
+            self.how_to_verify or self.verification_guidance,
+        )
+        _append_prompt_field(lines, "Pass criteria", self.pass_criteria)
         if self.fail_criteria:
-            lines.append(f"- Fail criteria: {self.fail_criteria}")
+            _append_prompt_field(lines, "Fail criteria", self.fail_criteria)
         if self.insufficient_evidence_criteria:
-            lines.append(f"- Insufficient evidence criteria: {self.insufficient_evidence_criteria}")
+            _append_prompt_field(
+                lines,
+                "Insufficient evidence criteria",
+                self.insufficient_evidence_criteria,
+            )
         if self.recommendation:
-            lines.append(f"- Recommendation: {self.recommendation}")
+            _append_prompt_field(lines, "Recommendation", self.recommendation)
         return "\n".join(lines) + "\n"
 
 
@@ -183,6 +190,44 @@ def content_hash_for_requirement(req: Requirement) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _append_prompt_field(lines: list[str], label: str, value: str) -> None:
+    text = (value or "").strip()
+    if not text:
+        lines.append(f"- {label}:")
+        return
+    if "\n" in text:
+        lines.append(f"- {label}:")
+        for part in text.splitlines():
+            lines.append(f"  {part}")
+        return
+    lines.append(f"- {label}: {text}")
+
+
+def _extract_meta_fields(block: str) -> dict[str, str]:
+    """Extract metadata fields, supporting multiline values and Markdown lists."""
+    matches = list(_META_KEY.finditer(block))
+    meta: dict[str, str] = {}
+    for idx, match in enumerate(matches):
+        canon = _META_ALIASES.get(match.group(1).lower())
+        if not canon:
+            continue
+        inline = (match.group(2) or "").strip()
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(block)
+        continuation = block[start:end].strip("\n")
+        # Drop a single leading blank line after the key line.
+        if continuation.startswith("\n"):
+            continuation = continuation[1:]
+        continuation = continuation.rstrip()
+        parts: list[str] = []
+        if inline:
+            parts.append(inline)
+        if continuation.strip():
+            parts.append(continuation.strip())
+        meta[canon] = "\n".join(parts).strip()
+    return meta
+
+
 def parse_checklist_markdown(text: str, source_path: str | None = None) -> Checklist:
     """Parse checklist Markdown text into a ``Checklist`` object.
 
@@ -191,7 +236,8 @@ def parse_checklist_markdown(text: str, source_path: str | None = None) -> Check
     1. Read the first H1 as the document title.
     2. Find all ``##`` / ``###`` requirement headings (``REQ-`` / ``WIN-`` / …).
     3. For each heading, slice text until the next heading (or EOF).
-    4. Extract metadata fields (category, severity, criteria, …).
+    4. Extract metadata fields (category, severity, criteria, …), including
+       multiline sections and Markdown lists.
 
     Args:
         text: Full Markdown document contents.
@@ -211,12 +257,7 @@ def parse_checklist_markdown(text: str, source_path: str | None = None) -> Check
         start = match.start()
         end = headings[idx + 1].start() if idx + 1 < len(headings) else len(text)
         block = text[start:end].strip()
-        meta_raw = {key.lower(): value.strip() for key, value in _META.findall(block)}
-        meta: dict[str, str] = {}
-        for key, value in meta_raw.items():
-            canon = _META_ALIASES.get(key)
-            if canon:
-                meta[canon] = value
+        meta = _extract_meta_fields(block)
 
         verification = meta.get("verification_guidance", "")
         requirements.append(

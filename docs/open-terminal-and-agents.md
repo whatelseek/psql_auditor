@@ -134,8 +134,15 @@ framework registry validates each file on load.
 
 ### 1) Create framework file
 
-Create `agents/<framework_id>.md` with frontmatter. **`id` and `version` are
-required** for the framework to be executable:
+Create `agents/<framework_id>.md`. **YAML frontmatter is optional.**
+
+Without frontmatter the registry derives:
+
+- `id` from the filename stem;
+- `title` from the first H1;
+- `version` as a deterministic `src-<hash>` token from the file contents.
+
+Optional frontmatter example:
 
 ```markdown
 ---
@@ -164,7 +171,8 @@ framework family in the operator's language.
 ### 2) Add requirements
 
 Use stable requirement headings (`##` or `###`) with ids such as `REQ-*` or
-`WIN-*`:
+`CTRL-*`. Metadata values may be single-line or multiline (including Markdown
+lists):
 
 ```markdown
 ## REQ-001: Example control
@@ -172,7 +180,9 @@ Use stable requirement headings (`##` or `###`) with ids such as `REQ-*` or
 **Severity:** High
 **Applicability:** Ubuntu 24.04
 **Evidence required:** Command output excerpt
-**How to verify:** Run specific command or check file.
+**How to verify:**
+1. Run specific command
+2. Inspect the resulting file
 **Pass criteria:** Explicit expected secure state.
 **Fail criteria:** Explicit insecure state.
 **Insufficient evidence criteria:** When evidence cannot be collected.
@@ -186,9 +196,9 @@ Guidelines:
 - Keep `Pass criteria` explicit and human-readable.
 - Keep one check intent per requirement.
 - Prefer deterministic command-based verification text.
-- Duplicate framework ids / requirement ids, missing `version`, or empty
-  required fields make the framework **invalid**: it still appears in the
-  catalog with errors, but is not routed or executed.
+- Duplicate framework ids / requirement ids, or empty required fields, make the
+  framework **invalid**: it still appears in the catalog with errors, but is
+  not routed or executed.
 
 ### 3) LLM retrieval shape
 

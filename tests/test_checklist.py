@@ -66,6 +66,31 @@ def test_parse_win_heading_and_extended_fields():
     assert "WIN-002" not in block
 
 
+def test_parse_multiline_metadata_sections_and_lists():
+    text = """# Multiline
+
+## REQ-001: Nested guidance
+**Category:** Access Control
+**Severity:** High
+**How to verify:**
+1. Run show command
+2. Inspect file
+- Reject trust
+
+**Pass criteria:**
+No remote trust
+and scram preferred
+"""
+    checklist = parse_checklist_markdown(text)
+    req = checklist.requirements[0]
+    assert "1. Run show command" in req.how_to_verify
+    assert "- Reject trust" in req.how_to_verify
+    assert "No remote trust" in req.pass_criteria
+    assert "scram preferred" in req.pass_criteria
+    block = req.to_prompt_block()
+    assert "1. Run show command" in block
+
+
 def test_load_bundled_postgres_cis_checklist():
     path = Path(__file__).resolve().parents[1] / "agents" / "postgres_cis.md"
     # Strip frontmatter for the raw loader used by unit test helpers.
