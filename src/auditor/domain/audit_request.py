@@ -380,12 +380,7 @@ def validate_audit_request_semantics(
         )
 
     inv_path, content, found = resolve_client_inventory(inventory_dir, client.slug)
-    if (
-        not found
-        or inv_path is None
-        or not inv_path.is_file()
-        or not str(content or "").strip()
-    ):
+    if not found or inv_path is None or not inv_path.is_file() or not str(content or "").strip():
         _reject(
             "inventory.ref",
             "missing_inventory",
@@ -571,9 +566,7 @@ def build_audit_request_from_selected_jobs(
             )
         targets.append({"inventory_target_ref": ref, "frameworks": frameworks})
 
-    current_inventory = _load_normalized_client_inventory(
-        Path(settings.inventory_dir), client_slug
-    )
+    current_inventory = _load_normalized_client_inventory(Path(settings.inventory_dir), client_slug)
     # Prefer on-disk directory casing for the inventory ref.
     source = Path(current_inventory.version.source_path)
     dir_name = source.parent.name if source.parent.name else client_slug
