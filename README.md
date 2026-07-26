@@ -240,7 +240,19 @@ MCP architecture: [`docs/langchain-mcp.md`](docs/langchain-mcp.md) · add server
 
 ## Development
 
+Reproducible install and canonical checks (CORE-000): see
+[`docs/baseline.md`](docs/baseline.md).
+
 ```bash
-pip install -e ".[dev]"
-pytest
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[dev]' -c constraints.txt
+
+make test-unit          # unit tests
+make test-integration   # integration markers (none yet)
+make test               # full suite
+make format-check lint typecheck
+make check              # all gates
+make baseline-compare   # fail only on new test regressions
 ```

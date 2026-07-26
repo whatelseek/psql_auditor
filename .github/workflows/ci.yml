@@ -1,0 +1,72 @@
+# CORE-000: reproducible CI on a clean checkout with locked dependencies.
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  quality:
+    name: format / lint / typecheck (baseline may be red)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (locked)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]' -c constraints.txt
+      - name: Formatter check
+        id: format
+        continue-on-error: true
+        run: make format-check
+      - name: Lint
+        id: lint
+        continue-on-error: true
+        run: make lint
+      - name: Typecheck
+        id: typecheck
+        continue-on-error: true
+        run: make typecheck
+      - name: Record quality gate status
+        run: |
+          echo "format=${{ steps.format.outcome }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "lint=${{ steps.lint.outcome }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "typecheck=${{ steps.typecheck.outcome }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Quality gates are documented as baseline-red in docs/baseline.md." >> "$GITHUB_STEP_SUMMARY"
+          echo "They run with continue-on-error until cleaned up; they are not hidden." >> "$GITHUB_STEP_SUMMARY"
+
+  tests:
+    name: unit / integration / full + baseline compare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (locked)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]' -c constraints.txt
+      - name: Unit tests
+        run: make test-unit
+        continue-on-error: true
+        id: unit
+      - name: Integration tests
+        run: make test-integration
+      - name: Full suite (complete output retained)
+        run: make test
+        continue-on-error: true
+        id: full
+      - name: Baseline compare (fail only on new regressions)
+        run: make baseline-compare
+      - name: CORE-002 / CORE-003 / CORE-001 focused suites
+        run: |
+          python -m pytest -q \
+            tests/test_audit_run_job.py \
+            tests/test_canonical_result_identity.py \
+            tests/test_client_audit_run_identity.py

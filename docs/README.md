@@ -6,6 +6,8 @@ Operator and developer docs for **auditor** (`psql_auditor`).
 
 | Doc | Topic |
 |-----|--------|
+| [Baseline (CORE-000)](baseline.md) | Locked install, make targets, entry/storage maps, measured failures |
+| [Architecture / workflows](architecture-workflows.md) | LangGraph façade + workflows package |
 | [Starting an audit](starting-an-audit.md) | Open WebUI operator flow, target files, security |
 | [Chat intent](chat-intent.md) | How messages are routed (audit / ad-hoc / follow-up / sessions) |
 | [Pre-audit intake](pre-audit-intake.md) | Client / CMDB / access / domain questionnaire |

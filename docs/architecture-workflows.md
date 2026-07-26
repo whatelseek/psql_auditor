@@ -1,5 +1,11 @@
 # Workflow architecture (LangGraph orchestration)
 
+## Baseline (CORE-000)
+
+Reproducible install, verification commands, entry-point / storage / defect
+maps, and measured gate results live in **[`baseline.md`](baseline.md)**.
+Known failing pytest node IDs: [`baseline-failures.txt`](baseline-failures.txt).
+
 ## Purpose
 
 `src/auditor/graph.py` is a **façade**: it constructs dependencies, compiles

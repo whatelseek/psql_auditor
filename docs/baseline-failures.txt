@@ -1,0 +1,12 @@
+# Known failing pytest node IDs at CORE-000 baseline (current revision).
+# Used by scripts/baseline_compare.py — CI fails only on NEW regressions.
+# Update this file when a failure is fixed or a new pre-existing failure is confirmed.
+#
+# Format: one nodeid per line. Comments after # are ignored.
+
+tests/test_anonymization.py::test_regex_anonymization_ipv4_ipv6_email_reversible
+tests/test_frameworks.py::test_route_framework_by_alias
+tests/test_frameworks.py::test_catalog_lists_drop_ins
+tests/test_frameworks.py::test_select_frameworks_for_ubuntu_postgres_host
+tests/test_frameworks.py::test_select_frameworks_it_domain_only
+tests/test_hitl.py::test_hitl_skip_then_finalize
