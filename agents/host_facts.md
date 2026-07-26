@@ -7,6 +7,7 @@ language: en
 family_id: host_facts
 detect:
   always: true
+version: "1.0"
 ---
 # Host Facts Inventory Checklist
 

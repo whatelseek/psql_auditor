@@ -67,9 +67,10 @@ def _hitl_candidates(state: AuditorState) -> list[str]:
     findings = state.get("findings") or {}
     skipped = set(state.get("hitl_skipped") or [])
     out: list[str] = []
-    for req_id, raw in findings.items():
+    for raw in findings.values():
         finding = _as_finding(raw)
-        if finding.status == "error" and req_id not in skipped:
+        req_id = finding.requirement_id
+        if finding.status == "error" and req_id and req_id not in skipped:
             out.append(req_id)
     return sorted(out)
 

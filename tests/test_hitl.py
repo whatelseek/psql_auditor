@@ -155,18 +155,22 @@ def test_route_after_assess_goes_to_human_gate():
 
 @pytest.mark.asyncio
 async def test_hitl_skip_then_finalize(tmp_path: Path):
+    ckpt = tmp_path / "checkpoints" / "auditor.sqlite"
+    ckpt.parent.mkdir(parents=True, exist_ok=True)
     settings = Settings(
         _env_file=None,
         agents_dir=Path("agents"),
         evidence_dir=tmp_path,
+        checkpoint_path=ckpt,
         max_session_retries=0,
         hitl_enabled=True,
         max_parallel_assessments=2,
     )
     graph = AuditorGraph(settings=settings)
     await graph.ensure_async_checkpointer()
+    thread_id = f"test-hitl-postgres-{tmp_path.name}"
 
-    async def fake_fill(req_id, requirement, user_request, framework_id="", store=None):
+    async def fake_fill(req_id, requirement, user_request, framework_id="", store=None, **_kw):
         return Finding(
             requirement_id=req_id,
             title=requirement.title,
@@ -189,15 +193,15 @@ async def test_hitl_skip_then_finalize(tmp_path: Path):
         paused = await graph.arun_one(
             "Audit PostgreSQL CIS",
             framework_id="postgres_cis",
-            thread_id="test-hitl-postgres",
+            thread_id=thread_id,
         )
 
         assert paused.get("awaiting_hitl") is True
         assert "Could not audit" in (paused.get("report") or "")
-        assert "[AUDIT_HITL:test-hitl-postgres]" in (paused.get("report") or "")
+        assert f"[AUDIT_HITL:{thread_id}]" in (paused.get("report") or "")
 
         # Skip all remaining failures in one HITL reply.
-        resumed = await graph.aresume("test-hitl-postgres", "skip all")
+        resumed = await graph.aresume(thread_id, "skip all")
 
     assert resumed.get("awaiting_hitl") is False
     report = resumed.get("report") or ""

@@ -47,6 +47,12 @@ import asyncpg
 from auditor.compliance import findings_to_compliance_metrics
 from auditor.checklist import Requirement
 from auditor.config import Settings, get_settings
+from auditor.domain.result_identity import (
+    DuplicateLogicalKeyError,
+    DuplicateResultIdError,
+    logical_key_of,
+    validate_result_identity,
+)
 from auditor.intake import client_slug as make_client_slug
 from auditor.state import Finding
 
@@ -91,6 +97,7 @@ CREATE INDEX IF NOT EXISTS audit_sessions_client_started_idx
 CREATE TABLE IF NOT EXISTS hosts (
     id              bigserial PRIMARY KEY,
     host_key        text NOT NULL,
+    asset_id        text,
     ssh_host        text,
     hostname        text,
     first_seen_at   timestamptz NOT NULL DEFAULT now(),
@@ -153,6 +160,13 @@ CREATE TABLE IF NOT EXISTS requirement_results (
     observation     text NOT NULL DEFAULT '',
     recommendation  text NOT NULL DEFAULT '',
     notes           text NOT NULL DEFAULT '',
+    -- CORE-003 canonical identity (mandatory for new writes)
+    result_id       uuid,
+    client_id       text,
+    audit_run_id    text,
+    asset_id        text,
+    framework_id    text,
+    framework_version text,
     UNIQUE (host_result_id, req_id)
 );
 
@@ -884,11 +898,16 @@ class ResultsStore:
         host_key: str,
         hostname: str | None = None,
         ssh_host: str | None = None,
+        asset_id: str | None = None,
     ) -> int:
-        """Insert/update ``hosts`` row, preferring real hostname/IP when given."""
+        """Insert/update ``hosts`` row, preferring real hostname/IP when given.
+
+        ``asset_id`` is the stable CORE-003 identity; ``ssh_host`` may change.
+        """
         key = (host_key or "").strip() or "_default"
         hn = (hostname or "").strip() or None
         ip = (ssh_host or "").strip() or None
+        aid = (asset_id or "").strip() or None
         if key != "_default":
             if hn is None and not _looks_like_ip(key):
                 hn = key
@@ -897,15 +916,17 @@ class ResultsStore:
         return int(
             await conn.fetchval(
                 """
-                INSERT INTO hosts (host_key, ssh_host, hostname, last_seen_at)
-                VALUES ($1, $2, $3, now())
+                INSERT INTO hosts (host_key, asset_id, ssh_host, hostname, last_seen_at)
+                VALUES ($1, $2, $3, $4, now())
                 ON CONFLICT (host_key) DO UPDATE SET
                     last_seen_at = now(),
+                    asset_id = COALESCE(EXCLUDED.asset_id, hosts.asset_id),
                     ssh_host = COALESCE(EXCLUDED.ssh_host, hosts.ssh_host),
                     hostname = COALESCE(EXCLUDED.hostname, hosts.hostname)
                 RETURNING id
                 """,
                 key,
+                aid,
                 ip,
                 hn,
             )
@@ -1064,11 +1085,17 @@ class ResultsStore:
                 session_pk = int(sess["id"])
                 sess_num = int(sess["session_number"])
 
+                sample_asset = ""
+                for f in findings.values():
+                    if getattr(f, "asset_id", ""):
+                        sample_asset = str(f.asset_id)
+                        break
                 host_pk = await self._upsert_host_identity(
                     conn,
                     host_key=host_key,
                     hostname=None,
                     ssh_host=None,
+                    asset_id=sample_asset or None,
                 )
                 if requirements:
                     for req in requirements.values():
@@ -1108,14 +1135,15 @@ class ResultsStore:
                     report_relpath=report_rel,
                 )
                 req_map = requirements or {}
-                for _req_id, finding in findings.items():
-                    req = req_map.get(finding.requirement_id) if req_map else None
+                for finding in findings.values():
+                    f = finding if isinstance(finding, Finding) else Finding.model_validate(finding)
+                    req = req_map.get(f.requirement_id) if req_map else None
                     await self._upsert_requirement_cell(
                         conn,
                         host_result_id=hr_pk,
                         session_pk=session_pk,
                         sess_num=sess_num,
-                        finding=finding,
+                        finding=f,
                         requirement=req,
                     )
                 # Mark completed when finalize/update_report writes results.
@@ -1207,6 +1235,7 @@ class ResultsStore:
                     host_key=host_key,
                     hostname=hostname,
                     ssh_host=ssh_host,
+                    asset_id=str(finding.asset_id or "") or None,
                 )
                 if requirement is not None:
                     await conn.execute(
@@ -1411,15 +1440,82 @@ class ResultsStore:
         finding: Finding,
         requirement: Requirement | None,
     ) -> None:
-        """Upsert one requirement_results row for a host result."""
+        """Upsert one requirement_results row for a host result.
+
+        Enforces CORE-003 identity at the application boundary before write.
+        Same ``result_id`` + same logical key may update content; conflicts raise.
+        """
+        validate_result_identity(finding, for_persist=True)
+        key = logical_key_of(finding)
+        existing_by_id = await conn.fetchrow(
+            """
+            SELECT result_id, client_id, audit_run_id, asset_id,
+                   framework_id, framework_version, req_id
+            FROM requirement_results
+            WHERE result_id = $1::uuid
+            """,
+            finding.result_id,
+        )
+        if existing_by_id is not None:
+            prev = {
+                "client_id": str(existing_by_id["client_id"] or ""),
+                "audit_run_id": str(existing_by_id["audit_run_id"] or ""),
+                "asset_id": str(existing_by_id["asset_id"] or ""),
+                "framework_id": str(existing_by_id["framework_id"] or ""),
+                "framework_version": str(existing_by_id["framework_version"] or ""),
+                "requirement_id": str(existing_by_id["req_id"] or ""),
+            }
+            if (
+                prev["client_id"]
+                and prev["audit_run_id"]
+                and prev["asset_id"]
+                and prev["framework_id"]
+                and prev["framework_version"]
+                and logical_key_of(prev).as_tuple() != key.as_tuple()
+            ):
+                raise DuplicateResultIdError(
+                    f"duplicate result_id {finding.result_id!r} with conflicting "
+                    f"logical keys: {prev} vs {key.as_dict()}"
+                )
+        existing_by_key = await conn.fetchrow(
+            """
+            SELECT result_id FROM requirement_results
+            WHERE client_id = $1
+              AND audit_run_id = $2
+              AND asset_id = $3
+              AND framework_id = $4
+              AND framework_version = $5
+              AND req_id = $6
+            """,
+            key.client_id,
+            key.audit_run_id,
+            key.asset_id,
+            key.framework_id,
+            key.framework_version,
+            key.requirement_id,
+        )
+        if (
+            existing_by_key is not None
+            and str(existing_by_key["result_id"] or "") != finding.result_id
+        ):
+            raise DuplicateLogicalKeyError(
+                key,
+                existing_result_id=str(existing_by_key["result_id"] or ""),
+                new_result_id=finding.result_id,
+            )
         await conn.execute(
             """
             INSERT INTO requirement_results (
                 host_result_id, session_id, session_number,
                 req_id, title, category, severity,
                 status, pass_criteria, how_to_verify,
-                observation, recommendation, notes
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                observation, recommendation, notes,
+                result_id, client_id, audit_run_id, asset_id,
+                framework_id, framework_version
+            ) VALUES (
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+                $14::uuid,$15,$16,$17,$18,$19
+            )
             ON CONFLICT (host_result_id, req_id) DO UPDATE SET
                 title = EXCLUDED.title,
                 category = EXCLUDED.category,
@@ -1431,7 +1527,15 @@ class ResultsStore:
                 recommendation = EXCLUDED.recommendation,
                 notes = EXCLUDED.notes,
                 session_id = EXCLUDED.session_id,
-                session_number = EXCLUDED.session_number
+                session_number = EXCLUDED.session_number,
+                result_id = EXCLUDED.result_id,
+                client_id = EXCLUDED.client_id,
+                audit_run_id = EXCLUDED.audit_run_id,
+                asset_id = EXCLUDED.asset_id,
+                framework_id = EXCLUDED.framework_id,
+                framework_version = EXCLUDED.framework_version
+            WHERE requirement_results.result_id IS NULL
+               OR requirement_results.result_id = EXCLUDED.result_id
             """,
             host_result_id,
             session_pk,
@@ -1447,6 +1551,12 @@ class ResultsStore:
             finding.evidence or "",
             finding.remediation or "",
             finding.notes or "",
+            finding.result_id,
+            finding.client_id,
+            finding.audit_run_id,
+            finding.asset_id,
+            finding.framework_id,
+            finding.framework_version,
         )
 
     async def _refresh_host_result_metrics(
@@ -1457,7 +1567,8 @@ class ResultsStore:
         """Recompute host_results aggregates from requirement_results cells."""
         rows = await conn.fetch(
             """
-            SELECT req_id, status, title, severity
+            SELECT result_id, req_id, status, title, severity,
+                   client_id, audit_run_id, asset_id, framework_id, framework_version
             FROM requirement_results
             WHERE host_result_id = $1
             """,
@@ -1469,12 +1580,19 @@ class ResultsStore:
             status = str(r["status"] or "error").lower()
             if status not in valid:
                 status = "error"
-            rid = str(r["req_id"] or "")
-            findings[rid] = Finding(
-                requirement_id=rid,
+            req_id = str(r["req_id"] or "")
+            result_id = str(r["result_id"] or "") or req_id
+            findings[result_id] = Finding(
+                requirement_id=req_id,
                 title=str(r["title"] or ""),
                 status=status,  # type: ignore[arg-type]
                 severity=str(r["severity"] or ""),
+                result_id=str(r["result_id"] or ""),
+                client_id=str(r["client_id"] or ""),
+                audit_run_id=str(r["audit_run_id"] or ""),
+                asset_id=str(r["asset_id"] or ""),
+                framework_id=str(r["framework_id"] or ""),
+                framework_version=str(r["framework_version"] or ""),
             )
         metrics = findings_to_compliance_metrics(findings) if findings else {
             "pass": 0,
@@ -1671,6 +1789,40 @@ class ResultsStore:
                 ON host_results (session_id, host_id, framework_id)
             """
         )
+        # CORE-003: add identity columns without inventing placeholder values.
+        for stmt in (
+            "ALTER TABLE requirement_results ADD COLUMN IF NOT EXISTS result_id UUID",
+            "ALTER TABLE requirement_results ADD COLUMN IF NOT EXISTS client_id text",
+            "ALTER TABLE requirement_results ADD COLUMN IF NOT EXISTS audit_run_id text",
+            "ALTER TABLE requirement_results ADD COLUMN IF NOT EXISTS asset_id text",
+            "ALTER TABLE requirement_results ADD COLUMN IF NOT EXISTS framework_id text",
+            "ALTER TABLE requirement_results ADD COLUMN IF NOT EXISTS framework_version text",
+            "ALTER TABLE hosts ADD COLUMN IF NOT EXISTS asset_id text",
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS requirement_results_result_id_uidx
+                ON requirement_results (result_id)
+                WHERE result_id IS NOT NULL
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS requirement_results_logical_key_uidx
+                ON requirement_results (
+                    client_id, audit_run_id, asset_id,
+                    framework_id, framework_version, req_id
+                )
+                WHERE client_id IS NOT NULL
+                  AND audit_run_id IS NOT NULL
+                  AND asset_id IS NOT NULL
+                  AND framework_id IS NOT NULL
+                  AND framework_version IS NOT NULL
+                  AND req_id IS NOT NULL
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS hosts_asset_id_uidx
+                ON hosts (asset_id)
+                WHERE asset_id IS NOT NULL
+            """,
+        ):
+            await conn.execute(stmt)
 
     async def _ensure_playbook_schema(self, conn: asyncpg.Connection) -> None:
         """Create global ``playbook_memory`` table on the shared warehouse DB."""

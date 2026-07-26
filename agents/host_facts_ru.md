@@ -7,6 +7,7 @@ language: ru
 family_id: host_facts
 detect:
   always: true
+version: "1.0"
 ---
 # Чеклист инвентаризации фактов хоста
 

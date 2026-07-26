@@ -7,6 +7,7 @@ language: ru
 family_id: ubuntu_cis_24_l2
 detect:
   os_ids: [ubuntu]
+version: "24.0"
 ---
 # CIS Ubuntu Linux 24.04 LTS v1.0.0 (Level 2 Server, RU)
 

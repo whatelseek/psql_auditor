@@ -8,6 +8,7 @@ family_id: postgres_cis
 detect:
   binaries: [postgres, psql]
   ports: [5432]
+version: "1.0"
 ---
 # Чеклист аудита безопасности PostgreSQL
 

@@ -330,7 +330,13 @@ async def test_record_host_framework_audit_tags_session_number() -> None:
     )
     store = ResultsStore(settings)  # type: ignore[arg-type]
     findings = {
-        "REQ-001": Finding(
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa": Finding(
+            result_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            client_id="acme",
+            audit_run_id="arun_test",
+            asset_id="asset_host_1",
+            framework_id="ubuntu_cis",
+            framework_version="24.0",
             requirement_id="REQ-001",
             title="SSH root",
             category="Access",
@@ -375,7 +381,7 @@ async def test_record_host_framework_audit_tags_session_number() -> None:
     )
 
     conn = MagicMock()
-    conn.fetchrow = AsyncMock(return_value=sess_row)
+    conn.fetchrow = AsyncMock(side_effect=[sess_row, None, None])
     conn.fetchval = AsyncMock(side_effect=[22, 33])  # host_pk, hr_pk
     conn.execute = AsyncMock()
     tx = MagicMock()
@@ -429,6 +435,12 @@ async def test_upsert_requirement_result_live() -> None:
     )
     store = ResultsStore(settings)  # type: ignore[arg-type]
     finding = Finding(
+        result_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        client_id="acme",
+        audit_run_id="arun_live",
+        asset_id="asset_host_1",
+        framework_id="it_audit",
+        framework_version="1.0",
         requirement_id="REQ-002",
         title="Banner",
         category="Access",
@@ -468,10 +480,23 @@ async def test_upsert_requirement_result_live() -> None:
     )
 
     conn = MagicMock()
-    conn.fetchrow = AsyncMock(return_value=sess_row)
+    conn.fetchrow = AsyncMock(side_effect=[sess_row, None, None])
     conn.fetchval = AsyncMock(side_effect=[22, 44])  # host, hr
     conn.fetch = AsyncMock(
-        return_value=[{"req_id": "REQ-002", "status": "pass", "title": "Banner", "severity": "Low"}]
+        return_value=[
+            {
+                "result_id": finding.result_id,
+                "req_id": "REQ-002",
+                "status": "pass",
+                "title": "Banner",
+                "severity": "Low",
+                "client_id": "acme",
+                "audit_run_id": "arun_live",
+                "asset_id": "asset_host_1",
+                "framework_id": "it_audit",
+                "framework_version": "1.0",
+            }
+        ]
     )
     conn.execute = AsyncMock()
     tx = MagicMock()

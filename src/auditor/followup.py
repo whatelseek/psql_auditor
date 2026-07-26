@@ -729,9 +729,12 @@ async def run_update_report(
 
         raw_findings = store.load_findings(fw_id)
         findings: dict[str, Finding] = {}
-        for req_id, payload in raw_findings.items():
+        for _key, payload in raw_findings.items():
             try:
-                findings[req_id] = Finding.model_validate(payload)
+                finding = Finding.model_validate(payload)
+                key = finding.result_id or finding.requirement_id
+                if key:
+                    findings[key] = finding
             except Exception:  # noqa: BLE001
                 continue
 

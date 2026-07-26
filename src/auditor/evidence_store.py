@@ -413,19 +413,32 @@ class EvidenceStore:
             return None
 
     def load_findings(self, framework_id: str) -> dict[str, dict[str, Any]]:
-        """Load all findings for a framework keyed by REQ id.
+        """Load all findings for a framework keyed by ``result_id``.
+
+        Falls back to ``requirement_id`` only when legacy finding.json lacks
+        ``result_id`` (pre-CORE-003). Folder layout remains REQ-based.
 
         Args:
             framework_id: Evidence framework key.
 
         Returns:
-            Dict mapping requirement id to finding payload.
+            Dict mapping ``result_id`` (preferred) to finding payload.
         """
         out: dict[str, dict[str, Any]] = {}
         for req_id in self.list_requirement_ids(framework_id):
             finding = self.load_finding(framework_id, req_id)
-            if finding is not None:
-                out[req_id] = finding
+            if finding is None:
+                continue
+            key = str(finding.get("result_id") or "").strip() or req_id
+            out[key] = finding
+        return out
+
+    def load_finding_requirement_ids(self, framework_id: str) -> set[str]:
+        """Return requirement_ids that have a finding.json on disk."""
+        out: set[str] = set()
+        for req_id in self.list_requirement_ids(framework_id):
+            if self.load_finding(framework_id, req_id) is not None:
+                out.add(req_id)
         return out
 
     def write_run_meta(self, **meta: Any) -> Path:

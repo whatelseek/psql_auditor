@@ -137,14 +137,27 @@ async def load_framework(runtime: AuditRuntime, state: AuditorState) -> dict[str
         store.host_segment = host_id
 
     # Reuse findings already written (e.g. host_facts.md during intake discovery).
+    # Index by result_id (CORE-003); never by requirement_id alone.
+    from auditor.result_identity_bind import attach_result_identity
+
     existing: dict[str, Finding] = {}
     pending: list[str] = []
     for rid in checklist.ids():
         raw = store.load_finding(selected.id, rid) if store is not None else None
         if raw:
             try:
-                existing[rid] = _as_finding(raw)
-                continue
+                finding = _as_finding(raw)
+                if not finding.result_id:
+                    attach_result_identity(
+                        finding,
+                        state=state,
+                        framework_id=selected.id,
+                        framework_version=str(getattr(selected, "version", "") or ""),
+                        existing=raw,
+                    )
+                if finding.result_id:
+                    existing[finding.result_id] = finding
+                    continue
             except Exception:  # noqa: BLE001
                 pass
         pending.append(rid)
@@ -157,6 +170,7 @@ async def load_framework(runtime: AuditRuntime, state: AuditorState) -> dict[str
     return {
         "framework_id": selected.id,
         "framework_title": selected.title,
+        "framework_version": str(getattr(selected, "version", "") or ""),
         "checklist_title": checklist.title,
         "requirements": req_map,
         "pending_ids": pending,

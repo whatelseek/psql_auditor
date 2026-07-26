@@ -11,18 +11,21 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
+from auditor.asset_registry import get_asset_registry
+from auditor.audit_registry import get_audit_registry
 from auditor.context import truncate_text
+from auditor.domain.result_identity import index_by_result_id
 from auditor.evidence_store import EvidenceStore, bind_host_segment, new_run_id
 from auditor.frameworks import get_framework
 from auditor.hitl import format_continue_assistant_message
 from auditor.intake import client_slug
 from auditor.language import detect_report_language
 from auditor.progress import emit_phase
+from auditor.result_identity_bind import attach_result_identity
 from auditor.runtime_target import bind_runtime_credentials
 from auditor.secrets_file import InventorySshTarget, bind_host_target, read_client_credentials
-from auditor.audit_registry import get_audit_registry
 from auditor.session_store import find_run_for_thread, write_run_status
-from auditor.state import AuditorState
+from auditor.state import AuditorState, Finding
 from auditor.workflows.protocols import AuditRuntime
 
 try:
@@ -73,6 +76,63 @@ async def arun_one(runtime: AuditRuntime,
             ]
         if intake_state.get("audit_run_id"):
             meta["audit_run_id"] = intake_state["audit_run_id"]
+    client_name = str(
+        (intake_state or {}).get("client_name") or meta.get("client_name") or ""
+    )
+    client_id = str(
+        (intake_state or {}).get("client_id")
+        or (client_slug(client_name) if client_name else "")
+        or "client"
+    )
+    audit_run_id = str((intake_state or {}).get("audit_run_id") or "")
+    if not audit_run_id:
+        # Single-framework entry points still need a business AuditRun id.
+        arun = get_audit_registry(runtime.settings.evidence_dir).create_run(
+            client_id=client_id,
+            scope={"framework_id": framework_id or ""},
+            evidence_run_id=store.run_id,
+            base_thread_id=tid,
+        )
+        get_audit_registry(runtime.settings.evidence_dir).mark_run_started(
+            arun.audit_run_id
+        )
+        audit_run_id = arun.audit_run_id
+    asset_id = str((intake_state or {}).get("asset_id") or "")
+    if not asset_id and ssh_target is not None:
+        inv_key = ssh_target.inventory_key or ssh_target.label
+        if inv_key or ssh_target.asset_id:
+            asset_id = get_asset_registry(runtime.settings.evidence_dir).ensure_asset(
+                client_id=client_id,
+                inventory_key=inv_key or ssh_target.asset_id,
+                label=ssh_target.label,
+                ssh_host=ssh_target.host,
+                asset_id=ssh_target.asset_id or None,
+            )
+        elif evidence_host_id and not evidence_host_id.replace(".", "").isdigit():
+            # Hostname (not IP) may serve as stable inventory key.
+            asset_id = get_asset_registry(runtime.settings.evidence_dir).ensure_asset(
+                client_id=client_id,
+                inventory_key=evidence_host_id,
+                label=evidence_host_id,
+                ssh_host=ssh_target.host if ssh_target else "",
+            )
+    if not asset_id:
+        # Client-scoped synthetic asset for hostless framework runs.
+        asset_id = get_asset_registry(runtime.settings.evidence_dir).ensure_asset(
+            client_id=client_id,
+            inventory_key=f"client:{client_id}",
+            label=client_name or client_id,
+        )
+    fw_version = str((intake_state or {}).get("framework_version") or "")
+    if not fw_version and framework_id:
+        bare = framework_id.split("/", 1)[-1]
+        fw_obj = get_framework(bare, runtime.settings.agents_dir)
+        fw_version = str(getattr(fw_obj, "version", "") or "") if fw_obj else ""
+    meta["asset_id"] = asset_id
+    meta["client_id"] = client_id
+    meta["audit_run_id"] = audit_run_id
+    if fw_version:
+        meta["framework_version"] = fw_version
     store.write_run_meta(**meta)
     initial: AuditorState = {
         "messages": [HumanMessage(content=user_text)],
@@ -108,6 +168,14 @@ async def arun_one(runtime: AuditRuntime,
         initial["framework_id"] = framework_id
     if evidence_host_id:
         initial["evidence_host_id"] = evidence_host_id
+    if audit_run_id:
+        initial["audit_run_id"] = audit_run_id
+    if asset_id:
+        initial["asset_id"] = asset_id
+    if client_id:
+        initial["client_id"] = client_id
+    if fw_version:
+        initial["framework_version"] = fw_version
     config = {"configurable": {"thread_id": tid}}
 
     async def _invoke() -> dict[str, Any]:
@@ -320,16 +388,42 @@ async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None
             "awaiting_hitl": False,
         }
     checklist = load_checklist(fw.path)
-    done = set(disk_findings.keys())
+    done = store.load_finding_requirement_ids(fw_key) or store.load_finding_requirement_ids(
+        framework_id
+    )
     pending = [rid_ for rid_ in checklist.ids() if rid_ not in done]
     meta_pending = meta.get("pending_ids")
     if isinstance(meta_pending, list) and meta_pending:
         pending = [str(x) for x in meta_pending if str(x) not in done]
 
     findings_objs: dict[str, Finding] = {}
-    for req_id, raw in disk_findings.items():
+    for _key, raw in disk_findings.items():
         try:
-            findings_objs[req_id] = Finding.model_validate(raw)
+            finding = Finding.model_validate(raw)
+            if not finding.result_id:
+                attach_result_identity(
+                    finding,
+                    state={
+                        "client_id": str(meta.get("client_id") or ""),
+                        "client_name": str(meta.get("client_name") or ""),
+                        "audit_run_id": str(meta.get("audit_run_id") or ""),
+                        "asset_id": str(meta.get("asset_id") or ""),
+                        "framework_version": str(
+                            meta.get("framework_version")
+                            or getattr(fw, "version", "")
+                            or ""
+                        ),
+                    },
+                    framework_id=framework_id,
+                    framework_version=str(
+                        meta.get("framework_version")
+                        or getattr(fw, "version", "")
+                        or ""
+                    ),
+                    existing=raw,
+                )
+            if finding.result_id:
+                findings_objs[finding.result_id] = finding
         except Exception:  # noqa: BLE001
             continue
 

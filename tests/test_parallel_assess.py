@@ -45,7 +45,16 @@ async def test_assess_parallel_runs_workers_and_merges_findings():
             }
         )
 
-    assert set(result["findings"]) == {"REQ-001", "REQ-002", "REQ-003"}
+    assert len(result["findings"]) == 3
+    assert {f.requirement_id for f in result["findings"].values()} == {
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+    }
+    assert all(f.result_id for f in result["findings"].values())
+    assert set(result["findings"]) == {
+        f.result_id for f in result["findings"].values()
+    }
     assert result["pending_ids"] == []
     assert all(f.status == "pass" for f in result["findings"].values())
 

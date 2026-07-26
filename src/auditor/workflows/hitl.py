@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage
 from langgraph.types import interrupt
 
 from auditor.checklist import Requirement
+from auditor.domain.result_identity import finding_for_requirement
 from auditor.hitl import (
     HitlDecision,
     build_hitl_prompt,
@@ -55,7 +56,10 @@ async def human_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, An
     store = runtime._store_from_state(state)
 
     req_id = candidates[0]
-    finding = _as_finding(findings[req_id])
+    matched = finding_for_requirement(findings, req_id)
+    if matched is None:
+        return {"awaiting_hitl": False, "pending_ids": []}
+    finding = _as_finding(matched)
     requirement = requirements.get(req_id) or Requirement(
         id=req_id,
         title=finding.title,
@@ -122,10 +126,14 @@ async def human_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, An
     if decision.action == "skip_all":
         updates: dict[str, Finding] = {}
         for rid in candidates:
-            updates[rid] = runtime._skipped_finding(
-                _as_finding(findings[rid]),
+            raw = finding_for_requirement(findings, rid)
+            if raw is None:
+                continue
+            skipped_f = runtime._skipped_finding(
+                _as_finding(raw),
                 reason="Skipped by operator (skip all).",
             )
+            updates[skipped_f.result_id] = skipped_f
             if rid not in skipped:
                 skipped.append(rid)
         return {
@@ -163,13 +171,12 @@ async def human_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, An
     if decision.action == "skip":
         if req_id not in skipped:
             skipped.append(req_id)
+        skipped_f = runtime._skipped_finding(
+            finding,
+            reason="Skipped by operator after failed assessment.",
+        )
         return {
-            "findings": {
-                req_id: runtime._skipped_finding(
-                    finding,
-                    reason="Skipped by operator after failed assessment.",
-                )
-            },
+            "findings": {skipped_f.result_id: skipped_f},
             "hitl_skipped": skipped,
             "pending_ids": [],
             "awaiting_hitl": False,

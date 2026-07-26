@@ -72,10 +72,14 @@ def compact_findings_for_summary(
         "| ID | Status | Severity | Title | Observation | Recommendation |",
         "|---|---|---|---|---|---|",
     ]
-    for req_id in sorted(findings.keys()):
-        f = findings[req_id]
-        if not isinstance(f, Finding):
-            f = Finding.model_validate(f)
+    ordered = sorted(
+        findings.values(),
+        key=lambda raw: (
+            (raw.requirement_id if isinstance(raw, Finding) else str(raw.get("requirement_id") or ""))
+        ),
+    )
+    for raw in ordered:
+        f = raw if isinstance(raw, Finding) else Finding.model_validate(raw)
         obs = truncate_text(
             (f.evidence or "").replace("\n", " "), evidence_chars, "obs"
         )
@@ -83,7 +87,7 @@ def compact_findings_for_summary(
             (f.remediation or "").replace("\n", " "), evidence_chars, "rec"
         )
         lines.append(
-            f"| {req_id} | {f.status} | {f.severity or '-'} | "
+            f"| {f.requirement_id} | {f.status} | {f.severity or '-'} | "
             f"{(f.title or '').replace('|', '/')} | "
             f"{obs.replace('|', '/')} | {rec.replace('|', '/')} |"
         )

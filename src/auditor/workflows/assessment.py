@@ -17,7 +17,9 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from auditor.checklist import Requirement
 from auditor.context import count_tool_rounds, truncate_text
+from auditor.domain.result_identity import index_by_result_id, requirement_ids_in
 from auditor.evidence_store import EvidenceStore
+from auditor.frameworks import get_framework
 from auditor.language import ReportLanguage, language_instruction
 from auditor.progress import emit_phase, emit_req_status
 from auditor.prompts import (
@@ -27,6 +29,7 @@ from auditor.prompts import (
     FILL_CELL_PROMPT,
     FILL_SYSTEM_PROMPT,
 )
+from auditor.result_identity_bind import attach_result_identity, require_persistable
 from auditor.results_store import (
     record_requirement_result_safe,
     snapshot_checklist_safe,
@@ -42,6 +45,46 @@ from auditor.workflows.helpers import (
     _normalize_status,
 )
 from auditor.workflows.protocols import AuditRuntime
+
+
+def _framework_version_for(runtime: AuditRuntime, state: AuditorState, framework_id: str) -> str:
+    """Resolve mandatory framework_version from state or agent frontmatter."""
+    ver = str(state.get("framework_version") or "").strip()
+    if ver:
+        return ver
+    bare = framework_id.split("/", 1)[-1] if framework_id else ""
+    fw = get_framework(bare, runtime.settings.agents_dir) if bare else None
+    return str(getattr(fw, "version", "") or "").strip()
+
+
+def _bind_finding(
+    runtime: AuditRuntime,
+    state: AuditorState,
+    finding: Finding,
+    *,
+    framework_id: str,
+    store: EvidenceStore | None,
+) -> Finding:
+    """Attach canonical identity; validate fully when persisting to disk/DB."""
+    from auditor.domain.result_identity import new_result_id
+
+    ver = _framework_version_for(runtime, state, framework_id)
+    existing = None
+    if store is not None:
+        existing = store.load_finding(framework_id, finding.requirement_id)
+    attach_result_identity(
+        finding,
+        state=state,
+        framework_id=framework_id,
+        framework_version=ver,
+        existing=existing,
+    )
+    if not finding.result_id:
+        finding.result_id = new_result_id()
+    # Full identity is mandatory only when writing evidence / warehouse.
+    if store is not None:
+        return require_persistable(finding)
+    return finding
 
 async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
     """Node: fill report cells for pending requirements (parallel)."""
@@ -131,6 +174,9 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
                     store=store,
                 )
                 if special is not None:
+                    special = _bind_finding(
+                        runtime, state, special, framework_id=framework_id, store=store
+                    )
                     if store is not None:
                         store.write_requirement(
                             framework_id,
@@ -168,7 +214,13 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
                     framework_id=framework_id,
                     store=store,
                     report_language=report_lang,
+                    state=state,
                 )
+                finding = _bind_finding(
+                    runtime, state, finding, framework_id=framework_id, store=store
+                )
+                if store is not None:
+                    store.write_finding(framework_id, req_id, finding.model_dump())
                 await runtime._warehouse_live_upsert(
                     state,
                     framework_id=framework_id,
@@ -188,7 +240,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
                     remaining = [
                         rid
                         for rid in pending
-                        if rid not in (state.get("findings") or {})
+                        if rid not in requirement_ids_in(state.get("findings") or {})
                     ]
                     write_run_status(
                         runtime.settings.evidence_dir,
@@ -218,6 +270,9 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
                     pass_criteria=req.pass_criteria if req else "",
                     evidence=f"Cell fill failed: {type(exc).__name__}: {exc}",
                     remediation="Retry after restoring SSH/MCP session",
+                )
+                finding = _bind_finding(
+                    runtime, state, finding, framework_id=framework_id, store=store
                 )
                 if store is not None:
                     store.write_finding(
@@ -280,7 +335,8 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
             )
         raise
 
-    new_findings = {f.requirement_id: f for f in findings_list}
+    # Physical index is result_id; completion order must not change identities.
+    new_findings = index_by_result_id(findings_list)
 
     # Keep recoverable failures in pending_ids for the reconnect cycle.
     retryable = [f.requirement_id for f in findings_list if _is_recoverable_finding(f)]
@@ -328,6 +384,7 @@ async def fill_requirement_cells(runtime: AuditRuntime,
     report_language: ReportLanguage | None = None,
     *,
     ssh_only: bool = False,
+    state: AuditorState | None = None,
 ) -> Finding:
     """Run evidence gathering + fill model for one requirement cell.
 
@@ -396,6 +453,10 @@ async def fill_requirement_cells(runtime: AuditRuntime,
     ]
     response = await runtime.fill_model.ainvoke(fill_messages)
     finding = runtime._cells_to_finding(req_id, requirement, response, evidence)
+    if state is not None:
+        finding = _bind_finding(
+            runtime, state, finding, framework_id=framework_id, store=store
+        )
     if store is not None:
         store.write_finding(framework_id, req_id, finding.model_dump())
     return finding

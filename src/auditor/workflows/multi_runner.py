@@ -9,6 +9,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
+from auditor.asset_registry import get_asset_registry
 from auditor.audit_registry import get_audit_registry
 from auditor.compliance import format_chat_summary_visuals, parse_report_findings
 from auditor.context import truncate_text
@@ -154,12 +155,17 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
             job["audit_run_id"] = audit_run_id
             job["attempt"] = active_job.attempt
         try:
+            job_intake = dict(intake_state or {})
+            if job.get("asset_id"):
+                job_intake["asset_id"] = str(job.get("asset_id"))
+            if job.get("framework_version"):
+                job_intake["framework_version"] = str(job.get("framework_version"))
             result = await runtime.arun_one(
                 user_text,
                 framework_id=fw_id,
                 run_id=run_id,
                 thread_id=tid,
-                intake_state=intake_state,
+                intake_state=job_intake,
                 evidence_host_id=host_id or None,
                 ssh_target=_target_from_job_dict(job),
             )
@@ -359,6 +365,7 @@ def _bootstrap_audit_run(
         ),
     )
     registry.mark_run_started(arun.audit_run_id)
+    assets = get_asset_registry(runtime.settings.evidence_dir)
     for job in pending:
         logical = _job_dict_key(job)
         created = registry.create_job(
@@ -373,8 +380,32 @@ def _bootstrap_audit_run(
         job["job_id"] = created.job_id
         job["audit_run_id"] = arun.audit_run_id
         job["attempt"] = created.attempt
+        label = str(job.get("ssh_label") or "").strip()
+        host = str(job.get("ssh_host") or "").strip()
+        inv_key = label or str(job.get("asset_id") or "").strip()
+        if inv_key:
+            job["asset_id"] = assets.ensure_asset(
+                client_id=client_id,
+                inventory_key=inv_key,
+                label=label or inv_key,
+                ssh_host=host,
+                asset_id=str(job.get("asset_id") or "") or None,
+            )
+        elif not job.get("asset_id"):
+            job["asset_id"] = assets.ensure_asset(
+                client_id=client_id,
+                inventory_key=f"client:{client_id}",
+                label=str(intake_state.get("client_name") or client_id),
+            )
+        if not job.get("framework_version"):
+            fw_obj = get_framework(
+                str(job.get("framework_id") or ""),
+                runtime.settings.agents_dir,
+            )
+            job["framework_version"] = str(getattr(fw_obj, "version", "") or "")
     updated = dict(intake_state)
     updated["audit_run_id"] = arun.audit_run_id
+    updated["client_id"] = client_id
     store = runtime._evidence_by_run.get(run_id)
     if store is not None:
         store.write_run_meta(audit_run_id=arun.audit_run_id, status="running")
@@ -999,6 +1030,7 @@ def _serialize_host_job(
     return {
         "framework_id": fw.id,
         "framework_title": fw.title,
+        "framework_version": str(getattr(fw, "version", "") or ""),
         "evidence_host_id": target.slug if target else "",
         "ssh_host": target.host if target else "",
         "ssh_port": target.port if target else "",
@@ -1007,6 +1039,7 @@ def _serialize_host_job(
         "ssh_key": target.private_key_path if target else "",
         "ssh_strict": target.strict_host_key if target else "",
         "ssh_label": target.label if target else "",
+        "asset_id": str(getattr(target, "asset_id", "") or "") if target else "",
         "transport": target.transport if target else "ssh",
         "winrm_transport": target.winrm_transport if target else "",
         "winrm_use_ssl": target.winrm_use_ssl if target else "",

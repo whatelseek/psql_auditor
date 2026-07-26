@@ -396,12 +396,20 @@ class InventorySshTarget:
     winrm_transport: str = "ntlm"
     winrm_use_ssl: str = ""
     winrm_verify_ssl: str = ""
+    # Optional stable asset identity from inventory (CORE-003). When empty,
+    # callers should resolve via AssetRegistry using ``label``.
+    asset_id: str = ""
 
     @property
     def slug(self) -> str:
         """Filesystem-safe id derived from host (IP or hostname)."""
         raw = re.sub(r"[^A-Za-z0-9._-]+", "_", (self.host or "").strip()).strip("._-")
         return raw or "host"
+
+    @property
+    def inventory_key(self) -> str:
+        """Stable inventory key for asset registry (label preferred over host)."""
+        return (self.label or self.asset_id or "").strip()
 
     @property
     def is_winrm(self) -> bool:
@@ -520,6 +528,7 @@ def list_inventory_ssh_targets(text: str) -> list[InventorySshTarget]:
                 winrm_transport=extra.get("transport") or "ntlm",
                 winrm_use_ssl=extra.get("use_ssl") or "",
                 winrm_verify_ssl=extra.get("verify_ssl") or "",
+                asset_id=(extra.get("asset_id") or "").strip(),
             )
         )
     return out

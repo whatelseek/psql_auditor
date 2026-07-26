@@ -66,6 +66,7 @@ class Framework:
       detect: Host auto-detection rules parsed from frontmatter.
       language: Preferred checklist language (``en`` / ``ru`` / ``any``).
       family_id: Logical family key used to prefer language variants.
+      version: Explicit framework version from frontmatter (required to persist results).
   """
 
     id: str
@@ -77,6 +78,7 @@ class Framework:
     detect: FrameworkDetect = field(default_factory=FrameworkDetect)
     language: str = "any"  # any | en | ru
     family_id: str = ""
+    version: str = ""
 
 
 def _normalize_framework_language(value: Any) -> str:
@@ -222,6 +224,8 @@ def _parse_agent_file(path: Path) -> Framework:
     ):
         detect = FrameworkDetect(always=True)
 
+    version = str(meta.get("version") or meta.get("framework_version") or "").strip()
+
     return Framework(
         id=fw_id,
         title=title,
@@ -232,6 +236,7 @@ def _parse_agent_file(path: Path) -> Framework:
         detect=detect,
         language=language,
         family_id=family_id,
+        version=version,
     )
 
 

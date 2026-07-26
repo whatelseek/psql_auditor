@@ -22,16 +22,25 @@ from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
 from auditor.checklist import Requirement
+from auditor.domain.result_identity import (
+    finding_for_requirement,
+    merge_result_maps,
+    result_id_of,
+)
 from auditor.language import ReportLanguage, report_ui
 
 FindingStatus = Literal["pass", "fail", "partial", "error", "skipped"]
 
 
 class Finding(BaseModel):
-    """Filled cells for one checklist requirement.
+    """Filled cells for one checklist requirement (canonical result identity).
 
     Attributes:
-        requirement_id: Checklist id (e.g. ``REQ-001``).
+        result_id: Stable UUID for this result (physical identity).
+        client_id / audit_run_id / asset_id / framework_id / framework_version:
+            Logical uniqueness dimensions (with ``requirement_id``).
+        requirement_id: Checklist id (e.g. ``REQ-001``); unique only within a
+            framework version — never a global result key.
         title / severity / category: Copied from the checklist (fixed).
         status: Model-filled status cell.
         evidence: Model-filled **observation** cell (factual).
@@ -49,28 +58,40 @@ class Finding(BaseModel):
     remediation: str = Field(default="", description="Recommendation cell")
     notes: str = ""
     pass_criteria: str = ""
+    # CORE-003 canonical identity (mandatory before persistence).
+    result_id: str = ""
+    client_id: str = ""
+    audit_run_id: str = ""
+    asset_id: str = ""
+    framework_id: str = ""
+    framework_version: str = ""
 
 
 def merge_findings(
     left: dict[str, Finding] | None,
     right: dict[str, Finding] | None,
 ) -> dict[str, Finding]:
-    """LangGraph reducer: merge two findings dicts.
+    """LangGraph reducer: merge findings keyed by ``result_id``.
 
-  Later values from ``right`` overwrite same-key entries in ``left``. Used as
-  the reducer for the ``findings`` state key so parallel requirement workers
-  can publish results independently.
+    Rejects duplicate ``result_id`` with conflicting logical keys and
+    duplicate logical keys with different ``result_id`` values. Same
+    ``result_id`` + same logical key allows content updates (correction /
+    external validation).
 
-  Args:
-      left: Existing findings map (may be ``None``).
-      right: New or updated findings to merge in (may be ``None``).
+    Args:
+        left: Existing findings map keyed by ``result_id``.
+        right: New or updated findings keyed by ``result_id``.
 
-  Returns:
-      Combined dict keyed by requirement id.
-  """
-    merged = dict(left or {})
-    merged.update(right or {})
-    return merged
+    Returns:
+        Combined dict keyed by ``result_id``.
+    """
+    merged = merge_result_maps(left, right)
+    out: dict[str, Finding] = {}
+    for rid, raw in merged.items():
+        out[rid] = raw if isinstance(raw, Finding) else Finding.model_validate(raw)
+        if result_id_of(out[rid]) != rid:
+            out[rid].result_id = rid
+    return out
 
 
 class AuditorState(TypedDict, total=False):
@@ -87,11 +108,12 @@ class AuditorState(TypedDict, total=False):
       framework_id / framework_title / checklist_title: Active framework metadata.
       requirements: Parsed checklist map keyed by ``REQ-NNN``.
       pending_ids / current_id: Assessment queue cursor.
-      findings: Model-filled cells per requirement.
+      findings: Model-filled cells keyed by ``result_id`` (not requirement_id).
       report: Final Markdown report string.
       evidence_run_id / evidence_run_dir: On-disk artifact paths.
       intake / intake_complete: Pre-audit questionnaire answers.
       results_session_number: Postgres warehouse session id.
+      audit_run_id / asset_id / client_id / framework_version: CORE-003 identity.
       host_facts_md / cmdb_drift_md: Host inventory snapshots.
       archive_path / archive_url: Zip bundle for chat download.
   """
@@ -128,6 +150,11 @@ class AuditorState(TypedDict, total=False):
     # Results warehouse session (Postgres); allocated once per new audit.
     results_session_number: int
     evidence_host_id: str  # host slug under artifacts/<client>/<host>/
+    # CORE-003 identity dimensions for this graph job.
+    audit_run_id: str
+    asset_id: str
+    client_id: str
+    framework_version: str
     host_facts_md: str
     cmdb_drift_md: str
     # Zip archive of report + evidence for chat download.
@@ -144,7 +171,7 @@ def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:
   ``status`` key (for deserialized state).
 
   Args:
-      findings: Map of requirement id → finding record.
+      findings: Map of ``result_id`` (or any key) → finding record.
 
   Returns:
       Dict with keys ``pass``, ``fail``, ``partial``, ``error``, ``skipped``.
@@ -192,7 +219,7 @@ def render_report(
 
     Args:
         checklist_title: Report title.
-        findings: Filled cells keyed by requirement id.
+        findings: Filled cells keyed by ``result_id`` (requirement_id is a field).
         requirements: Full checklist map (defines row order and fixed fields).
         language: Operator-requested report language (UI chrome localization).
 
@@ -200,13 +227,26 @@ def render_report(
         Markdown report with a summary table plus per-requirement detail blocks.
     """
     ui = report_ui(language)
-    order = list(requirements.keys()) if requirements else sorted(findings.keys())
+    if requirements:
+        order = list(requirements.keys())
+    else:
+        order = sorted(
+            {
+                (f.requirement_id if isinstance(f, Finding) else str(f.get("requirement_id") or ""))
+                for f in findings.values()
+            }
+        )
     # Ensure skipped rows exist for missing findings when requirements known.
+    # Index by requirement_id only for report row layout (scoped checklist).
     effective: dict[str, Finding] = {}
     for req_id in order:
-        if req_id in findings:
-            f = findings[req_id]
-            effective[req_id] = f if isinstance(f, Finding) else Finding.model_validate(f)
+        matched = finding_for_requirement(findings, req_id)
+        if matched is not None:
+            effective[req_id] = (
+                matched
+                if isinstance(matched, Finding)
+                else Finding.model_validate(matched)
+            )
         elif requirements and req_id in requirements:
             req = requirements[req_id]
             effective[req_id] = Finding(
