@@ -5,7 +5,7 @@
 Репозиторий: `whatelseek/psql_auditor`  
 Базовый commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
 Последняя независимо рассмотренная ревизия: [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8)  
-Всего задач: **73**
+Всего задач: **77**
 
 Синхронизирован с английской версией
 [`psql_auditor_master_refactoring_checklist (5).md`](psql_auditor_master_refactoring_checklist%20(5).md).
@@ -16,10 +16,10 @@
 
 | Статус | Количество |
 | --- | ---: |
-| Принято `[x]` | **10 / 73 (13.7%)** |
-| Частично `[~]` | **5 / 73 (6.8%)** |
-| Открыто `[ ]` | **58 / 73 (79.5%)** |
-| Не полностью завершено | **63 / 73 (86.3%)** |
+| Принято `[x]` | **10 / 77 (13.0%)** |
+| Частично `[~]` | **5 / 77 (6.5%)** |
+| Открыто `[ ]` | **62 / 77 (80.5%)** |
+| Не полностью завершено | **67 / 77 (87.0%)** |
 
 Принято: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `INPUT-001`, `INPUT-003`.
 
@@ -32,18 +32,17 @@ PR #36 (inventory-driven audit + SSH/WinRM discovery) влит в `main`.
 `INPUT-003` на commit
 [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8).
 `INPUT-005` остаётся `[~]`. `INPUT-002` остаётся `[ ]` (кандидат Markdown
-framework registry в PR #37). `WIN-001` — новый открытый backlog-пункт для
-production-safe Windows/WinRM discovery. Статусы приёмки не меняются
-автоматически по зелёному CI.
+framework registry в PR #37). Адаптеры `TOOL-001`…`TOOL-005` — открытый
+backlog. Статусы приёмки не меняются автоматически по зелёному CI.
 
 | Проверка | Результат |
 | --- | --- |
-| Format / Lint | Passed |
-| Type check | Passed, 89 files |
-| Unit tests | 456 passed |
-| Integration tests | 8 passed |
-| Full suite | 464 passed |
-| Defect map | `validate-defect-map: OK` (73/73) |
+| Format / Lint | Ожидает локальной перепроверки |
+| Type check | Ожидает локальной перепроверки |
+| Unit tests | Ожидает локальной перепроверки |
+| Integration tests | Ожидает локальной перепроверки |
+| Full suite | Ожидает локальной перепроверки |
+| Defect map | Цель `validate-defect-map: OK` (77/77) |
 | Prior clean CI (база review PR #35) | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), все jobs зелёные |
 | Prior clean CI (async start + inventory identity) | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), все jobs зелёные |
 
@@ -65,7 +64,7 @@ production-safe Windows/WinRM discovery. Статусы приёмки не ме
 
 Доказательства закрытия:
 
-- defect-to-module map покрывает все 73 ID чеклиста и enforced в CI;
+- defect-to-module map покрывает все 77 ID чеклиста и enforced в CI;
 - единые local/CI targets: format, lint, typecheck, unit, integration, full suite;
 - детерминированные shared fixtures и fake LLM scenarios переиспользуются;
 - обязательные тесты блокируют непреднамеренный external HTTP/LLM доступ.
@@ -135,6 +134,11 @@ race-fix реализованы, но полное удаление legacy proce
 execution integration, а не к validated inventory domain model.
 
 - [ ] `INPUT-004` — Реестр инструментов и политика capabilities.
+- [ ] `TOOL-001` — Адаптер выполнения SSH.
+- [ ] `TOOL-002` — Адаптер WinRM PowerShell.
+- [ ] `TOOL-003` — Адаптер HTTP/HTTPS запросов.
+- [ ] `TOOL-004` — Адаптер TCP connectivity.
+- [ ] `TOOL-005` — Адаптер SNMP.
 - [~] `INPUT-005` — Детерминированный preflight и `AuditPlan`.
 
 Частичные доказательства:
@@ -165,18 +169,7 @@ execution integration, а не к validated inventory domain model.
 
 - интеграция YAML/JSON inventory execution за пределами validated domain model;
 - независимая приёмка production discovery (не помечать `[x]` автоматически);
-- production-safe Windows/WinRM discovery — в `WIN-001`.
-
-- [ ] `WIN-001` — Завершить приёмку production-safe Windows/WinRM discovery.
-
-Объём приёмки:
-
-- заменить `Win32_Product`;
-- использовать structured PowerShell JSON output;
-- парсить `LocalPort` без загрязнения PID;
-- включать TLS certificate validation по умолчанию;
-- добавить реальные Windows/WinRM integration tests;
-- держать WinRM experimental / opt-in до приёмки.
+- отдельные tool-адаптеры — в `TOOL-001`…`TOOL-005`.
 
 ### M3 — Оркестрация LangGraph и сбор доказательств
 
@@ -257,7 +250,7 @@ execution integration, а не к validated inventory domain model.
 
 - `INPUT-005`: завершить YAML/JSON execution integration и независимую приёмку
   production discovery.
-- `WIN-001`: production-safe Windows/WinRM discovery acceptance.
+- `TOOL-001`…`TOOL-005`: отдельные адаптеры SSH / WinRM / HTTP / TCP / SNMP.
 - `AGENT-001` / `INPUT-002`: администраторские агенты и строгая валидация
   фреймворков.
 - `FLOW-007`: удалить deprecated process-wide graph getters после независимой

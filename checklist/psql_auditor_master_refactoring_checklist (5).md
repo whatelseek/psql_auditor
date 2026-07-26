@@ -5,16 +5,16 @@ Date: **2026-07-26**
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
 Latest independently reviewed revision: [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8)  
-Total tasks: **73**
+Total tasks: **77**
 
 ## Status summary
 
 | Status | Count |
 | --- | ---: |
-| Complete `[x]` | **10 / 73 (13.7%)** |
-| Partially complete `[~]` | **5 / 73 (6.8%)** |
-| Open `[ ]` | **58 / 73 (79.5%)** |
-| Not fully complete | **63 / 73 (86.3%)** |
+| Complete `[x]` | **10 / 77 (13.0%)** |
+| Partially complete `[~]` | **5 / 77 (6.5%)** |
+| Open `[ ]` | **62 / 77 (80.5%)** |
+| Not fully complete | **67 / 77 (87.0%)** |
 
 Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `INPUT-001`, `INPUT-003`.
 
@@ -27,19 +27,19 @@ review of the inventory-driven launch path accepted `INPUT-001` and
 `INPUT-003` at
 [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8).
 `INPUT-005` remains `[~]`. `INPUT-002` remains `[ ]` (Markdown framework
-registry candidate on PR #37). `WIN-001` is a new open backlog item for
-production-safe Windows/WinRM discovery acceptance. Checklist acceptance
-statuses are not changed automatically by green CI.
+registry candidate on PR #37). Tool adapters `TOOL-001`…`TOOL-005` are open
+backlog items. Checklist acceptance statuses are not changed automatically by
+green CI.
 
 | Check | Verified result |
 | --- | --- |
-| Format | Passed |
-| Lint | Passed |
-| Type check | Passed, 89 files |
-| Unit tests | 456 passed |
-| Integration tests | 8 passed |
-| Full suite | 464 passed |
-| Defect map | `validate-defect-map: OK` (73/73) |
+| Format | Pending local re-verification |
+| Lint | Pending local re-verification |
+| Type check | Pending local re-verification |
+| Unit tests | Pending local re-verification |
+| Integration tests | Pending local re-verification |
+| Full suite | Pending local re-verification |
+| Defect map | Target `validate-defect-map: OK` (77/77) |
 | Prior clean CI (PR #36 merge base) | See Actions after PR #36 merge |
 | Prior clean CI (PR #35 review base) | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), all jobs passed |
 
@@ -72,7 +72,7 @@ statuses are not changed automatically by green CI.
 
 Closure evidence:
 
-- defect-to-module map covers all 73 checklist IDs and is enforced in CI;
+- defect-to-module map covers all 77 checklist IDs and is enforced in CI;
 - canonical local and CI targets include format, lint, typecheck, unit, integration and full-suite tests;
 - deterministic shared fixtures and fake LLM scenarios are reused across regression tests;
 - mandatory tests block unintended external HTTP/LLM access.
@@ -140,6 +140,11 @@ The incomplete YAML/JSON execution path does not block `INPUT-003`; it belongs t
 execution integration rather than the validated inventory domain model.
 
 - [ ] `INPUT-004` — Introduce a tool registry and capability policy.
+- [ ] `TOOL-001` — SSH execution adapter.
+- [ ] `TOOL-002` — WinRM PowerShell adapter.
+- [ ] `TOOL-003` — HTTP/HTTPS request adapter.
+- [ ] `TOOL-004` — TCP connectivity adapter.
+- [ ] `TOOL-005` — SNMP adapter.
 - [~] `INPUT-005` — Implement deterministic preflight and `AuditPlan`.
 
 Partial evidence:
@@ -172,18 +177,7 @@ Remaining work:
 - YAML/JSON inventory execution integration beyond the validated domain model;
 - independent acceptance review for production discovery (do not mark `[x]`
   automatically);
-- production-safe Windows/WinRM discovery acceptance tracked under `WIN-001`.
-
-- [ ] `WIN-001` — Complete production-safe Windows/WinRM discovery acceptance.
-
-Acceptance scope:
-
-- replace `Win32_Product`;
-- use structured PowerShell JSON output;
-- parse `LocalPort` without PID contamination;
-- enable TLS certificate validation by default;
-- add real Windows/WinRM integration tests;
-- keep WinRM experimental or opt-in until acceptance.
+- dedicated tool adapters tracked under `TOOL-001`…`TOOL-005`.
 
 ### M3 — LangGraph orchestration and evidence collection
 
@@ -264,7 +258,7 @@ Acceptance scope:
 
 - `INPUT-005`: complete YAML/JSON execution integration and independent
   acceptance of production discovery.
-- `WIN-001`: production-safe Windows/WinRM discovery acceptance.
+- `TOOL-001`…`TOOL-005`: dedicated SSH / WinRM / HTTP / TCP / SNMP adapters.
 - `AGENT-001` / `INPUT-002`: administrator-managed agent authoring with strict
   framework validation.
 - `FLOW-007`: remove deprecated process-wide graph getters after independent review.

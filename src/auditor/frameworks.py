@@ -29,7 +29,7 @@ from typing import Any
 
 import yaml
 
-from auditor.checklist import Checklist, parse_checklist_markdown
+from auditor.checklist import Checklist
 from auditor.language import detect_report_language
 
 _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n(.*)\Z", re.DOTALL)
@@ -627,29 +627,22 @@ def prefer_framework_ids(
 def load_framework_checklist(framework: Framework) -> Checklist:
     """Load checklist body for an **executable** framework only.
 
-    Uses the Markdown registry so requirement blocks include content hashes and
-    extended metadata. Non-executable frameworks raise
+    Always goes through :class:`~auditor.framework_registry.FrameworkRegistry`
+    validation. There is no unvalidated ad-hoc parse path. Unknown or invalid
+    frameworks raise
     :class:`~auditor.framework_registry.FrameworkNotExecutable`.
 
     Args:
-        framework: Discovered framework whose :attr:`~Framework.path` is read.
+        framework: Discovered framework whose id is resolved in
+            ``framework.path.parent``.
 
     Returns:
         Parsed :class:`Checklist` with requirements in document order.
     """
-    from auditor.framework_registry import FrameworkNotExecutable, load_framework_registry
+    from auditor.framework_registry import load_framework_registry
 
     registry = load_framework_registry(framework.path.parent)
-    entry = registry.get(framework.id)
-    if entry is None:
-        # Fallback for ad-hoc paths outside a registry scan.
-        text = framework.path.read_text(encoding="utf-8")
-        match = _FRONTMATTER.match(text)
-        body = match.group(2) if match else text
-        return parse_checklist_markdown(body, source_path=str(framework.path))
-    if not entry.executable:
-        raise FrameworkNotExecutable(framework.id, entry.issues)
-    return entry.to_checklist()
+    return registry.require_executable(framework.id).to_checklist()
 
 
 def frameworks_catalog_text(agents_dir: Path | str | None = None) -> str:
@@ -678,10 +671,20 @@ def get_requirement_prompt_block(
     requirement_id: str,
     agents_dir: Path | str | None = None,
 ) -> str:
-    """Return full text for the currently assessed requirement only."""
+    """Return full text for the currently assessed requirement only.
+
+    Fail-closed: the framework must be present and **executable**. Unknown or
+    invalid frameworks raise
+    :class:`~auditor.framework_registry.FrameworkNotExecutable` and never
+    return requirement text from a non-executable framework.
+
+    Returns an empty string only when the executable framework has no matching
+    requirement id.
+    """
     from auditor.framework_registry import load_framework_registry
 
-    req = load_framework_registry(agents_dir).get_requirement(framework_id, requirement_id)
+    entry = load_framework_registry(agents_dir).require_executable(framework_id)
+    req = entry.get_requirement(requirement_id)
     if req is None:
         return ""
     return req.to_prompt_block()

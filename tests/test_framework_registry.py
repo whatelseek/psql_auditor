@@ -363,3 +363,95 @@ def test_bundled_agents_remain_executable() -> None:
     # Bundled agents keep explicit frontmatter versions where authored.
     assert executable["postgres_cis"].version == "1.0"
     assert executable["windows_server"].version
+
+
+def test_invalid_framework_prompt_retrieval_fail_closed(tmp_path: Path) -> None:
+    body = """# Invalid But Parseable
+
+## REQ-001: Leaky control
+**Category:** Demo
+**Severity:** Low
+**How to verify:**
+**Pass criteria:**
+**Recommendation:** NEVER-LEAK-FROM-INVALID-FRAMEWORK
+"""
+    _write_fw(
+        tmp_path,
+        "bad.md",
+        frontmatter='id: bad_fw\nversion: "1.0"\ndomain: cybersecurity\n',
+        body=body,
+    )
+    with pytest.raises(FrameworkNotExecutable):
+        get_requirement_prompt_block("bad_fw", "REQ-001", tmp_path)
+
+
+def test_unknown_framework_prompt_retrieval_fail_closed(tmp_path: Path) -> None:
+    _write_fw(
+        tmp_path,
+        "good.md",
+        frontmatter='id: good\nversion: "1.0"\ndomain: cybersecurity\n',
+        body=_VALID_BODY,
+    )
+    with pytest.raises(FrameworkNotExecutable) as exc_info:
+        get_requirement_prompt_block("missing_fw", "REQ-001", tmp_path)
+    assert "missing_fw" in str(exc_info.value)
+
+
+def test_adhoc_path_cannot_bypass_registry_validation(tmp_path: Path) -> None:
+    """Production checklist load must never skip FrameworkRegistry validation."""
+    from auditor.frameworks import Framework
+
+    path = _write_fw(
+        tmp_path,
+        "real.md",
+        frontmatter='id: real\nversion: "1.0"\ndomain: cybersecurity\n',
+        body=_VALID_BODY,
+    )
+    # Valid file on disk, but the Framework id is unknown to the registry.
+    forged = Framework(
+        id="not_registered",
+        title="Forged",
+        path=path,
+        version="1.0",
+        description="bypass attempt",
+    )
+    with pytest.raises(FrameworkNotExecutable):
+        load_framework_checklist(forged)
+
+
+def test_tool_adapter_checklist_and_defect_map_coverage() -> None:
+    """TOOL-001…TOOL-005 must appear in both EN/RU checklists and the defect map."""
+    import importlib.util
+    import re
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    script = root / "scripts" / "validate_defect_map.py"
+    spec = importlib.util.spec_from_file_location("validate_defect_map_tools", script)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    en = (root / "checklist" / "psql_auditor_master_refactoring_checklist (5).md").read_text(
+        encoding="utf-8"
+    )
+    ru = (root / "checklist" / "psql_auditor_master_refactoring_checklist_ru.md").read_text(
+        encoding="utf-8"
+    )
+    defect_map = (root / "docs" / "defect-module-map.md").read_text(encoding="utf-8")
+    wanted = [f"TOOL-{i:03d}" for i in range(1, 6)]
+    en_ids = set(mod.extract_checklist_ids(en))
+    ru_ids = set(mod.extract_checklist_ids(ru))
+    mapped = {row.defect_id for row in mod.parse_defect_map(defect_map)}
+    for tool_id in wanted:
+        assert tool_id in en_ids
+        assert tool_id in ru_ids
+        assert tool_id in mapped
+        assert re.search(rf"^- \[ \] `{tool_id}`", en, re.MULTILINE)
+        assert re.search(rf"^- \[ \] `{tool_id}`", ru, re.MULTILINE)
+    assert "WIN-001" not in en_ids
+    assert "WIN-001" not in ru_ids
+    assert "WIN-001" not in mapped
+    assert len(en_ids) == 77
+    assert len(ru_ids) == 77
