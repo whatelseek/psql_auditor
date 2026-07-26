@@ -42,7 +42,8 @@ PlanAction = Literal[
 class AuditPlanTarget(BaseModel):
     """One host/service audit scope entry."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    # Not strict: JSON persistence round-trips lists into tuple fields.
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     target_id: StrictStr = Field(min_length=1)
     host_id: StrictStr = Field(min_length=1)
@@ -58,7 +59,7 @@ class AuditPlanTarget(BaseModel):
 class AuditPlanSummary(BaseModel):
     """Operator-facing counts for confirmation."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     total_hosts: StrictInt
     linux_hosts: StrictInt = 0
@@ -80,7 +81,8 @@ class AuditPlanSummary(BaseModel):
 class AuditPlan(BaseModel):
     """Proposed audit scope awaiting operator confirmation."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    # Not strict: JSON persistence round-trips lists into tuple fields.
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     plan_id: StrictStr = Field(min_length=1)
     client_id: StrictStr = Field(min_length=1)
@@ -112,7 +114,7 @@ class AuditPlan(BaseModel):
 class PlanConfirmationRequest(BaseModel):
     """Operator decision against a draft audit plan."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     action: PlanAction
     host_ids: tuple[StrictStr, ...] = ()

@@ -47,7 +47,7 @@ SUPPORTED_INVENTORY_FORMATS = frozenset({"markdown", "yaml", "json"})
 class InventoryFact(BaseModel):
     """One provenance-bearing fact about a host, service, or client."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     host_id: StrictStr | None = None
     fact: StrictStr = Field(min_length=1)
@@ -67,7 +67,7 @@ class InventoryFact(BaseModel):
 class CredentialReference(BaseModel):
     """Secret-free credential pointer (never stores plaintext secrets)."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     access: ConnectionType
     host: StrictStr = Field(min_length=1)
@@ -82,7 +82,7 @@ class CredentialReference(BaseModel):
 class InventoryService(BaseModel):
     """Declared or detected service on a host."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: StrictStr = Field(min_length=1)
     port: int | None = None
@@ -95,7 +95,7 @@ class InventoryService(BaseModel):
 class InventoryHost(BaseModel):
     """One normalized host asset from client inventory."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     host_id: StrictStr = Field(min_length=1)
     hostname: StrictStr = ""
@@ -121,7 +121,7 @@ class InventoryHost(BaseModel):
 class ValidationIssue(BaseModel):
     """Inventory validation finding classified by severity."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     level: ValidationLevel
     code: StrictStr = Field(min_length=1)
@@ -133,7 +133,7 @@ class ValidationIssue(BaseModel):
 class InventoryVersion(BaseModel):
     """Immutable inventory snapshot identity for audit reproducibility."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     version_id: StrictStr = Field(min_length=1)
     content_hash: StrictStr = Field(min_length=1)
@@ -145,7 +145,8 @@ class InventoryVersion(BaseModel):
 class ClientInventory(BaseModel):
     """Normalized client inventory document (INPUT-003)."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    # Not strict: JSON persistence round-trips lists into tuple fields.
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     client_id: StrictStr = Field(min_length=1)
     hosts: tuple[InventoryHost, ...] = ()
@@ -185,7 +186,7 @@ class ClientInventory(BaseModel):
 class TechnologyDetection(BaseModel):
     """Technology detection result with confidence and status."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     technology_id: StrictStr = Field(min_length=1)
     target_id: StrictStr = Field(min_length=1)
@@ -198,7 +199,7 @@ class TechnologyDetection(BaseModel):
 class FrameworkSelectionDecision(BaseModel):
     """Why a framework was selected or rejected for a target."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     framework_id: StrictStr = Field(min_length=1)
     framework_version: StrictStr = ""

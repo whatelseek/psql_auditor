@@ -261,3 +261,18 @@ def test_plan_generation_idempotent(tmp_path: Path):
     _i2, p2 = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
     assert p1.plan_id == p2.plan_id
     assert p1.inventory_content_hash == p2.inventory_content_hash
+
+
+def test_plan_json_roundtrip(tmp_path: Path):
+    from auditor.inventory.plan import load_plan, persist_plan
+
+    root = _copy_client(tmp_path, fmt="md")
+    _inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    path = tmp_path / "plan.json"
+    persist_plan(plan, path)
+    loaded = load_plan(path)
+    assert loaded.plan_id == plan.plan_id
+    assert loaded.summary.total_hosts == 5
+    assert len(loaded.targets) == len(plan.targets)
+    confirmed = confirm_audit_plan(loaded, action="approve")
+    assert confirmed.is_executable()
