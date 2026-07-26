@@ -215,27 +215,28 @@ def test_attach_reuses_existing_result_id():
     existing = {
         "result_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         "client_id": "acme",
-        "audit_run_id": "arun_x",
-        "asset_id": "asset_1",
+        "audit_run_id": "arun_deadbeefcafebabe",
+        "asset_id": "aaaaaaaa-1111-4111-8111-111111111111",
         "framework_id": "postgres_cis",
         "framework_version": "1.0",
         "requirement_id": "REQ-001",
         "status": "fail",
     }
     finding = Finding(requirement_id="REQ-001", status="pass")
-    attach_result_identity(
+    bound = attach_result_identity(
         finding,
         state={
             "client_id": "acme",
-            "audit_run_id": "arun_x",
-            "asset_id": "asset_1",
+            "audit_run_id": "arun_deadbeefcafebabe",
+            "asset_id": "aaaaaaaa-1111-4111-8111-111111111111",
             "framework_version": "1.0",
         },
         framework_id="postgres_cis",
         framework_version="1.0",
         existing=existing,
     )
-    assert finding.result_id == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    assert bound.result_id == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    assert bound.asset_id == "aaaaaaaa-1111-4111-8111-111111111111"
 
 
 def test_agents_declare_framework_version():

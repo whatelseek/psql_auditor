@@ -1583,8 +1583,16 @@ class ResultsStore:
         Enforces CORE-003 identity at the application boundary before write.
         Same ``result_id`` + same logical key may update content; conflicts raise.
         """
-        validate_result_identity(finding, for_persist=True)
-        key = logical_key_of(finding)
+        from auditor.domain.assessment_result import AssessmentResult
+
+        result = (
+            finding
+            if isinstance(finding, AssessmentResult)
+            else AssessmentResult.from_finding(finding)
+        )
+        validate_result_identity(result, for_persist=True)
+        finding = result.to_finding()
+        key = logical_key_of(result)
         existing_by_id = await conn.fetchrow(
             """
             SELECT result_id, client_id, audit_run_id, asset_id,

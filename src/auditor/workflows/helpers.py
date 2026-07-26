@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any
 
+from auditor.domain.assessment_result import AssessmentResult
 from auditor.state import AuditorState, Finding
 
 # Tight markers only — bare "session" / "timeout" / "eof" caused false reconnects.
@@ -58,17 +59,31 @@ def _normalize_status(value: str | None) -> str:
     return status if status in allowed else "error"
 
 
-def _is_recoverable_finding(finding: Finding) -> bool:
+def _is_recoverable_finding(finding: Finding | AssessmentResult) -> bool:
     """True when a finding looks like a dead session / transport failure."""
     if finding.status != "error":
         return False
-    blob = f"{finding.evidence} {finding.notes}".lower()
+    if isinstance(finding, AssessmentResult):
+        blob = f"{finding.observation} {finding.notes}".lower()
+    else:
+        blob = f"{finding.evidence} {finding.notes}".lower()
     return any(marker in blob for marker in _RECOVERABLE_MARKERS)
 
 
-def _as_finding(value: Finding | dict[str, Any]) -> Finding:
-    """Coerce graph state finding values to a ``Finding`` model."""
-    return value if isinstance(value, Finding) else Finding.model_validate(value)
+def _as_finding(value: Finding | AssessmentResult | dict[str, Any]) -> Finding:
+    """Coerce graph state values to a report ``Finding`` (adapter)."""
+    if isinstance(value, Finding):
+        return value
+    if isinstance(value, AssessmentResult):
+        return value.to_finding()
+    return AssessmentResult.from_finding(value).to_finding()
+
+
+def _as_assessment(value: Finding | AssessmentResult | dict[str, Any]) -> AssessmentResult:
+    """Coerce graph state values to canonical AssessmentResult."""
+    if isinstance(value, AssessmentResult):
+        return value
+    return AssessmentResult.from_finding(value)
 
 
 def _hitl_candidates(state: AuditorState) -> list[str]:

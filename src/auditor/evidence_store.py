@@ -633,18 +633,27 @@ class EvidenceStore:
         req_id: str,
         finding: dict[str, Any],
     ) -> Path:
-        """Write the filled finding cells for the requirement.
+        """Write a per-requirement result JSON to disk.
 
-        Requires ``audit_run_id`` and ``client_id`` on the payload (CORE-001).
+        Checklist assessment payloads (supported :class:`AssessmentStatus`
+        values) are validated into :class:`~auditor.domain.AssessmentResult`
+        (CORE-004) and persisted with canonical ``observation`` /
+        ``recommendation`` field names. Non-assessment records (for example
+        ad-hoc ``executed`` playbook outcomes) are stored after CORE-001
+        ``client_id`` / ``audit_run_id`` checks only.
 
         Args:
             framework_id: Evidence framework key.
             req_id: Requirement id.
-            finding: Status, observation, recommendation, and identity metadata.
+            finding: Status, observation/recommendation, and identity metadata.
 
         Returns:
             Path to ``finding.json``.
         """
+        from auditor.domain.assessment_result import (
+            SUPPORTED_ASSESSMENT_STATUSES,
+            AssessmentResult,
+        )
         from auditor.legacy_compat import require_audit_run_id, require_client_id
 
         if not isinstance(finding, dict):
@@ -657,9 +666,16 @@ class EvidenceStore:
             str(finding.get("client_id") or ""),
             context="EvidenceStore.write_finding",
         )
+        status = str(finding.get("status") or "").strip().lower()
+        if status in SUPPORTED_ASSESSMENT_STATUSES:
+            result = AssessmentResult.from_persist_dict(finding)
+            result.ensure_persistable()
+            payload = result.to_persist_dict()
+        else:
+            payload = dict(finding)
         path = self.requirement_dir(framework_id, req_id) / "finding.json"
         path.write_text(
-            json.dumps(finding, indent=2, ensure_ascii=False) + "\n",
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
         return path

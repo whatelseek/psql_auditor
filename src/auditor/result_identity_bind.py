@@ -1,9 +1,10 @@
-"""Bind CORE-003 identity onto Finding records during assessment."""
+"""Bind CORE-003 identity onto AssessmentResult records during assessment."""
 
 from __future__ import annotations
 
 from typing import Any, Mapping
 
+from auditor.domain.assessment_result import AssessmentResult, ResultIdentity
 from auditor.domain.result_identity import (
     IncompleteResultIdentityError,
     new_result_id,
@@ -51,41 +52,68 @@ def identity_from_state(
 
 
 def attach_result_identity(
-    finding: Finding,
+    finding: Finding | AssessmentResult,
     *,
     state: Mapping[str, Any] | None = None,
     framework_id: str = "",
     framework_version: str = "",
-    existing: Finding | Mapping[str, Any] | None = None,
+    existing: Finding | AssessmentResult | Mapping[str, Any] | None = None,
     require_complete: bool = False,
-) -> Finding:
+) -> AssessmentResult:
     """Ensure ``finding`` carries result_id + logical key fields.
 
     Reuses ``result_id`` from ``existing`` when the logical key matches so
     assessment → validation → reporting keep the same physical identity.
+    Returns :class:`AssessmentResult` (converts legacy Finding when needed).
     """
-    dims = identity_from_state(
-        state,
-        framework_id=framework_id or finding.framework_id,
-        framework_version=framework_version or finding.framework_version,
-        requirement_id=finding.requirement_id,
-    )
-    # Prefer already-set fields on the finding over empty state dims.
-    if finding.client_id:
-        dims["client_id"] = finding.client_id
-    if finding.audit_run_id:
-        dims["audit_run_id"] = finding.audit_run_id
-    if finding.asset_id:
-        dims["asset_id"] = finding.asset_id
-    if finding.framework_id:
-        dims["framework_id"] = finding.framework_id
-    if finding.framework_version:
-        dims["framework_version"] = finding.framework_version
-
     reused_id = ""
     if existing is not None:
-        if isinstance(existing, Finding):
+        if isinstance(existing, AssessmentResult):
             reused_id = existing.result_id
+        elif isinstance(existing, Finding):
+            reused_id = existing.result_id
+        elif isinstance(existing, Mapping):
+            reused_id = str(existing.get("result_id") or "")
+
+    if isinstance(finding, AssessmentResult):
+        result = finding
+    else:
+        # Preserve empty result_id so we can reuse ``existing`` before generating.
+        seed = finding
+        if isinstance(finding, Finding) and not finding.result_id and reused_id:
+            seed = finding.model_copy(update={"result_id": reused_id})
+        result = AssessmentResult.from_finding(seed)
+
+    dims = identity_from_state(
+        state,
+        framework_id=framework_id or result.framework_id,
+        framework_version=framework_version or result.framework_version,
+        requirement_id=result.requirement_id,
+    )
+    # Prefer already-set fields on the result over empty state dims.
+    if result.client_id:
+        dims["client_id"] = result.client_id
+    if result.audit_run_id:
+        dims["audit_run_id"] = result.audit_run_id
+    if result.asset_id:
+        dims["asset_id"] = result.asset_id
+    if result.framework_id:
+        dims["framework_id"] = result.framework_id
+    if result.framework_version:
+        dims["framework_version"] = result.framework_version
+
+    if existing is not None:
+        if isinstance(existing, AssessmentResult):
+            for key in (
+                "client_id",
+                "audit_run_id",
+                "asset_id",
+                "framework_id",
+                "framework_version",
+            ):
+                if not dims.get(key):
+                    dims[key] = str(getattr(existing, key) or "")
+        elif isinstance(existing, Finding):
             for key in (
                 "client_id",
                 "audit_run_id",
@@ -96,7 +124,6 @@ def attach_result_identity(
                 if not dims.get(key):
                     dims[key] = str(getattr(existing, key) or "")
         elif isinstance(existing, Mapping):
-            reused_id = str(existing.get("result_id") or "")
             for key in (
                 "client_id",
                 "audit_run_id",
@@ -107,30 +134,32 @@ def attach_result_identity(
                 if not dims.get(key):
                     dims[key] = str(existing.get(key) or "")
 
-    finding.client_id = dims["client_id"]
-    finding.audit_run_id = dims["audit_run_id"]
-    finding.asset_id = dims["asset_id"]
-    finding.framework_id = dims["framework_id"]
-    finding.framework_version = dims["framework_version"]
-    if finding.result_id:
-        pass
-    elif reused_id:
-        finding.result_id = reused_id
-    else:
-        finding.result_id = new_result_id()
-
+    rid = reused_id or result.result_id or new_result_id()
+    identity = ResultIdentity(
+        result_id=rid,
+        client_id=dims["client_id"],
+        audit_run_id=dims["audit_run_id"],
+        asset_id=dims["asset_id"],
+        framework_id=dims["framework_id"],
+        framework_version=dims["framework_version"],
+        requirement_id=result.requirement_id or dims["requirement_id"],
+    )
+    bound = result.model_copy(update={"identity": identity})
     if require_complete:
-        validate_result_identity(finding, for_persist=True)
-    return finding
+        validate_result_identity(bound, for_persist=True)
+    return bound
 
 
-def require_persistable(finding: Finding) -> Finding:
+def require_persistable(finding: Finding | AssessmentResult) -> AssessmentResult:
     """Validate identity before disk/warehouse write; raise on gaps."""
-    if not finding.framework_version:
+    result = (
+        finding if isinstance(finding, AssessmentResult) else AssessmentResult.from_finding(finding)
+    )
+    if not result.framework_version:
         raise IncompleteResultIdentityError(
             "framework_version is mandatory before a result can be persisted "
-            f"(requirement_id={finding.requirement_id!r}, "
-            f"framework_id={finding.framework_id!r})"
+            f"(requirement_id={result.requirement_id!r}, "
+            f"framework_id={result.framework_id!r})"
         )
-    validate_result_identity(finding, for_persist=True)
-    return finding
+    validate_result_identity(result, for_persist=True)
+    return result

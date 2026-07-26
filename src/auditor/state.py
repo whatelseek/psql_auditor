@@ -1,13 +1,13 @@
 """LangGraph state schema and fixed-format audit report helpers.
 
 Defines the shared :class:`AuditorState` TypedDict consumed by every node in the
-audit graph, plus :class:`Finding` records and :func:`render_report` for the
-final Markdown deliverable.
+audit graph. Canonical assessment data is :class:`~auditor.domain.AssessmentResult`
+(CORE-004). :class:`Finding` remains as a **report adapter** that maps
+``observation``→``evidence`` and ``recommendation``→``remediation`` for Markdown
+output only — it is not a second competing workflow result model.
 
-The report skeleton is generated from the checklist (fixed cells). The model
-only fills ``status``, ``observation`` (stored as ``evidence``), and
-``recommendation`` (stored as ``remediation``). Category, severity, title, and
-pass criteria always come from the Markdown checklist — never from the LLM.
+Category, severity, title, and pass criteria always come from the Markdown
+checklist — never from the LLM.
 
 Used after each requirement assessment (findings merge) and at finalize time
 when the graph writes ``state["report"]``.
@@ -15,6 +15,7 @@ when the graph writes ``state["report"]``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.messages import BaseMessage
@@ -22,6 +23,7 @@ from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
 from auditor.checklist import Requirement
+from auditor.domain.assessment_result import AssessmentResult
 from auditor.domain.result_identity import (
     finding_for_requirement,
     merge_result_maps,
@@ -44,7 +46,12 @@ FindingStatus = Literal[
 
 
 class Finding(BaseModel):
-    """Filled cells for one checklist requirement (canonical result identity).
+    """Report adapter over :class:`~auditor.domain.AssessmentResult` (CORE-004).
+
+    Prefer constructing :class:`AssessmentResult` in workflow/persistence paths
+    and calling :meth:`AssessmentResult.to_finding` for Markdown rendering.
+    Legacy field names ``evidence`` / ``remediation`` are report-column labels
+    for ``observation`` / ``recommendation`` — not indefinite bidirectional aliases.
 
     Attributes:
         result_id: Stable UUID for this result (physical identity).
@@ -54,8 +61,8 @@ class Finding(BaseModel):
             framework version — never a global result key.
         title / severity / category: Copied from the checklist (fixed).
         status: Model-filled status cell.
-        evidence: Model-filled **observation** cell (factual).
-        remediation: Model-filled **recommendation** cell.
+        evidence: Report column for observation (from AssessmentResult.observation).
+        remediation: Report column for recommendation.
         notes: Optional extra notes (usually unused in fixed format).
         pass_criteria: Copied from checklist for the fixed report column.
     """
@@ -78,30 +85,39 @@ class Finding(BaseModel):
     framework_version: str = ""
 
 
+def _coerce_assessment(raw: Any) -> AssessmentResult:
+    """Normalize Finding / dict / AssessmentResult to AssessmentResult."""
+    if isinstance(raw, AssessmentResult):
+        return raw
+    if isinstance(raw, Finding):
+        return AssessmentResult.from_finding(raw)
+    return AssessmentResult.from_finding(raw)
+
+
 def merge_findings(
-    left: dict[str, Finding] | None,
-    right: dict[str, Finding] | None,
-) -> dict[str, Finding]:
-    """LangGraph reducer: merge findings keyed by ``result_id``.
+    left: dict[str, Finding | AssessmentResult] | None,
+    right: dict[str, Finding | AssessmentResult] | None,
+) -> dict[str, AssessmentResult]:
+    """LangGraph reducer: merge assessment results keyed by ``result_id``.
 
-    Rejects duplicate ``result_id`` with conflicting logical keys and
-    duplicate logical keys with different ``result_id`` values. Same
-    ``result_id`` + same logical key allows content updates (correction /
-    external validation).
-
-    Args:
-        left: Existing findings map keyed by ``result_id``.
-        right: New or updated findings keyed by ``result_id``.
-
-    Returns:
-        Combined dict keyed by ``result_id``.
+    Accepts legacy :class:`Finding` values and coerces them to
+    :class:`AssessmentResult`. Rejects duplicate ``result_id`` with conflicting
+    logical keys and duplicate logical keys with different ``result_id`` values.
+    Same ``result_id`` + same logical key allows content updates (correction /
+    external validation) without changing identity.
     """
-    merged = merge_result_maps(left, right)
-    out: dict[str, Finding] = {}
+    left_norm = {k: _coerce_assessment(v) for k, v in (left or {}).items()}
+    right_norm = {k: _coerce_assessment(v) for k, v in (right or {}).items()}
+    merged = merge_result_maps(left_norm, right_norm)
+    out: dict[str, AssessmentResult] = {}
     for rid, raw in merged.items():
-        out[rid] = raw if isinstance(raw, Finding) else Finding.model_validate(raw)
-        if result_id_of(out[rid]) != rid:
-            out[rid].result_id = rid
+        result = _coerce_assessment(raw)
+        if result_id_of(result) != rid:
+            # Rebuild with corrected physical id only when map key disagrees
+            # (should be rare); logical dimensions stay intact.
+            ident = result.identity.model_copy(update={"result_id": rid})
+            result = result.model_copy(update={"identity": ident})
+        out[rid] = result
     return out
 
 
@@ -119,7 +135,7 @@ class AuditorState(TypedDict, total=False):
         framework_id / framework_title / checklist_title: Active framework metadata.
         requirements: Parsed checklist map keyed by ``REQ-NNN``.
         pending_ids / current_id: Assessment queue cursor.
-        findings: Model-filled cells keyed by ``result_id`` (not requirement_id).
+        findings: AssessmentResult map keyed by ``result_id`` (not requirement_id).
         report: Final Markdown report string.
         evidence_run_id / evidence_run_dir: On-disk artifact paths.
         intake / intake_complete: Pre-audit questionnaire answers.
@@ -139,7 +155,7 @@ class AuditorState(TypedDict, total=False):
     requirements: dict[str, Requirement]
     pending_ids: list[str]
     current_id: str | None
-    findings: Annotated[dict[str, Finding], merge_findings]
+    findings: Annotated[dict[str, AssessmentResult], merge_findings]
     report: str
     error: str | None
     # Cyclic reconnect loop: how many session restores have been attempted.
@@ -175,18 +191,12 @@ class AuditorState(TypedDict, total=False):
     thread_id: str
 
 
-def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:
-    """Count findings by status for the report summary line.
+def aggregate_findings(
+    findings: dict[str, Finding | AssessmentResult] | Mapping[str, Any],
+) -> dict[str, int]:
+    """Count assessment results by status for the report summary line."""
+    from collections.abc import Mapping as MappingABC
 
-    Accepts either :class:`Finding` instances or dict-like objects with a
-    ``status`` key (for deserialized state).
-
-    Args:
-        findings: Map of ``result_id`` (or any key) → finding record.
-
-    Returns:
-        Dict with keys for every :data:`FindingStatus` value (plus any unknown).
-    """
     counts: dict[str, int] = {
         "pass": 0,
         "fail": 0,
@@ -198,7 +208,12 @@ def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:
         "accepted_exception": 0,
     }
     for finding in findings.values():
-        status = finding.status if isinstance(finding, Finding) else finding["status"]
+        if isinstance(finding, (Finding, AssessmentResult)):
+            status = finding.status
+        elif isinstance(finding, MappingABC):
+            status = finding["status"]
+        else:
+            status = getattr(finding, "status", "error")
         counts[status] = counts.get(status, 0) + 1
     return counts
 
@@ -220,7 +235,7 @@ def _md_escape_cell(text: str) -> str:
 
 def render_report(
     checklist_title: str,
-    findings: dict[str, Finding],
+    findings: Mapping[str, Finding | AssessmentResult],
     requirements: dict[str, Requirement] | None = None,
     *,
     language: str | ReportLanguage | None = None,
@@ -246,7 +261,11 @@ def render_report(
     else:
         order = sorted(
             {
-                (f.requirement_id if isinstance(f, Finding) else str(f.get("requirement_id") or ""))
+                (
+                    f.requirement_id
+                    if isinstance(f, (Finding, AssessmentResult))
+                    else str(f.get("requirement_id") or "")
+                )
                 for f in findings.values()
             }
         )
@@ -256,9 +275,12 @@ def render_report(
     for req_id in order:
         matched = finding_for_requirement(findings, req_id)
         if matched is not None:
-            effective[req_id] = (
-                matched if isinstance(matched, Finding) else Finding.model_validate(matched)
-            )
+            if isinstance(matched, Finding):
+                effective[req_id] = matched
+            elif isinstance(matched, AssessmentResult):
+                effective[req_id] = matched.to_finding()
+            else:
+                effective[req_id] = AssessmentResult.from_finding(matched).to_finding()
         elif requirements and req_id in requirements:
             req = requirements[req_id]
             effective[req_id] = Finding(

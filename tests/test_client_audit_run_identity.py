@@ -193,12 +193,22 @@ def test_results_isolated_across_runs(tmp_path: Path):
         "client_id": client.client_id,
         "audit_run_id": a.audit_run_id,
         "requirement_id": "REQ-001",
+        "result_id": "11111111-1111-4111-8111-111111111111",
+        "asset_id": "aaaaaaaa-1111-4111-8111-111111111111",
+        "framework_id": "fw1",
+        "framework_version": "1.0.0",
+        "observation": "pass observation",
     }
     payload_b = {
         "status": "fail",
         "client_id": client.client_id,
         "audit_run_id": b.audit_run_id,
         "requirement_id": "REQ-001",
+        "result_id": "22222222-2222-4222-8222-222222222222",
+        "asset_id": "aaaaaaaa-1111-4111-8111-111111111111",
+        "framework_id": "fw1",
+        "framework_version": "1.0.0",
+        "observation": "fail observation",
     }
     sa.write_finding("fw1", "REQ-001", payload_a)
     sb.write_finding("fw1", "REQ-001", payload_b)
@@ -246,6 +256,14 @@ async def test_concurrent_runs_cannot_cross_read_jobs(tmp_path: Path):
                 "status": status,
                 "client_id": client.client_id,
                 "audit_run_id": arun,
+                "requirement_id": "REQ-001",
+                "result_id": "33333333-3333-4333-8333-333333333333"
+                if status == "pass"
+                else "44444444-4444-4444-8444-444444444444",
+                "asset_id": "aaaaaaaa-1111-4111-8111-111111111111",
+                "framework_id": "fw1",
+                "framework_version": "1.0.0",
+                "observation": status,
             },
         )
 
@@ -472,6 +490,11 @@ def test_evidence_insert_update_targets_exact_run(tmp_path: Path):
             "client_id": CLIENT_ALPHA_ID,
             "audit_run_id": RUN_ALPHA_PREVIOUS_ID,
             "result_id": scenario.previous_comparable_result.result_id,
+            "asset_id": scenario.previous_comparable_result.asset_id,
+            "framework_id": "framework_linux",
+            "framework_version": "1.0.0",
+            "requirement_id": "REQ-001",
+            "observation": "previous fail",
         },
     )
     sb.write_finding(
@@ -482,6 +505,11 @@ def test_evidence_insert_update_targets_exact_run(tmp_path: Path):
             "client_id": CLIENT_ALPHA_ID,
             "audit_run_id": RUN_ALPHA_CURRENT_ID,
             "result_id": base.result_id,
+            "asset_id": base.asset_id,
+            "framework_id": "framework_linux",
+            "framework_version": "1.0.0",
+            "requirement_id": "REQ-001",
+            "observation": "exception",
         },
     )
     # update current run only
@@ -493,6 +521,10 @@ def test_evidence_insert_update_targets_exact_run(tmp_path: Path):
             "client_id": CLIENT_ALPHA_ID,
             "audit_run_id": RUN_ALPHA_CURRENT_ID,
             "result_id": base.result_id,
+            "asset_id": base.asset_id,
+            "framework_id": "framework_linux",
+            "framework_version": "1.0.0",
+            "requirement_id": "REQ-001",
             "observation": "fixed",
         },
     )

@@ -26,6 +26,11 @@ def test_evidence_store_creates_per_requirement_folders(tmp_path: Path):
             "status": "pass",
             "client_id": "client_test00000001",
             "audit_run_id": "arun_test0000000001",
+            "result_id": "11111111-1111-4111-8111-111111111111",
+            "asset_id": "aaaaaaaa-1111-4111-8111-111111111111",
+            "framework_id": "postgres_cis",
+            "framework_version": "1.0.0",
+            "observation": "x",
         },
     )
 

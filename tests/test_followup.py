@@ -17,6 +17,13 @@ from auditor.intent import classify_intent
 from auditor.run_resolve import extract_run_id, latest_run_id
 from auditor.state import Finding
 
+_IDENTITY = {
+    "result_id": "11111111-1111-4111-8111-000000000001",
+    "asset_id": "aaaaaaaa-1111-4111-8111-111111111111",
+    "framework_id": "ubuntu_cis_24_l2",
+    "framework_version": "1.0.0",
+}
+
 
 def _seed_run_identity(store: EvidenceStore, **extra) -> dict:
     """CORE-001: seed durable client/audit ids on test evidence runs."""
@@ -25,6 +32,8 @@ def _seed_run_identity(store: EvidenceStore, **extra) -> dict:
         "audit_run_id": "arun_test0000000001",
         "client_name": "TestClient",
         "client_slug": "testclient",
+        "asset_id": "aaaaaaaa-1111-4111-8111-111111111111",
+        "framework_version": "1.0.0",
         **extra,
     }
     store.write_run_meta(**meta)
@@ -161,6 +170,13 @@ async def test_revise_req_writes_into_existing_folder(tmp_path: Path):
             req_id,
             {
                 **finding.model_dump(),
+                "result_id": "11111111-1111-4111-8111-000000000001",
+                "asset_id": "aaaaaaaa-1111-4111-8111-111111111111",
+                "framework_id": framework_id,
+                "framework_version": "1.0.0",
+                "requirement_id": req_id,
+                "observation": finding.evidence,
+                "recommendation": finding.remediation,
                 "client_id": "client_test00000001",
                 "audit_run_id": "arun_test0000000001",
             },
@@ -303,7 +319,7 @@ async def test_refill_finding_from_stored_evidence(tmp_path: Path):
     finding = store.load_finding("ubuntu_cis_24_l2", "REQ-001")
     assert finding is not None
     assert finding["status"] == "fail"
-    assert "pid 1" in finding["evidence"]
+    assert "pid 1" in (finding.get("observation") or finding.get("evidence") or "")
 
 
 @pytest.mark.asyncio
@@ -315,6 +331,10 @@ async def test_update_report_from_disk_findings(tmp_path: Path):
     store = EvidenceStore(tmp_path, run_id=rid)
     _seed_run_identity(store, frameworks=["ubuntu_cis_24_l2"])
     finding = {
+        "result_id": "11111111-1111-4111-8111-000000000002",
+        "asset_id": "aaaaaaaa-1111-4111-8111-111111111111",
+        "framework_id": "ubuntu_cis_24_l2",
+        "framework_version": "1.0.0",
         "requirement_id": "REQ-002",
         "title": "SSH root login disabled",
         "status": "pass",
@@ -368,6 +388,10 @@ def test_resolve_multi_host_req_with_host_hint(tmp_path: Path):
             key,
             "REQ-010",
             {
+                "result_id": "11111111-1111-4111-8111-000000000001",
+                "asset_id": "aaaaaaaa-1111-4111-8111-111111111111",
+                "framework_id": "ubuntu_cis_24_l2",
+                "framework_version": "1.0.0",
                 "requirement_id": "REQ-010",
                 "title": "demo",
                 "status": "fail",

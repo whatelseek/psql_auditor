@@ -121,11 +121,16 @@ def is_historically_comparable(left: Any, right: Any) -> bool:
 
 def logical_key_of(finding: Any) -> ResultLogicalKey:
     """Extract the logical key from a Finding-like object or mapping."""
-    if hasattr(finding, "model_dump"):
-        data = finding.model_dump()
-    elif isinstance(finding, Mapping):
-        data = finding
-    else:
+    # CORE-004: nested identity on AssessmentResult
+    identity = getattr(finding, "identity", None)
+    if identity is not None and hasattr(identity, "as_flat_dict"):
+        return ResultLogicalKey.from_mapping(identity.as_flat_dict())
+    if identity is not None and hasattr(identity, "model_dump"):
+        return ResultLogicalKey.from_mapping(identity.model_dump())
+    if hasattr(finding, "model_dump") and not hasattr(finding, "requirement_id"):
+        # Nested dump would bury identity — prefer flat accessors below.
+        pass
+    if hasattr(finding, "client_id") or hasattr(finding, "requirement_id"):
         data = {
             "client_id": getattr(finding, "client_id", ""),
             "audit_run_id": getattr(finding, "audit_run_id", ""),
@@ -134,13 +139,30 @@ def logical_key_of(finding: Any) -> ResultLogicalKey:
             "framework_version": getattr(finding, "framework_version", ""),
             "requirement_id": getattr(finding, "requirement_id", ""),
         }
-    return ResultLogicalKey.from_mapping(data)
+        return ResultLogicalKey.from_mapping(data)
+    if isinstance(finding, Mapping):
+        if isinstance(finding.get("identity"), Mapping):
+            return ResultLogicalKey.from_mapping(finding["identity"])
+        return ResultLogicalKey.from_mapping(finding)
+    if hasattr(finding, "model_dump"):
+        data = finding.model_dump()
+        if isinstance(data.get("identity"), Mapping):
+            return ResultLogicalKey.from_mapping(data["identity"])
+        return ResultLogicalKey.from_mapping(data)
+    return ResultLogicalKey.from_mapping({})
 
 
 def result_id_of(finding: Any) -> str:
+    identity = getattr(finding, "identity", None)
+    if identity is not None:
+        rid = getattr(identity, "result_id", None)
+        if rid:
+            return str(rid).strip()
     if hasattr(finding, "result_id"):
         return str(getattr(finding, "result_id") or "").strip()
     if isinstance(finding, Mapping):
+        if isinstance(finding.get("identity"), Mapping):
+            return str(finding["identity"].get("result_id") or "").strip()
         return str(finding.get("result_id") or "").strip()
     return ""
 
@@ -183,7 +205,9 @@ def merge_result_maps(
         # Legacy checkpoints keyed findings by requirement_id — migrate once.
         if not rid and map_key.upper().startswith("REQ"):
             rid = new_result_id()
-            if hasattr(finding, "result_id"):
+            if getattr(finding, "identity", None) is not None:
+                pass  # AssessmentResult must already carry identity
+            elif hasattr(finding, "result_id"):
                 finding.result_id = rid
                 if not getattr(finding, "requirement_id", None):
                     finding.requirement_id = map_key

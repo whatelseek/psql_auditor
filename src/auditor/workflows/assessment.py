@@ -16,6 +16,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from auditor.checklist import Requirement
 from auditor.context import count_tool_rounds, truncate_text
+from auditor.domain.assessment_result import AssessmentError, AssessmentResult, ResultIdentity
 from auditor.domain.result_identity import index_by_result_id, requirement_ids_in
 from auditor.evidence_store import EvidenceStore
 from auditor.frameworks import get_framework
@@ -40,7 +41,6 @@ from auditor.tools.mcp_client import reconnect_mcp_session
 from auditor.workflows.helpers import (
     _extract_json,
     _is_recoverable_finding,
-    _normalize_status,
 )
 from auditor.workflows.protocols import AuditRuntime
 
@@ -58,31 +58,26 @@ def _framework_version_for(runtime: AuditRuntime, state: AuditorState, framework
 def _bind_finding(
     runtime: AuditRuntime,
     state: AuditorState,
-    finding: Finding,
+    finding: Finding | AssessmentResult,
     *,
     framework_id: str,
     store: EvidenceStore | None,
-) -> Finding:
+) -> AssessmentResult:
     """Attach canonical identity; validate fully when persisting to disk/DB."""
-    from auditor.domain.result_identity import new_result_id
-
     ver = _framework_version_for(runtime, state, framework_id)
     existing = None
     if store is not None:
         existing = store.load_finding(framework_id, finding.requirement_id)
-    attach_result_identity(
+    bound = attach_result_identity(
         finding,
         state=state,
         framework_id=framework_id,
         framework_version=ver,
         existing=existing,
     )
-    if not finding.result_id:
-        finding.result_id = new_result_id()
-    # Full identity is mandatory only when writing evidence / warehouse.
     if store is not None:
-        return require_persistable(finding)
-    return finding
+        return require_persistable(bound)
+    return bound
 
 
 async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
@@ -147,7 +142,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
             client_id=str(state.get("client_id") or ""),
         )
 
-    async def _worker(req_id: str) -> Finding:
+    async def _worker(req_id: str) -> AssessmentResult:
         """Assess one requirement under the concurrency semaphore."""
         async with sem:
             req_title = requirements[req_id].title
@@ -159,7 +154,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
                 text=f"Assessing `{req_id}: {req_title}`…",
             )
             try:
-                special = runtime._deterministic_it_audit_finding(
+                special: Any = runtime._deterministic_it_audit_finding(
                     req_id=req_id,
                     requirement=requirements[req_id],
                     framework_id=framework_id,
@@ -183,7 +178,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
                                 "pass_criteria": requirements[req_id].pass_criteria,
                             },
                         )
-                        store.write_finding(framework_id, req_id, special.model_dump())
+                        store.write_finding(framework_id, req_id, _finding_disk_payload(special))
                     await runtime._warehouse_live_upsert(
                         state,
                         framework_id=framework_id,
@@ -198,7 +193,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
                         requirement_title=req_title,
                     )
                     return special
-                finding = await runtime._fill_requirement_cells(
+                finding: Finding | AssessmentResult = await runtime._fill_requirement_cells(
                     req_id=req_id,
                     requirement=requirements[req_id],
                     user_request=user_request,
@@ -211,7 +206,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
                     runtime, state, finding, framework_id=framework_id, store=store
                 )
                 if store is not None:
-                    store.write_finding(framework_id, req_id, finding.model_dump())
+                    store.write_finding(framework_id, req_id, _finding_disk_payload(finding))
                 await runtime._warehouse_live_upsert(
                     state,
                     framework_id=framework_id,
@@ -269,7 +264,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
                     store.write_finding(
                         framework_id,
                         req_id,
-                        finding.model_dump(),
+                        _finding_disk_payload(finding),
                     )
                 await runtime._warehouse_live_upsert(
                     state,
@@ -290,7 +285,7 @@ async def assess_parallel(runtime: AuditRuntime, state: AuditorState) -> dict[st
     work_ids = [rid for rid in pending if rid in requirements]
     # Finish as completed so disk findings survive mid-run cancel.
     tasks = {asyncio.create_task(_worker(rid)): rid for rid in work_ids}
-    findings_list: list[Finding] = []
+    findings_list: list[AssessmentResult] = []
     try:
         for coro in asyncio.as_completed(tasks):
             findings_list.append(await coro)
@@ -379,7 +374,7 @@ async def fill_requirement_cells(
     *,
     ssh_only: bool = False,
     state: AuditorState | None = None,
-) -> Finding:
+) -> AssessmentResult:
     """Run evidence gathering + fill model for one requirement cell.
 
     Writes requirement metadata and finding JSON to the evidence store
@@ -395,7 +390,7 @@ async def fill_requirement_cells(
         ssh_only: When True, bind only SSH tools (host_facts discovery).
 
     Returns:
-        Completed ``Finding`` for the requirement.
+        Completed ``AssessmentResult`` for the requirement.
     """
     if store is not None:
         store.write_requirement(
@@ -442,12 +437,16 @@ async def fill_requirement_cells(
         ),
     ]
     response = await runtime.fill_model.ainvoke(fill_messages)
-    finding = runtime._cells_to_finding(req_id, requirement, response, evidence)
+    finding: Finding | AssessmentResult = runtime._cells_to_finding(
+        req_id, requirement, response, evidence
+    )
     if state is not None:
         finding = _bind_finding(runtime, state, finding, framework_id=framework_id, store=store)
     if store is not None:
-        store.write_finding(framework_id, req_id, finding.model_dump())
-    return finding
+        store.write_finding(framework_id, req_id, _finding_disk_payload(finding))
+    if isinstance(finding, AssessmentResult):
+        return finding
+    return AssessmentResult.from_finding(finding)
 
 
 async def gather_evidence(
@@ -528,68 +527,84 @@ async def gather_evidence(
     return "\n---\n".join(c.strip() for c in chunks if c and c.strip())
 
 
+def _finding_disk_payload(finding: Finding | AssessmentResult) -> dict:
+    """Serialize assessment result for evidence disk (canonical field names)."""
+    if isinstance(finding, AssessmentResult):
+        return finding.to_persist_dict()
+    return AssessmentResult.from_finding(finding).to_persist_dict()
+
+
 def cells_to_finding(
     runtime: AuditRuntime,
     req_id: str,
     req: Requirement,
     ai: AIMessage,
     fallback_evidence: str,
-) -> Finding:
-    """Parse fill-model JSON into a ``Finding`` with status normalization.
+    *,
+    identity: ResultIdentity | None = None,
+) -> AssessmentResult:
+    """Parse fill-model JSON into a validated :class:`AssessmentResult` (CORE-004).
 
-    Forces ``error`` status when evidence looks like a transport failure
-    even if the model returned pass/fail.
-
-    Args:
-        req_id: Requirement id.
-        req: Checklist requirement metadata.
-        ai: Fill model response message.
-        fallback_evidence: Raw evidence when JSON omits observation.
+    Malformed model output yields a controlled ``status=error`` result with
+    structured :class:`AssessmentError` — never a partially valid finding.
+    Forces ``error`` when evidence looks like a transport failure even if the
+    model returned pass/fail.
 
     Returns:
-        Truncated ``Finding`` ready for state and disk.
+        Truncated ``AssessmentResult`` ready for state and disk.
     """
-    data = _extract_json(str(ai.content or "")) or {}
-    observation = str(
-        data.get("observation") or data.get("evidence") or fallback_evidence or ai.content or ""
-    )
-    recommendation = str(data.get("recommendation") or data.get("remediation") or "")
-    # If observation still looks like a transport failure, force error status
-    # so the cyclic reconnect path can pick it up.
-    status = _normalize_status(data.get("status"))
-    tmp = Finding(
+    from auditor.domain.result_identity import new_result_id
+
+    raw_text = str(ai.content or "")
+    data = _extract_json(raw_text)
+    ident = identity or ResultIdentity(
+        result_id=new_result_id(),
+        client_id="",
+        audit_run_id="",
+        asset_id="",
+        framework_id="",
+        framework_version="",
         requirement_id=req_id,
+    )
+    if ident.requirement_id != req_id:
+        ident = ident.model_copy(update={"requirement_id": req_id})
+    result = AssessmentResult.from_llm_payload(
+        data,
+        identity=ident,
         title=req.title,
-        status=status,  # type: ignore[arg-type]
         severity=req.severity,
         category=req.category,
         pass_criteria=req.pass_criteria,
-        evidence=observation,
-        remediation=recommendation,
-        notes=str(data.get("notes") or ""),
+        fallback_observation=fallback_evidence or raw_text,
     )
-    # Transport failures must stay status=error so reconnect / HITL can fire,
-    # even when the model incorrectly marks the cell as pass/fail/partial.
-    if status != "error" and _is_recoverable_finding(
-        Finding(
-            requirement_id=req_id,
+    # Transport failures must stay status=error so reconnect / HITL can fire.
+    probe = Finding(
+        requirement_id=req_id,
+        status="error",
+        evidence=result.observation,
+        notes=result.notes,
+    )
+    if result.status != "error" and _is_recoverable_finding(probe):
+        result = result.with_correction(
             status="error",
-            evidence=observation,
-            notes=str(data.get("notes") or ""),
+            error=AssessmentError(
+                error_type="TransportFailure",
+                message="Recoverable transport failure detected in observation",
+            ),
         )
-    ):
-        tmp.status = "error"
-    tmp.evidence = truncate_text(
-        tmp.evidence or "",
-        runtime.settings.max_finding_evidence_chars,
-        "observation",
+    result = result.with_correction(
+        observation=truncate_text(
+            result.observation or "",
+            runtime.settings.max_finding_evidence_chars,
+            "observation",
+        ),
+        recommendation=truncate_text(
+            result.recommendation or "",
+            min(runtime.settings.max_finding_evidence_chars, 1200),
+            "recommendation",
+        ),
     )
-    tmp.remediation = truncate_text(
-        tmp.remediation or "",
-        min(runtime.settings.max_finding_evidence_chars, 1200),
-        "recommendation",
-    )
-    return tmp
+    return result
 
 
 def deterministic_it_audit_finding(
@@ -702,7 +717,7 @@ async def warehouse_live_upsert(
     state: AuditorState,
     *,
     framework_id: str,
-    finding: Finding,
+    finding: Finding | AssessmentResult,
     requirement: Requirement | None,
     store: EvidenceStore | None,
     source: str = "live",

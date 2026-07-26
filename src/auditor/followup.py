@@ -304,8 +304,22 @@ async def run_revise_req(
                         f"### {req_id}: {finding.title or requirement.title}",
                         "",
                         f"- **Status:** `{finding.status}`",
-                        f"- **Observation:** {finding.evidence or '—'}",
-                        f"- **Recommendation:** {finding.remediation or '—'}",
+                        (
+                            "- **Observation:** "
+                            + str(
+                                getattr(finding, "observation", None)
+                                or getattr(finding, "evidence", None)
+                                or "—"
+                            )
+                        ),
+                        (
+                            "- **Recommendation:** "
+                            + str(
+                                getattr(finding, "recommendation", None)
+                                or getattr(finding, "remediation", None)
+                                or "—"
+                            )
+                        ),
                         f"- Logs under `{evidence_req_root / req_id}`",
                         "",
                     ]
@@ -546,7 +560,14 @@ async def run_refill_finding(
             framework_id=target.framework_id,
             framework_version=str(meta.get("framework_version") or ""),
         )
-        store.write_finding(target.framework_id, req_id, finding.model_dump())
+        from auditor.domain.assessment_result import AssessmentResult as _AR
+
+        _payload = (
+            finding.to_persist_dict()
+            if isinstance(finding, _AR)
+            else _AR.from_finding(finding).to_persist_dict()
+        )
+        store.write_finding(target.framework_id, req_id, _payload)
         session_number = None
         raw_sess = meta.get("results_session_number")
         if raw_sess is not None:
@@ -579,8 +600,22 @@ async def run_refill_finding(
                 f"### {req_id}: {finding.title or requirement.title}",
                 "",
                 f"- **Status:** `{finding.status}`",
-                f"- **Observation:** {finding.evidence or '—'}",
-                f"- **Recommendation:** {finding.remediation or '—'}",
+                (
+                    "- **Observation:** "
+                    + str(
+                        getattr(finding, "observation", None)
+                        or getattr(finding, "evidence", None)
+                        or "—"
+                    )
+                ),
+                (
+                    "- **Recommendation:** "
+                    + str(
+                        getattr(finding, "recommendation", None)
+                        or getattr(finding, "remediation", None)
+                        or "—"
+                    )
+                ),
                 "",
             ]
         )

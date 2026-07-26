@@ -1,41 +1,41 @@
 # `psql_auditor` — Master Development and Acceptance Checklist
 
-Checklist version: **1.7**  
+Checklist version: **1.8**  
 Date: **2026-07-26**  
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
-Latest reviewed revision: [`134c9bf`](https://github.com/whatelseek/psql_auditor/commit/134c9bf)  
+Latest reviewed revision: *(set after CORE-004 implementation commit)*  
 Total tasks: **71**
 
 ## Status summary
 
 | Status | Count |
 | --- | ---: |
-| Complete `[x]` | **6 / 71 (8.5%)** |
+| Complete `[x]` | **7 / 71 (9.9%)** |
 | Partially complete `[~]` | **5 / 71 (7.0%)** |
-| Open `[ ]` | **60 / 71 (84.5%)** |
-| Not fully complete | **65 / 71 (91.5%)** |
+| Open `[ ]` | **59 / 71 (83.1%)** |
+| Not fully complete | **64 / 71 (90.1%)** |
 
-Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`.
+Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`.
 
 Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Latest verification
 
-`AUD-003` adds the shared canonical fixture package on top of the AUD-002
-gates. Local development and GitHub Actions use the same Make targets. All
-mandatory gates are green.
+`CORE-004` introduces canonical typed `AssessmentResult` (reusing CORE-003
+identity). Local development and GitHub Actions use the same Make targets. All
+mandatory gates are green locally; CI URL recorded after push.
 
 | Check | Verified result |
 | --- | --- |
-| Format | 115 files already formatted |
+| Format | 117 files already formatted |
 | Lint | Passed |
-| Type check | Passed, 67 files |
-| Unit tests | 316 passed |
+| Type check | Passed, 68 files |
+| Unit tests | 329 passed |
 | PostgreSQL integration tests | 7 passed |
-| Full suite | 323 passed |
+| Full suite | 336 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | [Run 30197725898](https://github.com/whatelseek/psql_auditor/actions/runs/30197725898), all jobs passed |
+| Clean CI | *(pending push)* |
 
 Controlled negative runs:
 
@@ -48,12 +48,12 @@ Controlled negative runs:
 
 | Area | Baseline | Current | Change |
 | --- | ---: | ---: | ---: |
-| Architecture and separation of concerns | 4.0/10 | 6.7/10 | +2.7 |
-| Execution/result identity | 3.5/10 | 7.0/10 | +3.5 |
-| Testability and regression coverage | 5.5/10 | 8.0/10 | +2.5 |
-| Maintainability | 3.5/10 | 6.8/10 | +3.3 |
-| Production readiness | 3.5/10 | 6.5/10 | +3.0 |
-| **Overall code rating** | **4.0/10** | **7.1/10** | **+3.1** |
+| Architecture and separation of concerns | 4.0/10 | 7.0/10 | +3.0 |
+| Execution/result identity | 3.5/10 | 7.5/10 | +4.0 |
+| Testability and regression coverage | 5.5/10 | 8.2/10 | +2.7 |
+| Maintainability | 3.5/10 | 7.0/10 | +3.5 |
+| Production readiness | 3.5/10 | 6.7/10 | +3.2 |
+| **Overall code rating** | **4.0/10** | **7.3/10** | **+3.3** |
 
 ## Task register
 
@@ -105,7 +105,7 @@ with `make validate-defect-map` enforced in CI.
 
 - [x] `CORE-002` — Separate `AuditRun` from `AuditJob`.
 - [x] `CORE-003` — Introduce canonical result identity.
-- [ ] `CORE-004` — Introduce structured `AssessmentResult`.
+- [x] `CORE-004` — Introduce structured `AssessmentResult`.
 - [ ] `CORE-005` — Isolate checkpoints and artifacts by audit run.
 - [~] `CORE-006` — Remove hidden global mutable state.
 

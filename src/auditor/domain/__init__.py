@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+from auditor.domain.assessment_result import (
+    AssessmentError,
+    AssessmentResult,
+    AssessmentStatus,
+    EvidenceRef,
+    ResultIdentity,
+    require_assessment_result,
+)
 from auditor.domain.audit_models import (
     AUDIT_JOB_TRANSITIONS,
     AUDIT_RUN_TRANSITIONS,
@@ -42,8 +50,12 @@ __all__ = [
     "AuditJobStatus",
     "AuditJobType",
     "AuditRun",
+    "AssessmentError",
+    "AssessmentResult",
+    "AssessmentStatus",
     "AuditRunStatus",
     "DuplicateLogicalKeyError",
+    "EvidenceRef",
     "DuplicateResultIdError",
     "IncompleteResultIdentityError",
     "InvalidStatusTransition",
@@ -58,7 +70,9 @@ __all__ = [
     "new_audit_run_id",
     "new_job_id",
     "new_result_id",
+    "require_assessment_result",
     "requirement_ids_in",
+    "ResultIdentity",
     "resolve_terminal_run_status",
     "result_id_of",
     "validate_job_transition",

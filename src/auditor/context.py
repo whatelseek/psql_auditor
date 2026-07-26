@@ -12,8 +12,11 @@ Design goals:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from langchain_core.messages import AIMessage, BaseMessage
 
+from auditor.domain.assessment_result import AssessmentResult
 from auditor.state import Finding
 
 
@@ -51,7 +54,7 @@ def count_tool_rounds(messages: list[BaseMessage]) -> int:
 
 
 def compact_findings_for_summary(
-    findings: dict[str, Finding],
+    findings: Mapping[str, Finding | AssessmentResult],
     evidence_chars: int = 240,
 ) -> str:
     """Build a compact digest for the finalize LLM call.
@@ -72,12 +75,15 @@ def compact_findings_for_summary(
     ]
     ordered = sorted(
         findings.values(),
-        key=lambda raw: (
-            raw.requirement_id if isinstance(raw, Finding) else str(raw.get("requirement_id") or "")
-        ),
+        key=lambda raw: str(getattr(raw, "requirement_id", "") or ""),
     )
     for raw in ordered:
-        f = raw if isinstance(raw, Finding) else Finding.model_validate(raw)
+        if isinstance(raw, AssessmentResult):
+            f = raw.to_finding()
+        elif isinstance(raw, Finding):
+            f = raw
+        else:
+            f = AssessmentResult.from_finding(raw).to_finding()
         obs = truncate_text((f.evidence or "").replace("\n", " "), evidence_chars, "obs")
         rec = truncate_text((f.remediation or "").replace("\n", " "), evidence_chars, "rec")
         lines.append(

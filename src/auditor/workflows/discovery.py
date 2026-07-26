@@ -16,6 +16,7 @@ from langchain_core.messages import (
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from auditor.context import count_tool_rounds, truncate_text
+from auditor.domain.assessment_result import AssessmentResult
 from auditor.evidence_store import EvidenceStore
 from auditor.frameworks import (
     frameworks_catalog_text,
@@ -335,7 +336,7 @@ async def collect_host_facts_llm(
         framework_id="host_facts",
     )
 
-    async def _worker(req_id: str) -> Finding:
+    async def _worker(req_id: str) -> AssessmentResult:
         async with sem:
             req_title = req_map[req_id].title
             emit_req_status(
@@ -345,6 +346,7 @@ async def collect_host_facts_llm(
                 requirement_title=req_title,
                 text=f"Discovery `{req_id}: {req_title}`…",
             )
+            finding: Finding | AssessmentResult
             try:
                 finding = await runtime._fill_requirement_cells(
                     req_id=req_id,
@@ -355,7 +357,9 @@ async def collect_host_facts_llm(
                     ssh_only=True,
                 )
             except Exception as exc:  # noqa: BLE001
-                finding = Finding(
+                from auditor.result_identity_bind import attach_result_identity
+
+                err_finding = Finding(
                     requirement_id=req_id,
                     title=req_map[req_id].title,
                     status="error",
@@ -366,11 +370,9 @@ async def collect_host_facts_llm(
                     pass_criteria=req_map[req_id].pass_criteria,
                 )
                 if store is not None:
-                    from auditor.result_identity_bind import attach_result_identity
-
                     meta = store.read_run_meta()
                     finding = attach_result_identity(
-                        finding,
+                        err_finding,
                         state={
                             "client_id": str(meta.get("client_id") or ""),
                             "audit_run_id": str(meta.get("audit_run_id") or ""),
@@ -380,14 +382,18 @@ async def collect_host_facts_llm(
                         framework_id="host_facts",
                         framework_version=str(meta.get("framework_version") or "1"),
                     )
-                    store.write_finding("host_facts", req_id, finding.model_dump())
+                    store.write_finding("host_facts", req_id, finding.to_persist_dict())
+                else:
+                    finding = AssessmentResult.from_finding(err_finding)
             emit_req_status(
                 req_id,
                 finding.status,
                 framework_id="host_facts",
                 requirement_title=req_map[req_id].title,
             )
-            return finding
+            if isinstance(finding, AssessmentResult):
+                return finding
+            return AssessmentResult.from_finding(finding)
 
     findings = await asyncio.gather(*(_worker(rid) for rid in pending))
     chunks: list[str] = []
@@ -403,7 +409,9 @@ async def collect_host_facts_llm(
             if tool_text:
                 raw[f"req_{rid}"] = tool_text
                 chunks.append(f"[{rid} tools]\n{tool_text}")
-        obs = str(finding.evidence or "").strip()
+        obs = str(
+            getattr(finding, "observation", None) or getattr(finding, "evidence", None) or ""
+        ).strip()
         if obs:
             chunks.append(f"[{rid} {finding.status}] {finding.title}: {obs}")
 
@@ -422,9 +430,11 @@ async def collect_host_facts_llm(
     if not facts.error and any(f.status == "error" for f in findings):
         # Surface SSH/tool failures for routing when fill did not set error.
         err_bits = [
-            f"{f.requirement_id}: {f.evidence}"
+            f"{f.requirement_id}: "
+            f"{getattr(f, 'observation', None) or getattr(f, 'evidence', None) or ''}"
             for f in findings
-            if f.status == "error" and f.evidence
+            if f.status == "error"
+            and (getattr(f, "observation", None) or getattr(f, "evidence", None))
         ]
         if err_bits and "ssh error" in " ".join(err_bits).lower():
             facts.error = err_bits[0][:500]

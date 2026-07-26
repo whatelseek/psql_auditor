@@ -4,8 +4,8 @@ Canonical mapping of every checklist defect/task ID to production ownership.
 
 | Field | Value |
 |-------|-------|
-| Reviewed commit SHA | `134c9bf64b871b5737db6714abf315a3667583a8` |
-| Checklist source | [`checklist/psql_auditor_master_refactoring_checklist (5).md`](../checklist/psql_auditor_master_refactoring_checklist%20(5).md) (version **1.7**, dated 2026-07-26) |
+| Reviewed commit SHA | *(set after CORE-004 implementation commit)* |
+| Checklist source | [`checklist/psql_auditor_master_refactoring_checklist (5).md`](../checklist/psql_auditor_master_refactoring_checklist%20(5).md) (version **1.8**, dated 2026-07-26) |
 | Validation | `make validate-defect-map` (`scripts/validate_defect_map.py`) |
 
 ## Status legend
@@ -31,7 +31,7 @@ Paths are repository-relative. Rows with status `MODULE NOT IMPLEMENTED` use `�
 | CORE-001 | `src/auditor/client_registry.py`, `src/auditor/legacy_compat.py`, `src/auditor/evidence_store.py`, `src/auditor/results_store.py`, `src/auditor/audit_registry.py`, `src/auditor/workflows/intake.py`, `src/auditor/workflows/runner.py`, `src/auditor/workflows/multi_runner.py` | `require_client_id`, `require_audit_run_id`, `assert_client_owns_run`, `ClientOwnershipError`, `AuditRegistry.create_run` | RESOLVED | Both identifiers required on create/persist; `create_run`/`save_run` validate `audit_run_id` via `require_audit_run_id`; warehouse rejects empty client_id; ownership reassignment rejected; AUD-003 fixtures in `tests/test_client_audit_run_identity.py`. Legacy `run_id` = evidence folder only. Checkpoint isolation remains CORE-005. |
 | CORE-002 | `src/auditor/domain/audit_models.py`, `src/auditor/audit_registry.py`, `src/auditor/workflows/multi_runner.py` | `AuditRun`, `AuditJob`, `AuditRegistry` | RESOLVED | Separate run/job models with registry transitions; tests: `tests/test_audit_run_job.py`. |
 | CORE-003 | `src/auditor/domain/result_identity.py`, `src/auditor/result_identity_bind.py`, `src/auditor/state.py`, `src/auditor/evidence_store.py`, `src/auditor/results_store.py` | `validate_result_identity`, `merge_result_maps`, `merge_findings` | RESOLVED | Canonical `result_id` + logical key enforced on persist/merge; tests: `tests/test_canonical_result_identity.py`. |
-| CORE-004 | — (capability absent) | — | MODULE NOT IMPLEMENTED | No `AssessmentResult` type; assessments use `Finding` in `src/auditor/state.py`. |
+| CORE-004 | `src/auditor/domain/assessment_result.py`, `src/auditor/result_identity_bind.py`, `src/auditor/state.py`, `src/auditor/evidence_store.py`, `src/auditor/results_store.py`, `src/auditor/workflows/assessment.py` | `AssessmentResult`, `ResultIdentity`, `from_llm_payload`, `to_finding`, `with_correction` | RESOLVED | Canonical typed result with CORE-003 identity; workflow/persist validate before write; `Finding` is report adapter (`observation`↔`evidence`, `recommendation`↔`remediation`); malformed LLM output → structured error result; tests: `tests/test_assessment_result.py` (AUD-003 fixtures). EVID-004 still owns structured LLM binding. |
 | CORE-005 | `src/auditor/workflows/runner.py`, `src/auditor/config.py`, `src/auditor/graph.py` | `ensure_async_checkpointer`, `Settings.checkpoint_path` | IMPLEMENTED — DEFECT PRESENT | Durable Sqlite checkpointer is process-wide via `checkpoint_path`; not isolated per `audit_run_id`. |
 | CORE-006 | `src/auditor/graph.py`, `src/auditor/config.py`, `src/auditor/evidence_store.py`, `src/auditor/runtime_target.py` | `get_auditor_graph`, `get_settings`, `bind_runtime_credentials` | PARTIALLY IMPLEMENTED | ContextVar host/runtime binds exist; process singletons (`_graph`, settings cache, evidence maps) remain. |
 | INPUT-001 | — (capability absent) | — | MODULE NOT IMPLEMENTED | No strict `AuditRequest` pydantic/dataclass validator under `src/`. |
