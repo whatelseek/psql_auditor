@@ -1,11 +1,11 @@
 # `psql_auditor` — Мастер-чеклист разработки и приёмки
 
-Версия чеклиста: **1.12**  
+Версия чеклиста: **1.13**  
 Дата: **2026-07-26**  
 Репозиторий: `whatelseek/psql_auditor`  
 Базовый commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
-Последняя рассмотренная ревизия: [`5286a4d`](https://github.com/whatelseek/psql_auditor/commit/5286a4d773f62d0bc796b205ddd18994bdfc89af)  
-Всего задач: **71**
+Последняя независимо рассмотренная ревизия: [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8)  
+Всего задач: **72**
 
 Синхронизирован с английской версией
 [`psql_auditor_master_refactoring_checklist (5).md`](psql_auditor_master_refactoring_checklist%20(5).md).
@@ -16,32 +16,43 @@
 
 | Статус | Количество |
 | --- | ---: |
-| Принято `[x]` | **8 / 71 (11.3%)** |
-| Частично `[~]` | **6 / 71 (8.5%)** |
-| Открыто `[ ]` | **57 / 71 (80.3%)** |
-| Не полностью завершено | **63 / 71 (88.7%)** |
+| Принято `[x]` | **10 / 72 (13.9%)** |
+| Частично `[~]` | **5 / 72 (6.9%)** |
+| Открыто `[ ]` | **57 / 72 (79.2%)** |
+| Не полностью завершено | **62 / 72 (86.1%)** |
 
-Принято: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`.
+Принято: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `INPUT-001`, `INPUT-003`.
 
-Частично: `CORE-006`, `INPUT-003`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
+Частично: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Последняя проверка
 
-Реализован кандидат на приёмку inventory-driven запуска аудита
-(load/validate/analyze/plan/confirm). `INPUT-001` остаётся **открытым** — commit
-[`5286a4d`](https://github.com/whatelseek/psql_auditor/commit/5286a4d773f62d0bc796b205ddd18994bdfc89af)
-не принимается автоматически. `CORE-006` остаётся `[~]` до независимой приёмки.
+PR #36 (inventory-driven audit + production SSH/WinRM discovery) заменяет
+закрытый PR #35. Независимая приёмка inventory-driven запуска приняла
+`INPUT-001` и `INPUT-003` на commit
+[`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8).
+`INPUT-005` остаётся `[~]` до независимой приёмки (интеграция YAML/JSON
+execution и review production discovery). Статусы приёмки не меняются
+автоматически по зелёному CI.
 
 | Проверка | Результат |
 | --- | --- |
-| Format / Lint | Passed |
-| Type check | Passed, 85 files |
-| Unit tests | 422 passed |
-| Integration tests | 7 passed |
-| Full suite | 429 passed |
-| Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI (async start + inventory identity) | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), все jobs зелёные |
-| Prior clean CI | [Run 30208965512](https://github.com/whatelseek/psql_auditor/actions/runs/30208965512), все jobs зелёные |
+| Format / Lint | Ожидает локальной перепроверки на rebased PR #36 |
+| Type check | Ожидает локальной перепроверки на rebased PR #36 |
+| Unit tests | Ожидает локальной перепроверки на rebased PR #36 |
+| Integration tests | Ожидает локальной перепроверки на rebased PR #36 |
+| Full suite | Ожидает локальной перепроверки на rebased PR #36 |
+| Defect map | Цель `validate-defect-map: OK` (72/72) |
+| Prior clean CI (база review PR #35) | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), все jobs зелёные |
+| Prior clean CI (async start + inventory identity) | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), все jobs зелёные |
+
+### Закрытые findings, перенесённые из PR #35 (superseded by PR #36)
+
+- stale `AuditPlan` confirmation после изменения inventory;
+- `CREDENTIALS.md` обнаруживался, но не загружался;
+- `audit start` создавал request без запуска execution;
+- API start вызывал `asyncio.run()` внутри активного event loop;
+- сохранённый `AuditRequest` можно было replay после изменения inventory.
 
 ## Реестр задач
 
@@ -50,6 +61,13 @@
 - [x] `AUD-001` — Зафиксировать воспроизводимую базовую линию.
 - [x] `AUD-002` — Единые локальные и CI quality gates.
 - [x] `AUD-003` — Общие детерминированные тестовые фикстуры.
+
+Доказательства закрытия:
+
+- defect-to-module map покрывает все 72 ID чеклиста и enforced в CI;
+- единые local/CI targets: format, lint, typecheck, unit, integration, full suite;
+- детерминированные shared fixtures и fake LLM scenarios переиспользуются;
+- обязательные тесты блокируют непреднамеренный external HTTP/LLM доступ.
 
 ### M1 — Идентификаторы и доменная модель
 
@@ -60,47 +78,79 @@
 - [x] `CORE-005` — Изоляция checkpoint и артефактов по audit run.
 - [~] `CORE-006` — Убрать скрытое глобальное изменяемое состояние.
 
-`CORE-006` остаётся частичным до независимой приёмки.
+`CORE-006` остаётся частичным. Ownership `ApplicationRuntime` и ряд lifecycle
+race-fix реализованы, но полное удаление legacy process-wide mutable state
+требует отдельной независимой приёмки.
 
 ### M2 — Входы и планирование аудита
 
-- [ ] `INPUT-001` — Строгий `AuditRequest`.
+- [x] `INPUT-001` — Строгий `AuditRequest`.
 
-`INPUT-001` остаётся открытым до независимой приёмки. Commit
-[`5286a4d`](https://github.com/whatelseek/psql_auditor/commit/5286a4d773f62d0bc796b205ddd18994bdfc89af)
-— только кандидат (зелёный CI недостаточен).
-Доп. доказательства: `validate_audit_request_semantics()` требует pinned
-`inventory.version_id` / `content_hash` и сравнивает их с текущим
-нормализованным `ClientInventory.version` (`inventory_hash_mismatch` /
-`inventory_version_mismatch`); устаревшие сохранённые request отклоняются
-до исполнения `arun_request`.
+Доказательства приёмки:
+
+- строгая типизированная immutable versioned request-модель;
+- обязательные client, inventory, targets, framework versions, tool profile и
+  run settings;
+- secret-shaped поля запрещены;
+- inventory reference фиксирует normalized `version_id` и `content_hash`;
+- semantic validation перезагружает текущий inventory через loader/normalizer;
+- stale requests отклоняются с `inventory_hash_mismatch` /
+  `inventory_version_mismatch`;
+- та же проверка на границах CLI, HTTP, `AuditorGraph.arun_request()` и
+  replay сохранённого request;
+- rejection до jobs/sessions/external calls;
+- регрессионные тесты secret-safe ошибок и persisted request handling.
 
 - [ ] `INPUT-002` — Строгая валидация фреймворков.
-- [~] `INPUT-003` — Валидируемая модель inventory.
+- [ ] `AGENT-001` — Администраторские Markdown audit-агенты в `agents/`.
+- [x] `INPUT-003` — Валидируемая модель inventory.
 
-Частичные доказательства `INPUT-003`: модель `ClientInventory`, загрузчики
-Markdown/YAML/JSON, уровни error/warning/information, версия inventory и
-исключение plaintext-секретов; тесты
-`tests/test_inventory_driven_audit.py`; документация
-`docs/inventory-driven-audit.md`.
+Доказательства приёмки:
+
+- канонические `ClientInventory`, `InventoryHost`, `InventoryService`,
+  `InventoryFact` и `CredentialReference`;
+- загрузка Markdown/YAML/JSON с уровнями error/warning/information;
+- стабильные normalized `version_id` и `content_hash`;
+- отдельный разбор `CREDENTIALS.md`, merge, дубликаты и host mapping;
+- plaintext-секреты исключены из inventory/plan/request/API/артефактов;
+- missing OS → `needs_discovery`, не блокирующая validation error;
+- фикстуры Testcompany: пять хостов, несколько форматов, credentials и
+  смены версий.
+
+Неполный YAML/JSON execution path не блокирует `INPUT-003`; это относится к
+execution integration, а не к validated inventory domain model.
 
 - [ ] `INPUT-004` — Реестр инструментов и политика capabilities.
 - [~] `INPUT-005` — Детерминированный preflight и `AuditPlan`.
 
-Частичные доказательства `INPUT-005`: типизированный `AuditPlan` с обязательным
-подтверждением; stale-plan при расхождении inventory **или** discovery/effective
-facts; runtime-резолв `CREDENTIALS.md` / `credentials.md` / `connection.md` без
-персистенции секретов; production
-`SshDiscoveryCollector` / `WinrmDiscoveryCollector` / `CompositeDiscoveryCollector`
-по умолчанию (`--no-discovery` / `{ "discovery": false }` → no-op); read-only
-SSH/WinRM; PostgreSQL только по сильным признакам (порт 5432 сам по себе не
-выбирает `postgres_cis`); типизированные ошибки discovery, timeout/retry,
-изоляция сбоя одного хоста; санитизированные evidence + детерминированные
-preflight-ревизии; `audit start --confirm` не перезапускает discovery молча
-(`--refresh-discovery` опционально); docs `docs/inventory-driven-audit.md` +
-RU manual; тесты `tests/test_input005_discovery.py`,
-`tests/integration/test_ssh_discovery_container.py`.
-Независимая приёмка обязательна — не помечать `[x]` автоматически.
+Частичные доказательства:
+
+- типизированный `AuditPlan` с обязательным явным подтверждением;
+- детерминированное technology detection и framework selection с
+  select/reject reasons;
+- stale-plan rejection на confirm/start при расхождении inventory **или**
+  discovery/effective facts;
+- secret-safe runtime-резолв `CREDENTIALS.md` / `credentials.md` /
+  `connection.md` (секреты не персистятся в models/plans/API/logs/evidence);
+- production `SshDiscoveryCollector` / `WinrmDiscoveryCollector` /
+  `CompositeDiscoveryCollector` на analyze path по умолчанию
+  (`--no-discovery` / `{ "discovery": false }` → no-op);
+- read-only SSH/WinRM; PostgreSQL только по сильным признакам (порт 5432 сам
+  по себе не выбирает `postgres_cis`);
+- типизированные ошибки discovery, timeout/retry, изоляция сбоя одного хоста;
+- санитизированные discovery evidence под `artifacts/<slug>/preflight/…` и
+  детерминированные preflight-ревизии;
+- CLI `start_confirmed_audit` / API `await astart_confirmed_audit` →
+  `AuditRequest` → `arun_request` с `audit_run_id` (confirmed start не
+  перезапускает discovery молча; `--refresh-discovery` опционально);
+- docs: `docs/inventory-driven-audit.md`; тесты:
+  `tests/test_input005_discovery.py`,
+  `tests/integration/test_ssh_discovery_container.py`.
+
+Осталось:
+
+- интеграция YAML/JSON inventory execution за пределами validated domain model;
+- независимая приёмка production discovery (не помечать `[x]` автоматически).
 
 ### M3 — Оркестрация LangGraph и сбор доказательств
 
@@ -176,6 +226,17 @@ RU manual; тесты `tests/test_input005_discovery.py`,
 - [ ] `DOC-002` — Полностью синтетический sample package.
 - [ ] `CI-001` — Полный release pipeline.
 - [ ] `E2E-001` — Финальный acceptance-сценарий.
+
+## Текущие блокеры
+
+- `INPUT-005`: завершить YAML/JSON execution integration и независимую приёмку
+  production discovery.
+- `AGENT-001` / `INPUT-002`: администраторские агенты и строгая валидация
+  фреймворков.
+- `FLOW-007`: удалить deprecated process-wide graph getters после независимой
+  приёмки.
+- `DOC-001`: синхронизировать baseline и evidence-layout документацию.
+- `CI-001`: завершить workflow/report/review E2E и coverage миграций.
 
 ## Правила статусов
 

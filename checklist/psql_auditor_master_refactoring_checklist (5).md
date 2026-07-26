@@ -5,16 +5,16 @@ Date: **2026-07-26**
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
 Latest independently reviewed revision: [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8)  
-Total tasks: **71**
+Total tasks: **72**
 
 ## Status summary
 
 | Status | Count |
 | --- | ---: |
-| Complete `[x]` | **10 / 71 (14.1%)** |
-| Partially complete `[~]` | **5 / 71 (7.0%)** |
-| Open `[ ]` | **56 / 71 (78.9%)** |
-| Not fully complete | **61 / 71 (85.9%)** |
+| Complete `[x]` | **10 / 72 (13.9%)** |
+| Partially complete `[~]` | **5 / 72 (6.9%)** |
+| Open `[ ]` | **57 / 72 (79.2%)** |
+| Not fully complete | **62 / 72 (86.1%)** |
 
 Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `INPUT-001`, `INPUT-003`.
 
@@ -22,25 +22,27 @@ Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Latest verification
 
-PR #35 inventory-driven audit launch was independently reviewed at commit
+PR #36 (inventory-driven audit + production SSH/WinRM discovery) supersedes
+closed PR #35. Independent review of the inventory-driven launch path accepted
+`INPUT-001` and `INPUT-003` at
 [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8).
-`INPUT-001` and `INPUT-003` are accepted. `INPUT-005` remains partial because
-production SSH/WinRM discovery and YAML/JSON execution integration are not complete.
+`INPUT-005` remains `[~]` pending independent acceptance (YAML/JSON execution
+integration and production-discovery acceptance review). Checklist acceptance
+statuses are not changed automatically by green CI.
 
 | Check | Verified result |
 | --- | --- |
-| Format | Passed |
-| Lint | Passed |
-| Type check | Passed |
-| Unit tests | 422 passed |
-| Integration tests | 7 passed |
-| Full suite | 429 passed |
-| Defect map | `validate-defect-map: OK` (71/71) |
-| Current clean CI | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), all jobs passed |
-| Prior clean CI | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), all jobs passed |
-| Preflight gap closure CI | [Run 30208965512](https://github.com/whatelseek/psql_auditor/actions/runs/30208965512), all jobs passed |
+| Format | Pending local re-verification on rebased PR #36 |
+| Lint | Pending local re-verification on rebased PR #36 |
+| Type check | Pending local re-verification on rebased PR #36 |
+| Unit tests | Pending local re-verification on rebased PR #36 |
+| Integration tests | Pending local re-verification on rebased PR #36 |
+| Full suite | Pending local re-verification on rebased PR #36 |
+| Defect map | Target `validate-defect-map: OK` (72/72) |
+| Prior clean CI (PR #35 review base) | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), all jobs passed |
+| Prior clean CI (async start + inventory identity) | [Run 30209817551](https://github.com/whatelseek/psql_auditor/actions/runs/30209817551), all jobs passed |
 
-### Closed findings in PR #35
+### Closed findings carried from PR #35 (superseded by PR #36)
 
 - stale `AuditPlan` confirmation after inventory modification;
 - `CREDENTIALS.md` was detected but not loaded;
@@ -69,7 +71,7 @@ production SSH/WinRM discovery and YAML/JSON execution integration are not compl
 
 Closure evidence:
 
-- defect-to-module map covers all 71 checklist IDs and is enforced in CI;
+- defect-to-module map covers all 72 checklist IDs and is enforced in CI;
 - canonical local and CI targets include format, lint, typecheck, unit, integration and full-suite tests;
 - deterministic shared fixtures and fake LLM scenarios are reused across regression tests;
 - mandatory tests block unintended external HTTP/LLM access.
@@ -105,6 +107,7 @@ Acceptance evidence:
 - regression tests verify secret-safe errors and persisted request handling.
 
 - [ ] `INPUT-002` — Enforce strict framework validation.
+- [ ] `AGENT-001` — Provide administrator-managed Markdown audit agents under `agents/`.
 - [x] `INPUT-003` — Introduce a validated inventory model.
 
 Acceptance evidence:
@@ -129,21 +132,32 @@ Partial evidence:
 
 - typed `AuditPlan` with mandatory explicit confirmation;
 - deterministic technology detection and framework selection with select/reject reasons;
-- stale-plan rejection on confirm/start;
-- secret-safe `CREDENTIALS.md` integration;
-- injectable read-only discovery and deterministic reconciliation;
-- conflicting facts request clarification;
-- weak port-only PostgreSQL evidence does not select a PostgreSQL framework;
-- CLI and async HTTP start create a validated `AuditRequest`, invoke
-  `arun_request` and return `audit_run_id`.
+- stale-plan rejection on confirm/start when inventory **or** discovery/effective
+  facts hashes diverge;
+- secret-safe `CREDENTIALS.md` / `credentials.md` / `connection.md` runtime
+  credential resolution (secrets never persisted in models, plans, API, logs, or
+  evidence);
+- production `SshDiscoveryCollector` / `WinrmDiscoveryCollector` /
+  `CompositeDiscoveryCollector` on the default analyze path
+  (`--no-discovery` / `{ "discovery": false }` keep the no-op path);
+- read-only SSH/WinRM command sets; PostgreSQL confirmed only with strong
+  evidence (port 5432 alone does not select `postgres_cis`);
+- typed discovery errors, per-host timeout/retry, one-host failure isolation;
+- sanitized discovery evidence under `artifacts/<slug>/preflight/…` with
+  deterministic preflight revisions;
+- CLI sync `start_confirmed_audit` / API `await astart_confirmed_audit` create a
+  validated `AuditRequest`, invoke `arun_request` and return `audit_run_id`
+  (confirmed start does not silently re-run discovery; `--refresh-discovery`
+  optional);
+- docs: `docs/inventory-driven-audit.md`; tests:
+  `tests/test_input005_discovery.py`,
+  `tests/integration/test_ssh_discovery_container.py`.
 
 Remaining work:
 
-- production SSH discovery collector;
-- production WinRM discovery collector;
-- discovered evidence persistence;
-- discovery timeout, retry and error taxonomy;
-- YAML/JSON execution support.
+- YAML/JSON inventory execution integration beyond the validated domain model;
+- independent acceptance review for production discovery (do not mark `[x]`
+  automatically).
 
 ### M3 — LangGraph orchestration and evidence collection
 
@@ -222,7 +236,10 @@ Remaining work:
 
 ## Current blockers
 
-- `INPUT-005`: wire production SSH/WinRM discovery and complete YAML/JSON execution integration.
+- `INPUT-005`: complete YAML/JSON execution integration and independent
+  acceptance of production discovery.
+- `AGENT-001` / `INPUT-002`: administrator-managed agent authoring with strict
+  framework validation.
 - `FLOW-007`: remove deprecated process-wide graph getters after independent review.
 - `DOC-001`: synchronize baseline and evidence-layout documentation.
 - `CI-001`: complete workflow/report/review E2E and migration coverage.
