@@ -27,12 +27,15 @@ from auditor.inventory.detect import detect_technologies
 from auditor.inventory.discovery import (
     DiscoveryCollector,
     NoopDiscoveryCollector,
+    default_discovery_collector,
     reconcile_inventory,
 )
+from auditor.inventory.discovery_evidence import COLLECTOR_VERSION
 from auditor.inventory.loaders import InventoryLoadError, load_raw_inventory
 from auditor.inventory.normalize import normalize_inventory
 from auditor.inventory.plan import (
     assert_plan_matches_inventory,
+    assert_plan_matches_preflight,
     ensure_plan_confirmed,
     load_plan,
     persist_plan,
@@ -43,6 +46,11 @@ from auditor.inventory.plan import (
 )
 from auditor.inventory.plan import (
     generate_audit_plan as build_plan,
+)
+from auditor.inventory.preflight import (
+    build_preflight_revision,
+    load_latest_preflight,
+    persist_preflight_revision,
 )
 
 AuditExecutor = Callable[[Any], Awaitable[dict[str, Any]]]
@@ -78,15 +86,72 @@ def analyze_client_inventory(
     agents_dir: Path | str | None = None,
     persist_dir: Path | str | None = None,
     discoverer: DiscoveryCollector | None = None,
+    discovery: bool = True,
+    artifacts_root: Path | str | None = None,
 ) -> tuple[ClientInventory, AuditPlan]:
-    """Validate inventory, run optional discovery, and generate a draft plan."""
+    """Validate inventory, run discovery (default on), and generate a draft plan.
+
+    Production discovery uses :class:`CompositeDiscoveryCollector` unless
+    ``discovery=False`` (no-op) or an explicit ``discoverer`` is injected.
+    """
+    inventory_dir = Path(inventory_dir)
+    client_name = validate_client_name(client_name)
     inventory = load_client_inventory(inventory_dir, client_name)
-    collector = discoverer or NoopDiscoveryCollector()
+
+    if discoverer is not None:
+        collector: DiscoveryCollector = discoverer
+    else:
+        if artifacts_root is None and discovery:
+            try:
+                artifacts_root = load_settings().evidence_dir
+            except Exception:  # noqa: BLE001
+                artifacts_root = Path("artifacts")
+        collector = default_discovery_collector(
+            inventory_dir,
+            client_name,
+            artifacts_root=artifacts_root,
+            enabled=discovery,
+        )
+
     discoveries = collector.discover(inventory)
     if discoveries:
         inventory = reconcile_inventory(inventory, discoveries)
+
     detections = detect_technologies(inventory)
-    plan = build_plan(inventory, detections, agents_dir=agents_dir)
+    # Build provisional plan decisions for selected framework list / revision.
+    provisional = build_plan(inventory, detections, agents_dir=agents_dir)
+    selected = sorted(
+        {d.framework_id for d in provisional.framework_decisions if d.status == "selected"}
+    )
+    revision = build_preflight_revision(
+        inventory,
+        discoveries=discoveries,
+        selected_frameworks=selected,
+        collector_versions={
+            "composite": COLLECTOR_VERSION,
+            "ssh": COLLECTOR_VERSION,
+            "winrm": COLLECTOR_VERSION,
+            "noop": "0" if isinstance(collector, NoopDiscoveryCollector) else COLLECTOR_VERSION,
+        },
+    )
+    if artifacts_root is not None:
+        try:
+            persist_preflight_revision(
+                revision,
+                artifacts_root=artifacts_root,
+                client_slug=client_name,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    plan = build_plan(
+        inventory,
+        detections,
+        agents_dir=agents_dir,
+        discovery_result_hash=revision.discovery_result_hash,
+        effective_facts_hash=revision.effective_facts_hash,
+        preflight_revision_id=revision.revision_id,
+    )
     if persist_dir is not None:
         root = Path(persist_dir)
         persist_plan(plan, root / f"{plan.plan_id}.json")
@@ -103,6 +168,8 @@ def generate_audit_plan(
     *,
     agents_dir: Path | str | None = None,
     discoverer: DiscoveryCollector | None = None,
+    discovery: bool = True,
+    artifacts_root: Path | str | None = None,
 ) -> AuditPlan:
     """Convenience wrapper returning only the draft plan."""
     _inventory, plan = analyze_client_inventory(
@@ -110,6 +177,8 @@ def generate_audit_plan(
         client_name,
         agents_dir=agents_dir,
         discoverer=discoverer,
+        discovery=discovery,
+        artifacts_root=artifacts_root,
     )
     return plan
 
@@ -140,6 +209,20 @@ def confirm_audit_plan(
                 )
             current = load_client_inventory(inventory_dir, client_name)
         assert_plan_matches_inventory(plan, current)
+        # If a newer preflight exists for the same inventory with different
+        # effective facts, the plan is stale (discovery changed post-plan).
+        if inventory_dir is not None and client_name is not None:
+            try:
+                settings = load_settings()
+                latest = load_latest_preflight(settings.evidence_dir, client_name)
+            except Exception:  # noqa: BLE001
+                latest = None
+            if latest is not None and latest.inventory_version_id == plan.inventory_version_id:
+                assert_plan_matches_preflight(
+                    plan,
+                    discovery_result_hash=latest.discovery_result_hash,
+                    effective_facts_hash=latest.effective_facts_hash,
+                )
 
     request = PlanConfirmationRequest(
         action=action,  # type: ignore[arg-type]
@@ -253,36 +336,48 @@ async def astart_confirmed_audit(
     note: str = "",
     executor: AuditExecutor | None = None,
     discoverer: DiscoveryCollector | None = None,
+    refresh_discovery: bool = False,
 ) -> dict[str, Any]:
     """Confirm a fresh plan and execute it via ``arun_request`` (or ``executor``).
 
-    Async entry point for FastAPI and other event-loop callers. Returns a dict
-    including ``audit_run_id``, ``plan_id``, and ``audit_request``.
+    Discovery is **not** re-run unless ``refresh_discovery=True`` or an explicit
+    ``discoverer`` is provided for a refresh check. Async entry point for FastAPI.
     """
     settings = settings or load_settings()
     inventory_dir = Path(inventory_dir)
     client_name = validate_client_name(client_name)
 
-    # Reload inventory; discovery is not re-run on start (plan already embeds
-    # reconciled decisions). Stale check uses current inventory file hash.
+    # Reload inventory; discovery is not re-run on start by default.
     inventory = load_client_inventory(inventory_dir, client_name)
-    # If the stored plan was built after discovery, its hash includes only the
-    # file-backed inventory version from analyze time. Re-analyze path stores
-    # the same file hash on the plan (discovery does not change content_hash
-    # of the file). Stale = file changed.
     assert_plan_matches_inventory(plan, inventory)
 
     registry = get_client_registry(settings.evidence_dir)
     client = registry.ensure_client(display_name=client_name, slug=client_name)
 
-    # Optional re-discovery for callers that inject a collector (tests / preflight).
-    if discoverer is not None:
-        inventory, plan = analyze_client_inventory(
+    if refresh_discovery or discoverer is not None:
+        # Explicit refresh only — compare against the confirmed plan hashes.
+        inventory, refreshed_plan = analyze_client_inventory(
             inventory_dir,
             client_name,
             agents_dir=agents_dir or settings.agents_dir,
             discoverer=discoverer,
+            discovery=True,
+            artifacts_root=settings.evidence_dir,
         )
+        assert_plan_matches_preflight(
+            plan,
+            discovery_result_hash=refreshed_plan.discovery_result_hash,
+            effective_facts_hash=refreshed_plan.effective_facts_hash,
+        )
+    else:
+        # Stale check against latest stored preflight without re-running discovery.
+        latest = load_latest_preflight(settings.evidence_dir, client_name)
+        if latest is not None and latest.inventory_version_id == plan.inventory_version_id:
+            assert_plan_matches_preflight(
+                plan,
+                discovery_result_hash=latest.discovery_result_hash,
+                effective_facts_hash=latest.effective_facts_hash,
+            )
 
     if plan.status != "confirmed":
         plan = confirm_audit_plan(
@@ -290,6 +385,8 @@ async def astart_confirmed_audit(
             action="approve",
             note=note or "confirmed",
             inventory=inventory,
+            inventory_dir=inventory_dir,
+            client_name=client_name,
         )
     else:
         assert_plan_matches_inventory(plan, inventory)
@@ -351,6 +448,7 @@ def start_confirmed_audit(
     note: str = "",
     executor: AuditExecutor | None = None,
     discoverer: DiscoveryCollector | None = None,
+    refresh_discovery: bool = False,
 ) -> dict[str, Any]:
     """CLI-only synchronous wrapper around :func:`astart_confirmed_audit`.
 
@@ -367,6 +465,7 @@ def start_confirmed_audit(
             note=note,
             executor=executor,
             discoverer=discoverer,
+            refresh_discovery=refresh_discovery,
         )
     )
 

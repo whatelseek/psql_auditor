@@ -32,6 +32,9 @@ def generate_audit_plan(
     detections: list[TechnologyDetection],
     *,
     agents_dir: Path | str | None = None,
+    discovery_result_hash: str = "",
+    effective_facts_hash: str = "",
+    preflight_revision_id: str = "",
 ) -> AuditPlan:
     """Build a draft audit plan from inventory + technology detections.
 
@@ -124,6 +127,22 @@ def generate_audit_plan(
             for d in decisions
             if d.status == "considered"
         ),
+        *(
+            f"Resolve discovery limitation on {i.host_id}: {i.message}"
+            for i in inventory.issues
+            if i.code
+            in {
+                "discovery_limitation",
+                "connection_timeout",
+                "authentication_failed",
+                "host_unreachable",
+                "command_timeout",
+                "discovery_failed",
+                "partial_discovery",
+                "unsupported_transport",
+            }
+            and i.host_id
+        ),
     ]
 
     # Coverage heuristic: hosts without errors / total hosts, adjusted for missing data.
@@ -149,6 +168,9 @@ def generate_audit_plan(
         client_id=inventory.client_id,
         inventory_version_id=inventory.version.version_id,
         inventory_content_hash=inventory.version.content_hash,
+        discovery_result_hash=discovery_result_hash,
+        effective_facts_hash=effective_facts_hash,
+        preflight_revision_id=preflight_revision_id,
         status="draft",
         targets=tuple(targets),
         framework_decisions=tuple(decisions),
@@ -288,6 +310,29 @@ def assert_plan_matches_inventory(plan: AuditPlan, inventory: ClientInventory) -
             "re-run inventory analyze / audit plan to regenerate",
             code="plan_stale",
         )
+
+
+def assert_plan_matches_preflight(
+    plan: AuditPlan,
+    *,
+    discovery_result_hash: str = "",
+    effective_facts_hash: str = "",
+) -> None:
+    """Reject start when discovery/effective facts diverged after plan confirmation."""
+    if plan.discovery_result_hash and discovery_result_hash:
+        if plan.discovery_result_hash != discovery_result_hash:
+            raise PlanConfirmationRejected(
+                "audit plan is stale: discovery results changed since plan generation; "
+                "re-run inventory analyze / audit plan --refresh",
+                code="plan_stale",
+            )
+    if plan.effective_facts_hash and effective_facts_hash:
+        if plan.effective_facts_hash != effective_facts_hash:
+            raise PlanConfirmationRejected(
+                "audit plan is stale: effective discovery facts changed since plan "
+                "generation; re-run inventory analyze / audit plan --refresh",
+                code="plan_stale",
+            )
 
 
 def plan_confirmation_prompt(plan: AuditPlan) -> str:

@@ -88,6 +88,9 @@ class AuditPlan(BaseModel):
     client_id: StrictStr = Field(min_length=1)
     inventory_version_id: StrictStr = Field(min_length=1)
     inventory_content_hash: StrictStr = Field(min_length=1)
+    discovery_result_hash: StrictStr = ""
+    effective_facts_hash: StrictStr = ""
+    preflight_revision_id: StrictStr = ""
     status: PlanStatus = "draft"
     targets: tuple[AuditPlanTarget, ...] = ()
     framework_decisions: tuple[FrameworkSelectionDecision, ...] = ()

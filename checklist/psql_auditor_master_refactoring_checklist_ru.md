@@ -88,14 +88,19 @@ Markdown/YAML/JSON, уровни error/warning/information, версия invento
 - [~] `INPUT-005` — Детерминированный preflight и `AuditPlan`.
 
 Частичные доказательства `INPUT-005`: типизированный `AuditPlan` с обязательным
-подтверждением; stale-plan (`plan_stale`); merge `CREDENTIALS.md`;
-`needs_discovery` + injectable read-only discovery/reconcile; CLI sync
-`start_confirmed_audit` / API `await astart_confirmed_audit` → `AuditRequest`
-(version/hash) → `arun_request` / `audit_run_id` (FastAPI не вызывает
-`asyncio.run` на start); проверка inventory identity на границе исполнения
-отклоняет stale saved requests (`inventory_hash_mismatch` /
-`inventory_version_mismatch`). Default discoverer — no-op до wiring live
-SSH/WinRM; независимая приёмка обязательна.
+подтверждением; stale-plan при расхождении inventory **или** discovery/effective
+facts; runtime-резолв `CREDENTIALS.md` / `credentials.md` / `connection.md` без
+персистенции секретов; production
+`SshDiscoveryCollector` / `WinrmDiscoveryCollector` / `CompositeDiscoveryCollector`
+по умолчанию (`--no-discovery` / `{ "discovery": false }` → no-op); read-only
+SSH/WinRM; PostgreSQL только по сильным признакам (порт 5432 сам по себе не
+выбирает `postgres_cis`); типизированные ошибки discovery, timeout/retry,
+изоляция сбоя одного хоста; санитизированные evidence + детерминированные
+preflight-ревизии; `audit start --confirm` не перезапускает discovery молча
+(`--refresh-discovery` опционально); docs `docs/inventory-driven-audit.md` +
+RU manual; тесты `tests/test_input005_discovery.py`,
+`tests/integration/test_ssh_discovery_container.py`.
+Независимая приёмка обязательна — не помечать `[x]` автоматически.
 
 ### M3 — Оркестрация LangGraph и сбор доказательств
 

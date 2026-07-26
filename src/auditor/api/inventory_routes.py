@@ -27,12 +27,19 @@ from auditor.inventory.service import (
 router = APIRouter(tags=["inventory-audit"])
 
 
+class AnalyzeBody(BaseModel):
+    """Optional analyze options. Discovery is enabled by default."""
+
+    discovery: bool = True
+
+
 class ConfirmBody(BaseModel):
     action: str = "approve"
     host_ids: list[str] = Field(default_factory=list)
     framework_ids: list[str] = Field(default_factory=list)
     note: str = ""
     start: bool = False
+    refresh_discovery: bool = False
 
 
 def _plans_dir(inventory_dir: Path, client: str) -> Path:
@@ -46,15 +53,28 @@ def _settings(request: Request):
     return runtime.settings
 
 
+async def _read_analyze_body(request: Request) -> AnalyzeBody:
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return AnalyzeBody()
+    if not isinstance(payload, dict):
+        return AnalyzeBody()
+    return AnalyzeBody.model_validate(payload)
+
+
 @router.post("/clients/{client_id}/inventory/analyze")
 async def analyze_inventory(client_id: str, request: Request) -> dict[str, Any]:
     settings = _settings(request)
+    body = await _read_analyze_body(request)
     try:
         inventory, plan = analyze_client_inventory(
             settings.inventory_dir,
             client_id,
             agents_dir=settings.agents_dir,
             persist_dir=_plans_dir(Path(settings.inventory_dir), client_id),
+            discovery=body.discovery,
+            artifacts_root=settings.evidence_dir,
         )
     except InvalidClientNameError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -66,6 +86,8 @@ async def analyze_inventory(client_id: str, request: Request) -> dict[str, Any]:
         "plan": plan.model_dump(),
         "conflicts": [c.model_dump() for c in inventory.conflicts],
         "confirmation_prompt": plan_confirmation_prompt(plan),
+        "discovery_enabled": body.discovery,
+        "preflight_revision_id": plan.preflight_revision_id,
     }
 
 
@@ -120,6 +142,7 @@ async def confirm_plan(plan_id: str, body: ConfirmBody, request: Request) -> dic
                 agents_dir=settings.agents_dir,
                 note=body.note,
                 executor=_runtime_executor(request),
+                refresh_discovery=body.refresh_discovery,
             )
             persist_plan(started["plan"], plan_path)
             return {

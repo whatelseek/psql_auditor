@@ -172,7 +172,9 @@ def test_contradictory_service_information(tmp_path: Path):
 
 def test_automatic_framework_selection_and_plan(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
-    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
     assert plan.status == "draft"
     assert plan.requires_confirmation()
     assert plan.summary.total_hosts == 5
@@ -193,7 +195,9 @@ def test_automatic_framework_selection_and_plan(tmp_path: Path):
 
 def test_plan_confirmation_required_and_rejection(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
-    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
     with pytest.raises(PlanConfirmationRejected, match="not confirmed"):
         reject_audit_launch(plan)
     with pytest.raises(PlanConfirmationRejected):
@@ -220,7 +224,9 @@ def test_plan_confirmation_required_and_rejection(tmp_path: Path):
 
 def test_exclude_host_before_confirm(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
-    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
     trimmed = confirm_audit_plan(plan, action="exclude_host", host_ids=["host-05"])
     assert trimmed.status == "draft"
     assert all(t.excluded for t in trimmed.targets if t.host_id == "host-05")
@@ -280,8 +286,8 @@ def test_inventory_version_changes_when_hosts_change(tmp_path: Path):
 
 def test_plan_generation_idempotent(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
-    _i1, p1 = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
-    _i2, p2 = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    _i1, p1 = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS, discovery=False)
+    _i2, p2 = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS, discovery=False)
     assert p1.plan_id == p2.plan_id
     assert p1.inventory_content_hash == p2.inventory_content_hash
 
@@ -290,7 +296,9 @@ def test_plan_json_roundtrip(tmp_path: Path):
     from auditor.inventory.plan import load_plan, persist_plan
 
     root = _copy_client(tmp_path, fmt="md")
-    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
     path = tmp_path / "plan.json"
     persist_plan(plan, path)
     loaded = load_plan(path)
@@ -301,7 +309,9 @@ def test_plan_json_roundtrip(tmp_path: Path):
 
 def test_stale_plan_rejected_after_inventory_modification(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
-    _inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    _inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
     path = root / "Testcompany" / "INVENTORY.md"
     text = path.read_text(encoding="utf-8")
     path.write_text(text.replace("host-05", "host-05b"), encoding="utf-8")
@@ -317,7 +327,9 @@ def test_stale_plan_rejected_after_inventory_modification(tmp_path: Path):
 
 def test_unchanged_plan_accepted(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
-    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
     confirmed = confirm_audit_plan(
         plan,
         action="approve",
@@ -383,7 +395,7 @@ def test_plaintext_absent_from_plan_and_request(tmp_path: Path):
 """,
         encoding="utf-8",
     )
-    inventory, plan = analyze_client_inventory(root, "SecPlan", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(root, "SecPlan", agents_dir=AGENTS, discovery=False)
     confirmed = confirm_audit_plan(plan, action="approve", inventory=inventory)
     payload = _payload(confirmed, inventory, slug="SecPlan")
     for blob in (
@@ -616,7 +628,9 @@ def test_confirmed_start_creates_real_audit_run(tmp_path: Path):
         max_parallel_assessments=5,
         max_parallel_host_jobs=2,
     )
-    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
 
     async def _executor(request):
         client = get_client_registry(evidence).get(request.client_id)
@@ -699,7 +713,9 @@ async def test_api_start_true_works_in_active_event_loop(tmp_path: Path):
     """API start=true must await astart (no asyncio.run) inside FastAPI loop."""
     root = _copy_client(tmp_path, fmt="md")
     settings = _settings_for(tmp_path, root)
-    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
     plans = root / "Testcompany" / ".audit_plans"
     plans.mkdir(parents=True)
     persist_plan(plan, plans / "latest.json")
@@ -742,7 +758,9 @@ async def test_api_start_true_works_in_active_event_loop(tmp_path: Path):
 async def test_astart_confirmed_audit_direct_async(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
     settings = _settings_for(tmp_path, root)
-    _inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    _inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
 
     async def _executor(request):
         run_id = new_audit_run_id()
@@ -771,7 +789,9 @@ async def test_astart_confirmed_audit_direct_async(tmp_path: Path):
 def test_cli_sync_start_still_works(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
     settings = _settings_for(tmp_path, root)
-    _inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    _inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
 
     async def _executor(request):
         run_id = new_audit_run_id()
@@ -797,7 +817,9 @@ def test_cli_sync_start_still_works(tmp_path: Path):
 def test_unchanged_inventory_request_passes_semantic_validation(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
     settings = _settings_for(tmp_path, root)
-    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
     confirmed = confirm_audit_plan(plan, action="approve", note="ok", inventory=inventory)
     client = get_client_registry(settings.evidence_dir).ensure_client(
         display_name="Testcompany", slug="Testcompany"
@@ -816,7 +838,9 @@ def test_unchanged_inventory_request_passes_semantic_validation(tmp_path: Path):
 def test_changed_inventory_rejects_inventory_hash_mismatch(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
     settings = _settings_for(tmp_path, root)
-    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
     confirmed = confirm_audit_plan(plan, action="approve", note="ok", inventory=inventory)
     client = get_client_registry(settings.evidence_dir).ensure_client(
         display_name="Testcompany", slug="Testcompany"
@@ -840,7 +864,9 @@ def test_changed_inventory_rejects_inventory_hash_mismatch(tmp_path: Path):
 def test_changed_version_rejects_inventory_version_mismatch(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
     settings = _settings_for(tmp_path, root)
-    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
     confirmed = confirm_audit_plan(plan, action="approve", note="ok", inventory=inventory)
     client = get_client_registry(settings.evidence_dir).ensure_client(
         display_name="Testcompany", slug="Testcompany"
@@ -863,7 +889,9 @@ def test_changed_version_rejects_inventory_version_mismatch(tmp_path: Path):
 async def test_saved_request_cannot_execute_after_inventory_modification(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
     settings = _settings_for(tmp_path, root)
-    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
     confirmed = confirm_audit_plan(plan, action="approve", note="ok", inventory=inventory)
     client = get_client_registry(settings.evidence_dir).ensure_client(
         display_name="Testcompany", slug="Testcompany"
@@ -917,7 +945,9 @@ async def test_saved_request_cannot_execute_after_inventory_modification(tmp_pat
 def test_identity_rejection_errors_do_not_expose_secrets(tmp_path: Path):
     root = _copy_client(tmp_path, fmt="md")
     settings = _settings_for(tmp_path, root)
-    inventory, plan = analyze_client_inventory(root, "Testcompany", agents_dir=AGENTS)
+    inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
     confirmed = confirm_audit_plan(plan, action="approve", note="ok", inventory=inventory)
     client = get_client_registry(settings.evidence_dir).ensure_client(
         display_name="Testcompany", slug="Testcompany"

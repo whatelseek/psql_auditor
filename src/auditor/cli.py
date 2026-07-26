@@ -71,6 +71,8 @@ def cmd_inventory_analyze(args: argparse.Namespace) -> int:
             args.client,
             agents_dir=settings.agents_dir,
             persist_dir=plans,
+            discovery=not args.no_discovery,
+            artifacts_root=settings.evidence_dir,
         )
     except (InvalidClientNameError, InventoryLoadError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -86,6 +88,8 @@ def cmd_inventory_analyze(args: argparse.Namespace) -> int:
             "framework_decisions": [d.model_dump() for d in plan.framework_decisions],
             "conflicts": [c.model_dump() for c in inventory.conflicts],
             "confirmation_prompt": plan_confirmation_prompt(plan),
+            "discovery_enabled": not args.no_discovery,
+            "preflight_revision_id": plan.preflight_revision_id,
         }
     )
     return 0
@@ -116,6 +120,8 @@ def cmd_audit_plan(args: argparse.Namespace) -> int:
             args.client,
             agents_dir=settings.agents_dir,
             persist_dir=plans,
+            discovery=not args.no_discovery,
+            artifacts_root=settings.evidence_dir,
         )
         persist_plan(plan, latest)
     print(plan_confirmation_prompt(plan))
@@ -161,6 +167,7 @@ def cmd_audit_start(args: argparse.Namespace) -> int:
             settings=settings,
             agents_dir=settings.agents_dir,
             note=args.note or "confirmed via CLI",
+            refresh_discovery=bool(args.refresh_discovery),
         )
     except PlanConfirmationRejected as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -209,6 +216,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_val.set_defaults(func=cmd_inventory_validate)
     p_an = inv_sub.add_parser("analyze", help="Analyze inventory and draft a plan")
     p_an.add_argument("client")
+    p_an.add_argument(
+        "--no-discovery",
+        action="store_true",
+        help="Disable live SSH/WinRM discovery (use inventory facts only)",
+    )
     p_an.set_defaults(func=cmd_inventory_analyze)
 
     audit = sub.add_parser("audit", help="Audit plan confirmation and launch")
@@ -216,6 +228,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan = audit_sub.add_parser("plan", help="Show / refresh the draft audit plan")
     p_plan.add_argument("client")
     p_plan.add_argument("--refresh", action="store_true")
+    p_plan.add_argument(
+        "--no-discovery",
+        action="store_true",
+        help="When refreshing, skip live discovery",
+    )
     p_plan.set_defaults(func=cmd_audit_plan)
     p_start = audit_sub.add_parser(
         "start",
@@ -225,6 +242,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--confirm", action="store_true", help="Approve the draft plan")
     p_start.add_argument("--reject", action="store_true", help="Reject the draft plan")
     p_start.add_argument("--note", default="")
+    p_start.add_argument(
+        "--refresh-discovery",
+        action="store_true",
+        help="Re-run discovery and reject the plan if effective facts changed",
+    )
     p_start.set_defaults(func=cmd_audit_start)
     return parser
 

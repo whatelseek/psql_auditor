@@ -416,116 +416,132 @@ class InventorySshTarget:
 
 
 def _iter_credential_rows(text: str) -> list[dict[str, str]]:
-    """Yield raw credential table rows as dicts (access, host, port, …)."""
+    """Return raw credential table rows as dicts (access, host, port, …).
+
+    Scans **all** Markdown tables that look like Access/Host credential tables
+    so a later ``Credentials & Access`` section is not masked by an earlier
+    in-scope hosts table that also has Access + Host columns.
+    """
     lines = (text or "").splitlines()
-    header_idx = -1
-    headers: list[str] = []
-    for i, line in enumerate(lines):
-        match = _TABLE_ROW.match(line.strip())
+    rows: list[dict[str, str]] = []
+    i = 0
+    while i < len(lines):
+        match = _TABLE_ROW.match(lines[i].strip())
         if not match:
+            i += 1
             continue
         cells = [_cell(c) for c in match.group(1).split("|")]
         norms = [_norm_header(c) for c in cells]
-        if any(h in {"access", "service", "type"} for h in norms) and any(
-            h in {"host", "hosturl", "url", "endpoint"} for h in norms
+        if not (
+            any(h in {"access", "service", "type"} for h in norms)
+            and any(h in {"host", "hosturl", "url", "endpoint", "address"} for h in norms)
         ):
-            header_idx = i
-            headers = norms
-            break
-    if header_idx < 0:
-        return []
-
-    def col(*aliases: str) -> int | None:
-        """Return the first matching header column index, or None.
-
-        Args:
-            *aliases: Normalized header names to look up in order of preference.
-
-        Returns:
-            Zero-based column index, or ``None`` when none of the aliases exist.
-        """
-        for alias in aliases:
-            if alias in headers:
-                return headers.index(alias)
-        return None
-
-    i_access = col("access", "service", "type")
-    i_host = col("hosturl", "host", "url", "endpoint", "address")
-    i_port = col("port", "accessport", "tcpport")
-    i_user = col("username", "user", "login")
-    i_secret = col("passwordtoken", "password", "token", "secret", "passwd")
-    i_extra = col("extra", "database", "notes", "path", "options")
-    if i_access is None or i_host is None:
-        return []
-
-    rows: list[dict[str, str]] = []
-    for line in lines[header_idx + 1 :]:
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            if rows:
-                break
+            i += 1
             continue
-        if re.match(r"^\|[\s|:-]+\|$", stripped):
-            continue
-        cells = [_cell(c) for c in stripped.strip("|").split("|")]
-        if len(cells) < len(headers):
-            cells.extend([""] * (len(headers) - len(cells)))
-        access = cells[i_access] if i_access < len(cells) else ""
-        host = cells[i_host] if i_host < len(cells) else ""
-        port = cells[i_port] if i_port is not None and i_port < len(cells) else ""
-        user = cells[i_user] if i_user is not None and i_user < len(cells) else ""
-        secret = cells[i_secret] if i_secret is not None and i_secret < len(cells) else ""
-        extra_raw = cells[i_extra] if i_extra is not None and i_extra < len(cells) else ""
-        rows.append(
-            {
-                "access": access,
-                "host": host,
-                "port": port,
-                "user": user,
-                "secret": secret,
-                "extra": extra_raw,
-                "kind": _access_kind(access) or "",
-            }
+        headers = norms
+        header_idx = i
+
+        def col(*aliases: str) -> int | None:
+            for alias in aliases:
+                if alias in headers:
+                    return headers.index(alias)
+            return None
+
+        i_access = col("access", "service", "type")
+        i_host = col("hosturl", "host", "url", "endpoint", "address")
+        i_port = col("port", "accessport", "tcpport")
+        i_user = col("username", "user", "login")
+        i_secret = col(
+            "passwordtoken",
+            "password",
+            "token",
+            "secret",
+            "passwd",
+            "secretreference",
         )
+        i_extra = col("extra", "database", "notes", "path", "options")
+        if i_access is None or i_host is None:
+            i += 1
+            continue
+
+        i = header_idx + 1
+        while i < len(lines):
+            stripped = lines[i].strip()
+            if not stripped.startswith("|"):
+                break
+            if re.match(r"^\|[\s|:-]+\|$", stripped):
+                i += 1
+                continue
+            cells = [_cell(c) for c in stripped.strip("|").split("|")]
+            if len(cells) < len(headers):
+                cells.extend([""] * (len(headers) - len(cells)))
+            access = cells[i_access] if i_access < len(cells) else ""
+            host = cells[i_host] if i_host < len(cells) else ""
+            port = cells[i_port] if i_port is not None and i_port < len(cells) else ""
+            user = cells[i_user] if i_user is not None and i_user < len(cells) else ""
+            secret = cells[i_secret] if i_secret is not None and i_secret < len(cells) else ""
+            extra_raw = cells[i_extra] if i_extra is not None and i_extra < len(cells) else ""
+            rows.append(
+                {
+                    "access": access,
+                    "host": host,
+                    "port": port,
+                    "user": user,
+                    "secret": secret,
+                    "extra": extra_raw,
+                    "kind": _access_kind(access) or "",
+                }
+            )
+            i += 1
     return rows
 
 
 def list_inventory_ssh_targets(text: str) -> list[InventorySshTarget]:
-    """Return every SSH- or WinRM-capable row from an inventory credentials table.
+    """Return every SSH- or WinRM-capable row from inventory credential tables.
 
-    Deduplicates by host (first row wins). Includes OS-labelled rows
-    (e.g. ``1C Ubuntu``) when ``_access_kind`` maps them to ``ssh``, and
-    ``WinRM`` rows as ``transport=winrm``.
+    Deduplicates by host; rows with a password/key replace earlier empty ones.
+    Includes OS-labelled rows (e.g. ``1C Ubuntu``) when ``_access_kind`` maps
+    them to ``ssh``, and ``WinRM`` rows as ``transport=winrm``.
     """
-    seen: set[str] = set()
-    out: list[InventorySshTarget] = []
+    by_host: dict[str, InventorySshTarget] = {}
+    order: list[str] = []
     for row in _iter_credential_rows(text):
         kind = (row.get("kind") or "").strip()
         if kind not in {"ssh", "winrm"}:
             continue
         host = (row.get("host") or "").strip()
-        if not host or host.lower() in seen:
+        if not host:
             continue
-        seen.add(host.lower())
+        key = host.lower()
         extra = _parse_extra(row.get("extra") or "")
         default_port = "5985" if kind == "winrm" else "22"
-        out.append(
-            InventorySshTarget(
-                host=host,
-                port=(row.get("port") or default_port).strip() or default_port,
-                user=(row.get("user") or "").strip(),
-                password=(row.get("secret") or "").strip(),
-                private_key_path=extra.get("key") or "",
-                strict_host_key=extra.get("strict_host_key") or "",
-                label=(row.get("access") or "").strip(),
-                transport=kind,
-                winrm_transport=extra.get("transport") or "ntlm",
-                winrm_use_ssl=extra.get("use_ssl") or "",
-                winrm_verify_ssl=extra.get("verify_ssl") or "",
-                asset_id=(extra.get("asset_id") or "").strip(),
-            )
+        candidate = InventorySshTarget(
+            host=host,
+            port=(row.get("port") or default_port).strip() or default_port,
+            user=(row.get("user") or "").strip(),
+            password=(row.get("secret") or "").strip(),
+            private_key_path=extra.get("key") or "",
+            strict_host_key=extra.get("strict_host_key") or "",
+            label=(row.get("access") or "").strip(),
+            transport=kind,
+            winrm_transport=extra.get("transport") or "ntlm",
+            winrm_use_ssl=extra.get("use_ssl") or "",
+            winrm_verify_ssl=extra.get("verify_ssl") or "",
+            asset_id=(extra.get("asset_id") or "").strip(),
         )
-    return out
+        existing = by_host.get(key)
+        if existing is None:
+            by_host[key] = candidate
+            order.append(key)
+            continue
+        # Prefer the row that carries usable credentials.
+        if (candidate.password or candidate.private_key_path) and not (
+            existing.password or existing.private_key_path
+        ):
+            by_host[key] = candidate
+        elif candidate.user and not existing.user:
+            by_host[key] = candidate
+    return [by_host[k] for k in order]
 
 
 def list_client_ssh_targets(
