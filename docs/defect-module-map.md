@@ -4,7 +4,7 @@ Canonical mapping of every checklist defect/task ID to production ownership.
 
 | Field | Value |
 |-------|-------|
-| Reviewed commit SHA | `d3c20411f3cfe8c1f6616c4f2bcba130bd7b4c1d` |
+| Reviewed commit SHA | `00cb8bab3e5c1d22f8e3199efcddfc6f08bc4e6e` |
 | Checklist source | [`checklist/psql_auditor_master_refactoring_checklist (5).md`](../checklist/psql_auditor_master_refactoring_checklist%20(5).md) (version **1.7**, dated 2026-07-26) |
 | Validation | `make validate-defect-map` (`scripts/validate_defect_map.py`) |
 

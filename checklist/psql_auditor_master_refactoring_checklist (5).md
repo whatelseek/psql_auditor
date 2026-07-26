@@ -4,7 +4,7 @@ Checklist version: **1.7**
 Date: **2026-07-26**  
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
-Latest reviewed revision: [`d3c2041`](https://github.com/whatelseek/psql_auditor/commit/d3c2041)  
+Latest reviewed revision: [`00cb8ba`](https://github.com/whatelseek/psql_auditor/commit/00cb8ba)  
 Total tasks: **71**
 
 ## Status summary
