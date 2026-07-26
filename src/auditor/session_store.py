@@ -144,6 +144,12 @@ def find_interrupted_run(evidence_dir: Path) -> tuple[str, dict[str, Any]] | Non
 
     Scans all run folders with ``meta.json`` where ``status == "interrupted"``.
 
+    .. note::
+
+        Do **not** use this to identify the active run for continue/cancel
+        (CORE-002). Prefer an explicit ``run_id`` / ``audit_run_id`` or
+        :func:`find_run_for_thread`.
+
     Args:
         evidence_dir: Root evidence directory.
 
@@ -176,6 +182,43 @@ def find_interrupted_run(evidence_dir: Path) -> tuple[str, dict[str, Any]] | Non
     candidates.sort(key=lambda x: x[0], reverse=True)
     _, run_id, meta = candidates[0]
     return run_id, meta
+
+
+def find_run_for_thread(
+    evidence_dir: Path, thread_id: str
+) -> tuple[str, dict[str, Any]] | None:
+    """Locate evidence run whose meta/session is bound to ``thread_id``.
+
+    Explicit thread binding — never falls back to "latest interrupted".
+    """
+    if not thread_id:
+        return None
+    root = Path(evidence_dir)
+    if not root.is_dir():
+        return None
+    for child in root.iterdir():
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        meta_path = child / "meta.json"
+        meta: dict[str, Any] = {}
+        if meta_path.is_file():
+            try:
+                loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    meta = loaded
+            except (OSError, json.JSONDecodeError):
+                meta = {}
+            cont = str(meta.get("continue_thread_id") or "")
+            tid = str(meta.get("thread_id") or "")
+            # Exact bind, or child job thread under the same base continue id.
+            if thread_id == cont or thread_id == tid:
+                return child.name, meta
+            if cont and thread_id.startswith(f"{cont}:"):
+                return child.name, meta
+        sessions = load_all_multi_sessions(evidence_dir, child.name)
+        if thread_id in sessions:
+            return child.name, meta or {"thread_id": thread_id}
+    return None
 
 
 def _sanitize_session(session: dict[str, Any]) -> dict[str, Any]:

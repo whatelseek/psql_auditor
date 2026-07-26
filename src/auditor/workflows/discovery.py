@@ -18,6 +18,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from auditor.context import count_tool_rounds, truncate_text
 from auditor.frameworks import (
     frameworks_catalog_text,
+    frameworks_detect_catalog_text,
     get_framework,
     list_frameworks,
     load_framework_checklist,
@@ -25,8 +26,10 @@ from auditor.frameworks import (
 )
 from auditor.host_facts import (
     HostFacts,
+    format_host_facts_markdown,
     merge_facts_from_raw,
     parse_host_facts_json,
+    write_host_facts_json,
 )
 from auditor.intake import client_slug
 from auditor.language import detect_report_language
@@ -41,7 +44,7 @@ from auditor.prompts import (
     SOFTWARE_FRAMEWORK_ROUTE_SYSTEM,
 )
 from auditor.runtime_target import effective_settings
-from auditor.secrets_file import InventorySshTarget
+from auditor.secrets_file import InventorySshTarget, list_client_ssh_targets
 from auditor.state import AuditorState
 from auditor.workflows.helpers import _as_finding, _extract_json
 from auditor.workflows.protocols import AuditRuntime

@@ -9,17 +9,29 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
+from auditor.audit_registry import get_audit_registry
+from auditor.compliance import format_chat_summary_visuals, parse_report_findings
 from auditor.context import truncate_text
+from auditor.domain import (
+    AuditJobStatus,
+    AuditJobType,
+    AuditRunStatus,
+    JobErrorInfo,
+)
 from auditor.evidence_store import EvidenceStore, new_run_id
-from auditor.frameworks import get_framework
+from auditor.followup import followup_footer
+from auditor.frameworks import get_framework, route_frameworks, select_frameworks_for_host
 from auditor.host_facts import HostFacts, parse_host_facts_json
-from auditor.intake import client_slug, frameworks_for_audit_type
+from auditor.intake import (
+    client_slug,
+    domains_for_audit_type,
+    filter_scope_framework_ids,
+    frameworks_for_audit_type,
+)
 from auditor.language import detect_report_language
 from auditor.report_archive import package_and_publish_archive
 from auditor.results_store import start_session_safe
-from auditor.frameworks import select_frameworks_for_host
-from auditor.intake import filter_scope_framework_ids
-from auditor.secrets_file import InventorySshTarget
+from auditor.secrets_file import InventorySshTarget, list_client_ssh_targets
 from auditor.session_store import drop_multi_session, load_all_multi_sessions, save_multi_session
 from auditor.state import AuditorState
 from auditor.workflows.protocols import AuditRuntime
@@ -46,6 +58,8 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
             completed,
             run_id=run_id,
             base_thread=base_thread,
+            audit_run_id=str((intake_state or {}).get("audit_run_id") or "")
+            or None,
         )
         return merged
 
@@ -67,6 +81,12 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
         return {
             "base_thread": base_thread,
             "run_id": run_id,
+            "audit_run_id": str(
+                (intake_state or {}).get("audit_run_id")
+                or job.get("audit_run_id")
+                or ""
+            ),
+            "job_id": str(job.get("job_id") or ""),
             "user_text": user_text,
             "framework_id": str(job.get("framework_id") or ""),
             "framework_title": str(
@@ -87,20 +107,81 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
             "parallel_scheduler": True,
         }
 
+    registry = get_audit_registry(runtime.settings.evidence_dir)
+    audit_run_id = str((intake_state or {}).get("audit_run_id") or "")
+
     async def _run_one(job: dict[str, Any]) -> dict[str, Any]:
         """Invoke a single host/framework audit for the scheduler."""
         fw_id = str(job.get("framework_id") or "")
         host_id = str(job.get("evidence_host_id") or "")
         tid = _job_dict_thread_id(base_thread, job)
-        return await runtime.arun_one(
-            user_text,
-            framework_id=fw_id,
-            run_id=run_id,
-            thread_id=tid,
-            intake_state=intake_state,
-            evidence_host_id=host_id or None,
-            ssh_target=_target_from_job_dict(job),
-        )
+        logical = _job_dict_key(job)
+        active_job = None
+        if audit_run_id:
+            latest = registry.latest_job_for_task(audit_run_id, logical)
+            if latest is not None and latest.status == AuditJobStatus.RUNNING:
+                # Same attempt (e.g. resume after HITL / reconnect).
+                active_job = latest
+                if tid and not active_job.thread_id:
+                    active_job.thread_id = tid
+                    registry.save_job(active_job)
+            elif latest is not None and latest.status in {
+                AuditJobStatus.FAILED,
+                AuditJobStatus.CANCELLED,
+            }:
+                # Worker retry → new AuditJob attempt, same AuditRun.
+                active_job = registry.retry_job(
+                    audit_run_id=audit_run_id,
+                    logical_task_id=logical,
+                    thread_id=tid,
+                    framework_id=fw_id,
+                    host_id=host_id,
+                    mandatory=True,
+                )
+            else:
+                # Start pending attempt created at run start (or create first).
+                active_job = registry.start_job_attempt(
+                    audit_run_id=audit_run_id,
+                    logical_task_id=logical,
+                    thread_id=tid,
+                    framework_id=fw_id,
+                    host_id=host_id,
+                    mandatory=True,
+                    job_type=AuditJobType.ASSESS_FRAMEWORK,
+                    new_attempt=False,
+                )
+            job["job_id"] = active_job.job_id
+            job["audit_run_id"] = audit_run_id
+            job["attempt"] = active_job.attempt
+        try:
+            result = await runtime.arun_one(
+                user_text,
+                framework_id=fw_id,
+                run_id=run_id,
+                thread_id=tid,
+                intake_state=intake_state,
+                evidence_host_id=host_id or None,
+                ssh_target=_target_from_job_dict(job),
+            )
+        except Exception as exc:  # noqa: BLE001
+            if active_job is not None:
+                registry.fail_job(active_job.job_id, exc)
+            raise
+        if active_job is not None:
+            if result.get("awaiting_hitl"):
+                # Keep attempt running while operator decides.
+                pass
+            elif result.get("error"):
+                registry.fail_job(
+                    active_job.job_id,
+                    JobErrorInfo(
+                        error_type="AuditError",
+                        message=str(result.get("error")),
+                    ),
+                )
+            else:
+                registry.complete_job(active_job.job_id)
+        return result
 
     while pending or in_flight:
         while (
@@ -240,10 +321,64 @@ async def schedule_framework_jobs(runtime: AuditRuntime,
         completed_list,
         run_id=run_id,
         base_thread=base_thread,
+        audit_run_id=audit_run_id or None,
     )
     if plan_md:
         merged["report"] = f"{plan_md}\n{merged.get('report') or ''}"
     return merged
+
+def _bootstrap_audit_run(
+    runtime: AuditRuntime,
+    *,
+    run_id: str,
+    base_thread: str,
+    intake_state: dict[str, Any],
+    pending: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Create AuditRun + pending AuditJobs for this execution (outside nodes)."""
+    if intake_state.get("audit_run_id"):
+        return intake_state
+    registry = get_audit_registry(runtime.settings.evidence_dir)
+    client_id = client_slug(str(intake_state.get("client_name") or "")) or "unknown"
+    intake = intake_state.get("intake") if isinstance(intake_state.get("intake"), dict) else {}
+    scope = {
+        "audit_types": str(intake_state.get("audit_types") or ""),
+        "frameworks": [_job_dict_key(j) for j in pending],
+        "has_access": bool(intake_state.get("has_access")),
+        "client_name": str(intake_state.get("client_name") or ""),
+        "selected_jobs": list((intake or {}).get("selected_jobs") or []),
+    }
+    session_number = intake_state.get("results_session_number")
+    arun = registry.create_run(
+        client_id=client_id,
+        scope=scope,
+        evidence_run_id=run_id,
+        base_thread_id=base_thread,
+        results_session_number=(
+            int(session_number) if session_number is not None else None
+        ),
+    )
+    registry.mark_run_started(arun.audit_run_id)
+    for job in pending:
+        logical = _job_dict_key(job)
+        created = registry.create_job(
+            audit_run_id=arun.audit_run_id,
+            logical_task_id=logical,
+            job_type=AuditJobType.ASSESS_FRAMEWORK,
+            mandatory=True,
+            thread_id=_job_dict_thread_id(base_thread, job),
+            framework_id=str(job.get("framework_id") or ""),
+            host_id=str(job.get("evidence_host_id") or ""),
+        )
+        job["job_id"] = created.job_id
+        job["audit_run_id"] = arun.audit_run_id
+        job["attempt"] = created.attempt
+    updated = dict(intake_state)
+    updated["audit_run_id"] = arun.audit_run_id
+    store = runtime._evidence_by_run.get(run_id)
+    if store is not None:
+        store.write_run_meta(audit_run_id=arun.audit_run_id, status="running")
+    return updated
 
 async def run_framework_jobs(runtime: AuditRuntime,
     *,
@@ -263,18 +398,13 @@ async def run_framework_jobs(runtime: AuditRuntime,
         }
 
     pending = [_serialize_host_job(target, fw) for target, _facts, fw in jobs]
-    if len(pending) == 1:
-        result = await runtime._schedule_framework_jobs(
-            user_text=user_text,
-            base_thread=base_thread,
-            run_id=run_id,
-            intake_state=intake_state,
-            pending_jobs=pending,
-            completed=[],
-            plan_md=plan_md,
-        )
-        return result
-
+    intake_state = _bootstrap_audit_run(
+        runtime,
+        run_id=run_id,
+        base_thread=base_thread,
+        intake_state=intake_state,
+        pending=pending,
+    )
     return await runtime._schedule_framework_jobs(
         user_text=user_text,
         base_thread=base_thread,
@@ -290,6 +420,7 @@ async def merge_multi_reports(runtime: AuditRuntime,
     *,
     run_id: str,
     base_thread: str,
+    audit_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Combine per-framework reports, write root report, and package ZIP.
 
@@ -299,11 +430,16 @@ async def merge_multi_reports(runtime: AuditRuntime,
         completed: ``(framework_id, title, report)`` tuples in order.
         run_id: Shared evidence run id.
         base_thread: Parent thread id for the combined result.
+        audit_run_id: Optional business-level AuditRun id to finalize.
 
     Returns:
         Result dict with merged ``report``, archive URLs, and metadata.
     """
     store = runtime._evidence_by_run.get(run_id)
+    resolved_audit_run_id = str(audit_run_id or "").strip()
+    if not resolved_audit_run_id and store is not None:
+        meta = store.read_run_meta()
+        resolved_audit_run_id = str(meta.get("audit_run_id") or "").strip()
     # Prefer on-disk framework reports (survive HITL / mid-run zips).
     disk_reports: dict[str, str] = {}
     if store is not None:
@@ -467,11 +603,24 @@ async def merge_multi_reports(runtime: AuditRuntime,
                     f"(Archive packaging failed: {type(exc).__name__}: {exc})\n"
                 )
     chat_text = f"{chat_text.rstrip()}{followup_footer()}"
+    audit_run_status = ""
+    if resolved_audit_run_id:
+        registry = get_audit_registry(runtime.settings.evidence_dir)
+        finalized = registry.finalize_run(resolved_audit_run_id)
+        audit_run_status = finalized.status.value
+        if store is not None:
+            store.write_run_meta(
+                audit_run_id=resolved_audit_run_id,
+                audit_run_status=audit_run_status,
+                status=audit_run_status,
+            )
     return {
         "report": chat_text,
         "messages": [AIMessage(content=chat_text)],
         "framework_id": ",".join(c[0] for c in completed),
         "evidence_run_id": run_id,
+        "audit_run_id": resolved_audit_run_id,
+        "audit_run_status": audit_run_status,
         "evidence_run_dir": str(store.root) if store else "",
         "archive_path": archive_path,
         "archive_url": archive_url,
@@ -514,6 +663,33 @@ async def continue_multi_after_resume(runtime: AuditRuntime,
     base_thread = session.get("base_thread") or thread_id.split(":")[0]
     plan_md = session.get("plan_md") or ""
     intake_state = session.get("intake_state")
+    if not isinstance(intake_state, dict):
+        intake_state = {}
+    else:
+        intake_state = dict(intake_state)
+    audit_run_id = str(
+        session.get("audit_run_id")
+        or intake_state.get("audit_run_id")
+        or finished.get("audit_run_id")
+        or ""
+    )
+    if audit_run_id:
+        intake_state["audit_run_id"] = audit_run_id
+    job_id = str(session.get("job_id") or "")
+    if audit_run_id and job_id and not finished.get("awaiting_hitl"):
+        registry = get_audit_registry(runtime.settings.evidence_dir)
+        active = registry.get_job(job_id)
+        if active is not None and active.status == AuditJobStatus.RUNNING:
+            if finished.get("error"):
+                registry.fail_job(
+                    job_id,
+                    JobErrorInfo(
+                        error_type="AuditError",
+                        message=str(finished.get("error")),
+                    ),
+                )
+            else:
+                registry.complete_job(job_id)
 
     # Surface other HITL-paused siblings before starting new work.
     paused_siblings = [
@@ -568,6 +744,7 @@ async def continue_multi_after_resume(runtime: AuditRuntime,
             "awaiting_hitl": True,
             "thread_id": nxt_tid,
             "evidence_run_id": str(run_id or ""),
+            "audit_run_id": audit_run_id,
             "messages": [AIMessage(content=report)],
         }
 
@@ -576,7 +753,7 @@ async def continue_multi_after_resume(runtime: AuditRuntime,
             user_text=str(user_text),
             base_thread=str(base_thread),
             run_id=str(run_id or ""),
-            intake_state=intake_state if isinstance(intake_state, dict) else None,
+            intake_state=intake_state,
             pending_jobs=remaining_jobs,
             completed=completed,
             plan_md=str(plan_md or ""),
@@ -605,7 +782,7 @@ async def continue_multi_after_resume(runtime: AuditRuntime,
             user_text=str(user_text),
             base_thread=str(base_thread),
             run_id=str(run_id or ""),
-            intake_state=intake_state if isinstance(intake_state, dict) else None,
+            intake_state=intake_state,
             pending_jobs=legacy_jobs,
             completed=completed,
             plan_md=str(plan_md or ""),
@@ -615,6 +792,7 @@ async def continue_multi_after_resume(runtime: AuditRuntime,
         completed,
         run_id=str(run_id or ""),
         base_thread=base_thread,
+        audit_run_id=audit_run_id or None,
     )
     return merged
 

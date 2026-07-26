@@ -14,12 +14,14 @@ from langgraph.types import Command
 from auditor.context import truncate_text
 from auditor.evidence_store import EvidenceStore, bind_host_segment, new_run_id
 from auditor.frameworks import get_framework
+from auditor.hitl import format_continue_assistant_message
 from auditor.intake import client_slug
 from auditor.language import detect_report_language
 from auditor.progress import emit_phase
 from auditor.runtime_target import bind_runtime_credentials
 from auditor.secrets_file import InventorySshTarget, bind_host_target, read_client_credentials
-from auditor.session_store import write_run_status
+from auditor.audit_registry import get_audit_registry
+from auditor.session_store import find_run_for_thread, write_run_status
 from auditor.state import AuditorState
 from auditor.workflows.protocols import AuditRuntime
 
@@ -69,6 +71,8 @@ async def arun_one(runtime: AuditRuntime,
             meta["results_session_number"] = intake_state[
                 "results_session_number"
             ]
+        if intake_state.get("audit_run_id"):
+            meta["audit_run_id"] = intake_state["audit_run_id"]
     store.write_run_meta(**meta)
     initial: AuditorState = {
         "messages": [HumanMessage(content=user_text)],
@@ -173,22 +177,43 @@ async def aresume(runtime: AuditRuntime, thread_id: str, user_text: str) -> dict
     return await runtime._continue_multi_after_resume(thread_id, decorated)
 
 async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None = None) -> dict[str, Any]:
-    """Resume an interrupted mid-assess (or HITL) run after disconnect/restart."""
+    """Resume an interrupted mid-assess (or HITL) run after disconnect/restart.
+
+    Active run identity must be explicit (``run_id`` / ``audit_run_id`` in meta)
+    or bound to ``thread_id``. Never selects "latest interrupted" as fallback.
+    """
     emit_phase(f"Continuing audit from checkpoint (`{thread_id}`)…")
     config = {"configurable": {"thread_id": thread_id}}
     is_intake = ":intake" in thread_id or thread_id.endswith("intake")
     graph = runtime.intake_graph if is_intake else runtime.graph
 
-    rid = run_id or ""
+    rid = (run_id or "").strip()
+    audit_run_id = ""
+    if rid.startswith("arun_"):
+        # Caller passed business AuditRun id instead of evidence folder id.
+        audit_run_id = rid
+        registry = get_audit_registry(runtime.settings.evidence_dir)
+        arun = registry.get_run(audit_run_id)
+        if arun is None:
+            return {
+                "report": f"Unknown audit_run_id `{audit_run_id}`.",
+                "awaiting_hitl": False,
+                "messages": [],
+            }
+        rid = arun.evidence_run_id
+        if arun.status.value == "cancelled":
+            registry.resume_run(audit_run_id)
     if not rid:
-        found = find_interrupted_run(runtime.settings.evidence_dir)
-        if found:
-            rid, meta = found
-            if not thread_id:
-                thread_id = str(meta.get("continue_thread_id") or thread_id)
+        # Prefer in-memory multi-session bound to this thread.
+        sess = runtime._multi_sessions.get(thread_id) if hasattr(runtime, "_multi_sessions") else None
+        if isinstance(sess, dict) and sess.get("run_id"):
+            rid = str(sess.get("run_id") or "")
+            audit_run_id = str(sess.get("audit_run_id") or audit_run_id)
         else:
-            # Fall back to thread meta on any run folder
-            rid = ""
+            found = find_run_for_thread(runtime.settings.evidence_dir, thread_id)
+            if found:
+                rid, meta = found
+                audit_run_id = str(meta.get("audit_run_id") or audit_run_id)
 
     if rid:
         runtime._reload_multi_sessions(rid)
@@ -199,6 +224,13 @@ async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None
                 runtime._evidence_by_run[rid] = store
             except Exception:  # noqa: BLE001
                 store = None
+        if store is not None and not audit_run_id:
+            audit_run_id = str(store.read_run_meta().get("audit_run_id") or "")
+        if audit_run_id:
+            registry = get_audit_registry(runtime.settings.evidence_dir)
+            arun = registry.get_run(audit_run_id)
+            if arun is not None and arun.status.value == "cancelled":
+                registry.resume_run(audit_run_id)
     else:
         store = None
 
@@ -250,9 +282,10 @@ async def acontinue(runtime: AuditRuntime, thread_id: str, *, run_id: str | None
     if not rid:
         return {
             "report": (
-                "No interrupted audit checkpoint found. "
-                "Start a new audit or reply from a message that still has "
-                "`[AUDIT_CONTINUE:…]` / `[AUDIT_HITL:…]`."
+                "No audit run bound to this thread. "
+                "Pass an explicit evidence `run_id` / `audit_run_id`, or reply "
+                "from a message that still has `[AUDIT_CONTINUE:…]` / "
+                "`[AUDIT_HITL:…]` (CORE-002: no latest-run fallback)."
             ),
             "awaiting_hitl": False,
             "messages": [],

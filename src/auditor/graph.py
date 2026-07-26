@@ -512,6 +512,21 @@ class AuditorGraph:
     async def acontinue(self, *args, **kwargs):
         return await _wf_runner.acontinue(self, *args, **kwargs)
 
+    def cancel_audit_run(self, audit_run_id: str):
+        """Cancel open jobs and the AuditRun (same ``audit_run_id``)."""
+        from auditor.audit_registry import get_audit_registry
+
+        return get_audit_registry(self.settings.evidence_dir).cancel_run(
+            audit_run_id
+        )
+
+    def resume_audit_run(self, audit_run_id: str):
+        """Resume a cancelled AuditRun without allocating a new run id."""
+        from auditor.audit_registry import get_audit_registry
+
+        return get_audit_registry(self.settings.evidence_dir).resume_run(
+            audit_run_id
+        )
 
     def interrupted_continue_message(self, *args, **kwargs):
         return _wf_runner.interrupted_continue_message(self, *args, **kwargs)

@@ -11,18 +11,21 @@ from langgraph.types import interrupt
 
 from auditor.evidence_store import client_artifacts_id
 from auditor.access_probe import probe_access_endpoints, probe_access_services
-from auditor.frameworks import get_framework, select_frameworks_for_host
+from auditor.frameworks import get_framework, prefer_framework_ids, select_frameworks_for_host
+from auditor.host_facts import resolve_client_dir, resolve_client_inventory
 from auditor.intake import (
     client_slug,
     enrich_facts_from_access_rows,
     filter_scope_framework_ids,
     format_host_access_list_markdown,
     format_proposed_jobs_markdown,
+    intake_clarification_from_payload,
     intake_interrupt_payload,
     load_client_audit_plan,
     looks_like_plan_file_notice,
     normalize_scope_jobs,
     parse_audit_plan_markdown,
+    parse_client_name,
     prompts_for_language,
     resolve_audit_type,
     resolve_scope_decision,
@@ -39,7 +42,7 @@ from auditor.prompts import (
     INTAKE_INTERPRET_YES_NO_SYSTEM,
 )
 from auditor.runtime_target import bind_runtime_credentials, effective_settings
-from auditor.secrets_file import read_client_credentials
+from auditor.secrets_file import list_client_access_endpoints, read_client_credentials
 from auditor.state import AuditorState
 from auditor.workflows.helpers import _extract_json
 from auditor.workflows.protocols import AuditRuntime
