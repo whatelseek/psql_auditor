@@ -158,8 +158,14 @@ def normalize_status(raw: str) -> str:
         return "fail"
     if text in {"error", "err"}:
         return "error"
-    if text in {"skipped", "skip", "n/a", "na"}:
+    if text in {"skipped", "skip"}:
         return "skipped"
+    if text in {"n/a", "na", "not_applicable", "not-applicable"}:
+        return "not_applicable"
+    if text in {"not_tested", "not-tested", "untested"}:
+        return "not_tested"
+    if text in {"accepted_exception", "accepted-exception", "exception"}:
+        return "accepted_exception"
     return text or "error"
 
 

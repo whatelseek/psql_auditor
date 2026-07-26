@@ -41,6 +41,18 @@ Mandatory tests install / use `auditor.testing.DeterministicFakeChatModel` throu
 `use_chat_model_factory`. An autouse network guard rejects accidental HTTP calls
 to LLM endpoints unless `AUDITOR_ALLOW_EXTERNAL_LLM=1`.
 
+## Canonical audit fixtures (AUD-003)
+
+Shared deterministic dataset: `tests/fixtures/canonical_audit.py`.
+
+* Build a fresh immutable scenario with `build_canonical_scenario()` or the
+  pytest fixture `canonical_scenario`.
+* Extend that scenario in place for new cases; do not invent a second
+  incompatible fixture package for the same domain entities.
+* Never use wall-clock time, `uuid4()`, or a real LLM inside fixture construction.
+* Exception applicability helpers in the fixture module are typed test seams
+  until production EXC registry work lands.
+
 ## CI mapping
 
 | CI job | Local command |

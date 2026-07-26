@@ -61,3 +61,18 @@ def test_write_report_exports_reads_md_when_body_omitted(tmp_path: Path):
     out = write_report_exports(tmp_path)
     assert out["docx"] and out["xlsx"]
     assert out["error"] is None
+
+
+def test_canonical_formula_observations_survive_markdown_render(canonical_scenario):
+    """Spreadsheet-prefix observations remain literal in rendered Markdown."""
+    from auditor.state import render_report
+
+    findings = {
+        f.result_id: f for f in canonical_scenario.results if f.evidence[:1] in {"=", "+", "-", "@"}
+    }
+    assert len(findings) >= 4
+    report = render_report("Fixture report", findings, language="en")
+    assert "=CMD(" in report
+    assert "+1234" in report
+    assert "-SUM(" in report
+    assert "@SUM(" in report

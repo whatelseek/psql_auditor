@@ -97,6 +97,28 @@ def new_result_id() -> str:
     return str(uuid4())
 
 
+def historical_comparison_key(finding: Any) -> tuple[str, str, str, str, str]:
+    """Return the cross-run identity used to match a previous comparable result.
+
+    Excludes ``audit_run_id`` so the same client/asset/framework/requirement in an
+    earlier run can be paired with the current run. ``requirement_id`` alone is
+    never sufficient (two frameworks may both define ``REQ-001``).
+    """
+    key = logical_key_of(finding)
+    return (
+        key.client_id,
+        key.asset_id,
+        key.framework_id,
+        key.framework_version,
+        key.requirement_id,
+    )
+
+
+def is_historically_comparable(left: Any, right: Any) -> bool:
+    """True when ``left`` and ``right`` share historical comparison identity."""
+    return historical_comparison_key(left) == historical_comparison_key(right)
+
+
 def logical_key_of(finding: Any) -> ResultLogicalKey:
     """Extract the logical key from a Finding-like object or mapping."""
     if hasattr(finding, "model_dump"):

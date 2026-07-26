@@ -16,6 +16,9 @@ def test_aggregate_findings_counts_statuses():
         "partial": 1,
         "error": 1,
         "skipped": 0,
+        "not_tested": 0,
+        "not_applicable": 0,
+        "accepted_exception": 0,
     }
 
 

@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from auditor.testing.fake_llm import DeterministicFakeChatModel, use_chat_model_factory
+from auditor.testing.fake_llm import use_chat_model_factory
 
 ROOT = Path(__file__).resolve().parents[2]
 RUN_GROUP = ROOT / "scripts" / "run_pytest_group.py"
@@ -136,16 +136,17 @@ def test_typecheck_fails_on_violation(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_deterministic_llm_fake_without_network() -> None:
-    fake = DeterministicFakeChatModel(responses=['{"answer":"yes"}'])
+async def test_deterministic_llm_fake_without_network(canonical_scenario) -> None:
+    fake = canonical_scenario.build_fake_llm("valid_structured_en")
     previous = use_chat_model_factory(lambda _settings: fake)
     try:
         from auditor.llm import build_chat_model
 
         model = build_chat_model()
         result = await model.ainvoke([{"role": "user", "content": "ping"}])
-        assert "yes" in str(result.content)
+        assert "SSH root login enabled" in str(result.content)
         assert fake.calls, "fake must record prompts/calls"
+        assert fake.calls[0]["messages"]
     finally:
         use_chat_model_factory(previous)
 

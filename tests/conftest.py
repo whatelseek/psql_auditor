@@ -13,6 +13,13 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
+from tests.fixtures.canonical_audit import CanonicalScenario, build_canonical_scenario
+
+
+@pytest.fixture
+def canonical_scenario() -> CanonicalScenario:
+    """Fresh immutable AUD-003 canonical dataset for each test."""
+    return build_canonical_scenario()
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

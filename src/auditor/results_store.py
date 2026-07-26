@@ -1701,7 +1701,16 @@ class ResultsStore:
             """,
             host_result_id,
         )
-        valid = {"pass", "fail", "partial", "error", "skipped"}
+        valid = {
+            "pass",
+            "fail",
+            "partial",
+            "error",
+            "skipped",
+            "not_tested",
+            "not_applicable",
+            "accepted_exception",
+        }
         findings: dict[str, Finding] = {}
         for r in rows:
             status = str(r["status"] or "error").lower()

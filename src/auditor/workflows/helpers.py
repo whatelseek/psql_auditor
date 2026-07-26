@@ -44,7 +44,16 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 def _normalize_status(value: str | None) -> str:
     """Map arbitrary status text to an allowed finding status literal."""
-    allowed = {"pass", "fail", "partial", "error", "skipped"}
+    allowed = {
+        "pass",
+        "fail",
+        "partial",
+        "error",
+        "skipped",
+        "not_tested",
+        "not_applicable",
+        "accepted_exception",
+    }
     status = (value or "error").strip().lower()
     return status if status in allowed else "error"
 

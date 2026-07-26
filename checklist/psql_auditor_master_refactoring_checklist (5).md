@@ -11,33 +11,32 @@ Total tasks: **71**
 
 | Status | Count |
 | --- | ---: |
-| Complete `[x]` | **3 / 71 (4.2%)** |
+| Complete `[x]` | **4 / 71 (5.6%)** |
 | Partially complete `[~]` | **7 / 71 (9.9%)** |
-| Open `[ ]` | **61 / 71 (85.9%)** |
-| Not fully complete | **68 / 71 (95.8%)** |
+| Open `[ ]` | **60 / 71 (84.5%)** |
+| Not fully complete | **67 / 71 (94.4%)** |
 
-Completed: `AUD-002`, `CORE-002`, `CORE-003`.
+Completed: `AUD-002`, `AUD-003`, `CORE-002`, `CORE-003`.
 
 Partially complete: `AUD-001`, `CORE-001`, `CORE-006`, `INPUT-005`,
 `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Latest verification
 
-`AUD-002` was accepted on `95065b0`. Local development and GitHub Actions use
-the same Make targets. All mandatory gates are green. Zero-test discovery
-fails, mandatory tests cannot contact a real external LLM, and PostgreSQL
-integration tests use isolated disposable databases.
+`AUD-003` adds the shared canonical fixture package on top of the AUD-002
+gates. Local development and GitHub Actions use the same Make targets. All
+mandatory gates are green.
 
 | Check | Verified result |
 | --- | --- |
-| Format | 110 files already formatted |
+| Format | 115 files already formatted |
 | Lint | Passed |
-| Type check | Passed, 66 files |
-| Unit tests | 265 passed |
+| Type check | Passed, 67 files |
+| Unit tests | 302 passed |
 | PostgreSQL integration tests | 6 passed |
-| Full suite | 271 passed |
-| CORE-001/002/003 regressions | 27 passed |
-| Clean CI | [Run 30195122658](https://github.com/whatelseek/psql_auditor/actions/runs/30195122658), all jobs passed |
+| Full suite | 308 passed |
+| Defect map | `validate-defect-map: OK` (71/71) |
+| Clean CI | pending push of AUD-003 commit |
 
 Controlled negative runs:
 
@@ -63,10 +62,22 @@ Controlled negative runs:
 
 - [~] `AUD-001` — Record the current reproducible baseline.
 - [x] `AUD-002` — Establish unified local and CI quality gates.
-- [ ] `AUD-003` — Prepare shared deterministic test fixtures.
+- [x] `AUD-003` — Prepare shared deterministic test fixtures.
 
 `AUD-001` remains partial because the defect-to-module map does not yet cover
 every checklist item.
+
+`AUD-003` closure evidence:
+
+- shared module `tests/fixtures/canonical_audit.py` with
+  `build_canonical_scenario()` → immutable `CanonicalScenario`;
+- fixed UTC clock `FIXED_NOW = 2026-07-26T09:00:00Z` via `FixedClock`;
+- two clients, alpha with previous+current runs, beta with one run;
+- two frameworks each defining distinct `REQ-001`, two linux assets;
+- all seven result statuses plus observation/formula/history/exception cases;
+- deterministic fake LLM scenarios reused through `DeterministicFakeChatModel`;
+- validation in `tests/test_canonical_fixtures.py`; sample reuse in identity,
+  quality-gate LLM, and report-export tests.
 
 `AUD-002` closure evidence:
 

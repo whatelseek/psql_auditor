@@ -29,7 +29,18 @@ from auditor.domain.result_identity import (
 )
 from auditor.language import ReportLanguage, report_ui
 
-FindingStatus = Literal["pass", "fail", "partial", "error", "skipped"]
+# AUD-003: extended statuses required by canonical fixtures / future EXC work.
+# Warehouse and helpers accept the full set; legacy reports still emit ``skipped``.
+FindingStatus = Literal[
+    "pass",
+    "fail",
+    "partial",
+    "error",
+    "skipped",
+    "not_tested",
+    "not_applicable",
+    "accepted_exception",
+]
 
 
 class Finding(BaseModel):
@@ -174,7 +185,7 @@ def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:
         findings: Map of ``result_id`` (or any key) → finding record.
 
     Returns:
-        Dict with keys ``pass``, ``fail``, ``partial``, ``error``, ``skipped``.
+        Dict with keys for every :data:`FindingStatus` value (plus any unknown).
     """
     counts: dict[str, int] = {
         "pass": 0,
@@ -182,6 +193,9 @@ def aggregate_findings(findings: dict[str, Finding]) -> dict[str, int]:
         "partial": 0,
         "error": 0,
         "skipped": 0,
+        "not_tested": 0,
+        "not_applicable": 0,
+        "accepted_exception": 0,
     }
     for finding in findings.values():
         status = finding.status if isinstance(finding, Finding) else finding["status"]

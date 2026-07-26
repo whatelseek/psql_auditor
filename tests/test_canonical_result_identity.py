@@ -45,28 +45,49 @@ def _finding(
     )
 
 
-def test_two_assets_two_frameworks_four_results():
+def test_two_assets_two_frameworks_four_results(canonical_scenario):
     """Two assets × two frameworks × REQ-001 → four distinct results."""
+    from auditor.domain.result_identity import logical_key_of
+
     store = ResultStore()
+    # Use canonical alpha assets + both frameworks; synthesize four REQ-001 rows
+    # with distinct logical keys (fixed IDs from the scenario where possible).
+    assets = [a for a in canonical_scenario.assets if a.label.startswith("asset_linux")]
+    frameworks = list(canonical_scenario.frameworks)
+    assert len(assets) >= 2 and len(frameworks) >= 2
     ids = []
-    for asset in ("asset_1", "asset_2"):
-        for fw in ("fw_a", "fw_b"):
-            rid = new_result_id()
+    for i, asset in enumerate(assets[:2]):
+        for j, fw in enumerate(frameworks[:2]):
+            rid = f"11111111-1111-4111-8111-{i:04d}{j:08d}"
             ids.append(rid)
             store.put(
                 _finding(
                     result_id=rid,
-                    asset_id=asset,
-                    framework_id=fw,
+                    client_id=canonical_scenario.clients[0].client_id,
+                    audit_run_id=canonical_scenario.audit_runs[1].audit_run_id,
+                    asset_id=asset.asset_id,
+                    framework_id=fw.framework_id,
+                    framework_version=fw.version,
                     requirement_id="REQ-001",
                 )
             )
     assert len(store) == 4
-    assert len(set(ids)) == 4
+    assert len({logical_key_of(f).as_tuple() for f in store.all()}) == 4
     reqs = {f.requirement_id for f in store.all()}
     assert reqs == {"REQ-001"}
-    assets = {f.asset_id for f in store.all()}
-    assert assets == {"asset_1", "asset_2"}
+    assert {f.asset_id for f in store.all()} == {assets[0].asset_id, assets[1].asset_id}
+
+
+def test_historical_comparison_uses_production_identity(canonical_scenario):
+    """Comparable vs non-comparable history via production historical key."""
+    from auditor.domain.result_identity import is_historically_comparable
+
+    current = canonical_scenario.current_comparable_anchor
+    comparable = canonical_scenario.previous_comparable_result
+    other_fw = canonical_scenario.previous_noncomparable_result
+    assert is_historically_comparable(comparable, current)
+    assert not is_historically_comparable(other_fw, current)
+    assert other_fw.requirement_id == current.requirement_id
 
 
 def test_worker_completion_order_does_not_change_identities():
