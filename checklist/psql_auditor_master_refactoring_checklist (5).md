@@ -4,7 +4,7 @@ Checklist version: **1.8**
 Date: **2026-07-26**  
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
-Latest reviewed revision: [](https://github.com/whatelseek/psql_auditor/commit/a014373666e50e84c07a8c7aebde1641c1045f83)  
+Latest reviewed revision: [`a014373`](https://github.com/whatelseek/psql_auditor/commit/a014373666e50e84c07a8c7aebde1641c1045f83)  
 Total tasks: **71**
 
 ## Status summary
@@ -35,7 +35,7 @@ targets.
 | PostgreSQL integration tests | 7 passed |
 | Full suite | 343 passed |
 | Defect map | `validate-defect-map: OK` (71/71) |
-| Clean CI | *(pending push)* |
+| Clean CI | [Run 30198639284](https://github.com/whatelseek/psql_auditor/actions/runs/30198639284), all jobs passed |
 
 Controlled negative runs:
 
