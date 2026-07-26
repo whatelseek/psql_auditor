@@ -102,6 +102,9 @@ class InventoryReference(BaseModel):
 
     kind: Literal["client_file"]
     ref: StrictStr = Field(min_length=1)
+    # Optional expected inventory snapshot identity (inventory-driven launch).
+    version_id: StrictStr = ""
+    content_hash: StrictStr = ""
 
     @field_validator("ref")
     @classmethod
@@ -115,6 +118,11 @@ class InventoryReference(BaseModel):
         if ".." in path.parts:
             raise ValueError("inventory.ref must not contain path traversal")
         return text.replace("\\", "/")
+
+    @field_validator("version_id", "content_hash")
+    @classmethod
+    def _optional_identity(cls, value: str) -> str:
+        return (value or "").strip()
 
 
 class FrameworkReference(BaseModel):
@@ -295,6 +303,33 @@ def _reject(location: str, code: str, message: str) -> NoReturn:
     )
 
 
+def _load_normalized_client_inventory(inventory_dir: Path, client_slug: str) -> Any:
+    """Load current inventory via loader/normalizer (lazy import avoids cycles)."""
+    # Imported lazily: auditor.inventory.__init__ pulls service → audit_request.
+    from auditor.inventory.loaders import InventoryLoadError, load_raw_inventory
+    from auditor.inventory.normalize import normalize_inventory
+
+    root = Path(inventory_dir)
+    # Prefer on-disk directory casing so normalized identity matches analyze/plan
+    # (registry slugs are lowercased and would otherwise alter content_hash).
+    client_dir = resolve_client_dir(root, client_slug)
+    client_name = client_dir.name if client_dir.is_dir() else client_slug
+    try:
+        raw, source_path, source_format = load_raw_inventory(root, client_name)
+    except InventoryLoadError as exc:
+        _reject(
+            "inventory.ref",
+            "missing_inventory",
+            f"client inventory could not be loaded: {exc}",
+        )
+    return normalize_inventory(
+        raw,
+        client_name=client_name,
+        source_path=source_path,
+        source_format=source_format,
+    )
+
+
 def validate_audit_request_semantics(
     request: AuditRequest,
     settings: Settings,
@@ -344,8 +379,8 @@ def validate_audit_request_semantics(
             "inventory.ref is not under the registered client's inventory directory",
         )
 
-    inv_path, _content, found = resolve_client_inventory(inventory_dir, client.slug)
-    if not found or inv_path is None or not inv_path.is_file():
+    inv_path, content, found = resolve_client_inventory(inventory_dir, client.slug)
+    if not found or inv_path is None or not inv_path.is_file() or not str(content or "").strip():
         _reject(
             "inventory.ref",
             "missing_inventory",
@@ -359,6 +394,47 @@ def validate_audit_request_semantics(
                 "inventory_mismatch",
                 "inventory.ref does not match the client INVENTORY.md path",
             )
+
+    # Inventory-driven requests must pin normalized ClientInventory.version
+    # identity so saved / replayed AuditRequest payloads fail closed after
+    # inventory changes (compare normalized identity, not raw file bytes).
+    expected_version = (request.inventory.version_id or "").strip()
+    expected_hash = (request.inventory.content_hash or "").strip()
+    missing_identity: list[AuditRequestIssue] = []
+    if not expected_version:
+        missing_identity.append(
+            AuditRequestIssue(
+                location="inventory.version_id",
+                code="missing_inventory_version",
+                message="inventory.version_id is required for inventory-driven requests",
+            )
+        )
+    if not expected_hash:
+        missing_identity.append(
+            AuditRequestIssue(
+                location="inventory.content_hash",
+                code="missing_inventory_hash",
+                message="inventory.content_hash is required for inventory-driven requests",
+            )
+        )
+    if missing_identity:
+        raise AuditRequestRejected(issues=missing_identity)
+
+    current_inventory = _load_normalized_client_inventory(inventory_dir, client.slug)
+    current_version = current_inventory.version.version_id
+    current_hash = current_inventory.version.content_hash
+    if expected_hash != current_hash:
+        _reject(
+            "inventory.content_hash",
+            "inventory_hash_mismatch",
+            "request inventory content_hash does not match the current normalized inventory",
+        )
+    if expected_version != current_version:
+        _reject(
+            "inventory.version_id",
+            "inventory_version_mismatch",
+            "request inventory version_id does not match the current normalized inventory",
+        )
 
     targets = list_client_ssh_targets(inventory_dir, client.slug)
     by_ref = _index_inventory_targets(targets)
@@ -490,12 +566,19 @@ def build_audit_request_from_selected_jobs(
             )
         targets.append({"inventory_target_ref": ref, "frameworks": frameworks})
 
+    current_inventory = _load_normalized_client_inventory(Path(settings.inventory_dir), client_slug)
+    # Prefer on-disk directory casing for the inventory ref.
+    source = Path(current_inventory.version.source_path)
+    dir_name = source.parent.name if source.parent.name else client_slug
+
     payload = {
         "schema_version": AUDIT_REQUEST_SCHEMA_VERSION,
         "client_id": client_id,
         "inventory": {
             "kind": "client_file",
-            "ref": f"{client_slug}/INVENTORY.md",
+            "ref": f"{dir_name}/INVENTORY.md",
+            "version_id": current_inventory.version.version_id,
+            "content_hash": current_inventory.version.content_hash,
         },
         "targets": targets,
         "tool_profile": POC_TOOL_PROFILE,

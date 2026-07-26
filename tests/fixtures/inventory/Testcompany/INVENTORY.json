@@ -1,0 +1,64 @@
+{
+  "client": "Testcompany",
+  "hosts": [
+    {
+      "id": "host-01",
+      "hostname": "host-01",
+      "address": "10.200.29.71",
+      "os": "Ubuntu",
+      "services": ["ssh"],
+      "connection": ["ssh"]
+    },
+    {
+      "id": "host-02",
+      "hostname": "host-02",
+      "address": "10.200.29.72",
+      "os": "Ubuntu",
+      "services": ["ssh", "postgresql"],
+      "connection": ["ssh", "postgresql"]
+    },
+    {
+      "id": "host-03",
+      "hostname": "host-03",
+      "address": "10.200.29.73",
+      "os": "Ubuntu",
+      "services": ["ssh"],
+      "connection": ["ssh"]
+    },
+    {
+      "id": "host-04",
+      "hostname": "host-04",
+      "address": "10.200.29.74",
+      "os": "Ubuntu",
+      "services": ["ssh", "postgresql"],
+      "connection": ["ssh", "postgresql"]
+    },
+    {
+      "id": "host-05",
+      "hostname": "host-05",
+      "address": "10.200.29.75",
+      "os": "Windows Server",
+      "services": ["winrm"],
+      "connection": ["winrm"]
+    }
+  ],
+  "credentials": [
+    {
+      "access": "SSH",
+      "host": "10.200.29.71",
+      "port": 22,
+      "username": "audit_user",
+      "secret_ref": "vault://client/ssh/host01",
+      "has_secret": true
+    },
+    {
+      "access": "PostgreSQL",
+      "host": "10.200.29.72",
+      "port": 5432,
+      "username": "auditor_ro",
+      "secret_ref": "vault://client/pg/host02",
+      "database": "application_db",
+      "has_secret": true
+    }
+  ]
+}

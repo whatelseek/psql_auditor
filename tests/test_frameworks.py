@@ -100,7 +100,7 @@ def test_select_frameworks_it_domain_only():
     assert [fw.id for fw in selected] == ["host_facts", "host_facts_ru"]
 
 
-def test_select_frameworks_windows_has_no_bundled_cis():
+def test_select_frameworks_windows_matches_windows_server():
     facts = HostFacts(hostname="win-01", os_id="windows")
     selected = select_frameworks_for_host(facts, domains=["cybersecurity"], agents_dir="agents")
-    assert selected == []
+    assert [fw.id for fw in selected] == ["windows_server"]

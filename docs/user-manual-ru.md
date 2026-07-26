@@ -214,11 +214,36 @@ ad-hoc команда, доработка REQ, список сессий и т.�
 ### 6.2. Креденшелы и инвентарь
 
 Храните SSH / Postgres в [`secrets/connection.md`](../secrets/connection.example.md).
-Без CMDB используйте [`inventory/INVENTORY.md`](../inventory/INVENTORY.example.md).
+Без CMDB используйте [`inventory/<ClientName>/INVENTORY.md`](../inventory/README.md)
+и при необходимости `CREDENTIALS.md` / `credentials.md` / `connection.md`.
 В чате можно описать хост текстом; отдельный парсер «target-файла» не используется —
 источник истины: secrets + inventory.
 
-Подробности: [starting-an-audit.md](starting-an-audit.md).
+Подробности: [starting-an-audit.md](starting-an-audit.md),
+[inventory-driven-audit.md](inventory-driven-audit.md).
+
+### 6.2.1. Inventory-driven запуск (CLI / API)
+
+Минимальный цикл:
+
+```bash
+psql-auditor inventory validate Testcompany
+psql-auditor inventory analyze Testcompany          # discovery по умолчанию включён
+psql-auditor audit plan Testcompany
+psql-auditor audit start Testcompany --confirm     # без повторного discovery
+```
+
+- `--no-discovery` — только факты из inventory (no-op collector).
+- `--refresh-discovery` на `audit start` — явно перепроверить discovery; при
+  изменении effective facts план отклоняется как `plan_stale`.
+- Read-only SSH/WinRM: без `sudo`, установки пакетов, правок конфигурации и
+  перезапусков сервисов.
+- PostgreSQL подтверждается только сильными признаками (процесс / сервис /
+  пакет+доп. evidence). Один открытый порт 5432 **не** выбирает `postgres_cis`.
+- Секреты не попадают в `ClientInventory`, `AuditPlan`, API, логи и
+  `artifacts/<client>/preflight/…`.
+- Полное описание команд, confidence, конфликтов и evidence:
+  [inventory-driven-audit.md](inventory-driven-audit.md).
 
 ### 6.3. Несколько фреймворков
 
@@ -529,6 +554,7 @@ python3 openwebui/install_owui_prompts.py
 - [pre-audit-intake.md](pre-audit-intake.md) — опрос перед аудитом (intake)  
 - [owui-slash-commands.md](owui-slash-commands.md) — slash-команды Open WebUI  
 - [starting-an-audit.md](starting-an-audit.md) — старт аудита и формат target-файла  
+- [inventory-driven-audit.md](inventory-driven-audit.md) — inventory → discovery → AuditPlan  
 - [long-term-memory.md](long-term-memory.md) — playbook-память  
 - [cis-compliance-charts.md](cis-compliance-charts.md) — графики соответствия  
 - [results-database.md](results-database.md) — склад результатов в PostgreSQL  

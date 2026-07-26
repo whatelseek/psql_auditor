@@ -44,6 +44,8 @@ dev = [
 
 [project.scripts]
 auditor = "auditor.api.app:main"
+psql-auditor = "auditor.cli:main"
+auditor-cli = "auditor.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/auditor"]
