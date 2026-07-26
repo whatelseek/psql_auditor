@@ -1,10 +1,10 @@
 # `psql_auditor` — Master Development and Acceptance Checklist
 
-Checklist version: **1.9**  
+Checklist version: **1.10**  
 Date: **2026-07-26**  
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
-Latest reviewed revision: [`3153d56`](https://github.com/whatelseek/psql_auditor/commit/3153d56703d39398fc0c1f5c24c24ceacaad554c)  
+Latest reviewed revision: [`5286a4d`](https://github.com/whatelseek/psql_auditor/commit/5286a4d773f62d0bc796b205ddd18994bdfc89af)  
 Total tasks: **71**
 
 ## Status summary
@@ -12,20 +12,20 @@ Total tasks: **71**
 | Status | Count |
 | --- | ---: |
 | Complete `[x]` | **8 / 71 (11.3%)** |
-| Partially complete `[~]` | **5 / 71 (7.0%)** |
-| Open `[ ]` | **58 / 71 (81.7%)** |
+| Partially complete `[~]` | **6 / 71 (8.5%)** |
+| Open `[ ]` | **57 / 71 (80.3%)** |
 | Not fully complete | **63 / 71 (88.7%)** |
 
 Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`.
 
-Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
+Partially complete: `CORE-006`, `INPUT-003`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Latest verification
 
-`CORE-006` lifecycle race fixes are implemented and ready for independent
-acceptance review. Checklist status remains `[~]` until that review. Fixes
-cover lease-aware MCP pool shutdown, truthful task-registry timeouts, balanced
-checkpoint leases (no force-close), and failure-atomic scoped Sqlite init.
+Inventory-driven audit launch (load/validate/analyze/plan/confirm) is
+implemented as an acceptance candidate. `INPUT-001` remains **open** — commit
+[`5286a4d`](https://github.com/whatelseek/psql_auditor/commit/5286a4d773f62d0bc796b205ddd18994bdfc89af)
+is not auto-accepted. `CORE-006` remains `[~]` pending independent acceptance.
 
 | Check | Verified result |
 | --- | --- |
@@ -126,10 +126,35 @@ Do not mark complete based on class existence alone.
 ### M2 — Inputs and audit planning
 
 - [ ] `INPUT-001` — Introduce a strict `AuditRequest`.
+
+`INPUT-001` remains open until independent acceptance. Implementation commit
+[`5286a4d`](https://github.com/whatelseek/psql_auditor/commit/5286a4d773f62d0bc796b205ddd18994bdfc89af)
+is an acceptance candidate only (green CI alone is not sufficient).
+
 - [ ] `INPUT-002` — Enforce strict framework validation.
-- [ ] `INPUT-003` — Introduce a validated inventory model.
+- [~] `INPUT-003` — Introduce a validated inventory model.
+
+`INPUT-003` partial evidence:
+
+- domain model `ClientInventory` / `InventoryHost` / `InventoryFact` with
+  provenance (`src/auditor/domain/inventory.py`);
+- Markdown / YAML / JSON loaders + validation levels error/warning/information;
+- inventory version id + content hash; secret plaintext excluded from the model;
+- tests in `tests/test_inventory_driven_audit.py` (Testcompany five-host fixture);
+- docs: `docs/inventory-driven-audit.md`.
+  Independent acceptance still required.
+
 - [ ] `INPUT-004` — Introduce a tool registry and capability policy.
 - [~] `INPUT-005` — Implement deterministic preflight and `AuditPlan`.
+
+`INPUT-005` partial evidence:
+
+- typed `AuditPlan` with confirmation gate (`src/auditor/domain/audit_plan.py`);
+- technology detection + framework selection decisions with reject reasons;
+- CLI `psql-auditor inventory|audit …` and HTTP plan/confirm routes;
+- audit launch rejected without explicit confirmation; confirmed plan maps to
+  INPUT-001 `AuditRequest` payload.
+  Live access probes / full preflight service remain incomplete.
 
 ### M3 — LangGraph orchestration and evidence collection
 
@@ -223,6 +248,8 @@ Do not mark complete based on class existence alone.
 - `[x]` Complete: every acceptance criterion has code/test evidence and the
   required verification has passed.
 
-The Russian checklist is the detailed canonical version. This English version
-is its synchronized status and task register for implementation planning and
-handoff.
+The Russian checklist
+([`psql_auditor_master_refactoring_checklist_ru.md`](psql_auditor_master_refactoring_checklist_ru.md))
+is the synchronized detailed status register. This English version remains the
+task register for implementation planning and handoff. Both must be updated
+together; open items must not be marked accepted without independent review.
