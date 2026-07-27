@@ -17,13 +17,13 @@
 | Статус | Количество |
 | --- | ---: |
 | Принято `[x]` | **10 / 77 (13.0%)** |
-| Частично `[~]` | **5 / 77 (6.5%)** |
-| Открыто `[ ]` | **62 / 77 (80.5%)** |
+| Частично `[~]` | **6 / 77 (7.8%)** |
+| Открыто `[ ]` | **61 / 77 (79.2%)** |
 | Не полностью завершено | **67 / 77 (87.0%)** |
 
 Принято: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `INPUT-001`, `INPUT-003`.
 
-Частично: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
+Частично: `CORE-006`, `INPUT-002`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Последняя проверка
 
@@ -31,8 +31,9 @@ PR #36 (inventory-driven audit + SSH/WinRM discovery) влит в `main`.
 Независимая приёмка inventory-driven запуска приняла `INPUT-001` и
 `INPUT-003` на commit
 [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8).
-`INPUT-005` остаётся `[~]`. `INPUT-002` остаётся `[ ]` (кандидат Markdown
-framework registry в PR #37). Адаптеры `TOOL-001`…`TOOL-005` — открытый
+PR #37 (Markdown framework registry) принят для POC: `INPUT-002` — `[~]`,
+production-hardening отложен в backlog (см. доказательства INPUT-002).
+`INPUT-005` остаётся `[~]`. Адаптеры `TOOL-001`…`TOOL-005` — открытый
 backlog. Статусы приёмки не меняются автоматически по зелёному CI.
 
 | Проверка | Результат |
@@ -101,19 +102,35 @@ race-fix реализованы, но полное удаление legacy proce
 - rejection до jobs/sessions/external calls;
 - регрессионные тесты secret-safe ошибок и persisted request handling.
 
-- [ ] `INPUT-002` — Строгая валидация фреймворков.
+- [~] `INPUT-002` — Строгая валидация фреймворков.
 
-Частичные доказательства (приёмка всё ещё открыта):
+Доказательства POC-приёмки (независимая проверка, PR #37):
 
-- Markdown `FrameworkRegistry` для `agents/*.md` с optional YAML frontmatter;
-- без frontmatter: id из имени файла, title из H1, детерминированная версия
-  `src-<hash>`;
-- multiline секции требований и Markdown-списки;
-- compact catalog + compact requirement index + полный текст только текущего
-  требования;
-- невалидные frameworks видны с errors, но не executable;
-- drop-in `.md` без изменений Python;
+- optional YAML frontmatter;
+- framework ID из имени файла при отсутствии frontmatter;
+- title из H1;
+- детерминированная версия `src-<hash>`;
+- multiline Markdown-секции и списки;
+- compact framework catalog;
+- compact requirement index;
+- полный текст только для текущего требования;
+- невалидные frameworks видны, но не executable;
+- fail-closed retrieval prompt требования (`get_requirement_prompt_block()`);
+- fail-closed загрузка checklist (`load_framework_checklist()` — без
+  невалидированного ad-hoc fallback);
+- добавление нового Markdown framework без изменений Python;
+- совместимость bundled `agents/*.md`;
 - тесты: `tests/test_framework_registry.py`, `tests/test_checklist.py`.
+
+Production-hardening backlog (отложено; не блокирует POC, блокирует `[x]`):
+
+1. Обнаружение незакрытого YAML frontmatter. Если файл начинается с `---`, но
+   нет валидного closing delimiter, регистрировать `invalid_frontmatter`.
+   Framework остаётся видимым, но non-executable.
+2. Обнаружение malformed requirement-like headings. Markdown-секции,
+   похожие на requirements, но не соответствующие поддерживаемому формату ID,
+   должны давать `malformed_requirement_heading`. Их нельзя silently drop при
+   сохранении executable остальной части framework.
 
 - [ ] `AGENT-001` — Администраторские Markdown audit-агенты в `agents/`.
 - [x] `INPUT-003` — Валидируемая модель inventory.
@@ -251,8 +268,10 @@ execution integration, а не к validated inventory domain model.
 - `INPUT-005`: завершить YAML/JSON execution integration и независимую приёмку
   production discovery.
 - `TOOL-001`…`TOOL-005`: отдельные адаптеры SSH / WinRM / HTTP / TCP / SNMP.
-- `AGENT-001` / `INPUT-002`: администраторские агенты и строгая валидация
-  фреймворков.
+- `INPUT-002`: production hardening (`invalid_frontmatter`,
+  `malformed_requirement_heading`) перед пометкой `[x]`.
+- `AGENT-001`: администраторские агенты (зависит от production completion
+  INPUT-002).
 - `FLOW-007`: удалить deprecated process-wide graph getters после независимой
   приёмки.
 - `DOC-001`: синхронизировать baseline и evidence-layout документацию.

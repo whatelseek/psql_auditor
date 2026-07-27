@@ -12,13 +12,13 @@ Total tasks: **77**
 | Status | Count |
 | --- | ---: |
 | Complete `[x]` | **10 / 77 (13.0%)** |
-| Partially complete `[~]` | **5 / 77 (6.5%)** |
-| Open `[ ]` | **62 / 77 (80.5%)** |
+| Partially complete `[~]` | **6 / 77 (7.8%)** |
+| Open `[ ]` | **61 / 77 (79.2%)** |
 | Not fully complete | **67 / 77 (87.0%)** |
 
 Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `INPUT-001`, `INPUT-003`.
 
-Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
+Partially complete: `CORE-006`, `INPUT-002`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
 
 ## Latest verification
 
@@ -26,8 +26,9 @@ PR #36 (inventory-driven audit + SSH/WinRM discovery) is merged. Independent
 review of the inventory-driven launch path accepted `INPUT-001` and
 `INPUT-003` at
 [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8).
-`INPUT-005` remains `[~]`. `INPUT-002` remains `[ ]` (Markdown framework
-registry candidate on PR #37). Tool adapters `TOOL-001`…`TOOL-005` are open
+PR #37 (Markdown framework registry) is accepted for POC: `INPUT-002` is `[~]`
+with production-hardening gaps deferred to backlog (see INPUT-002 evidence).
+`INPUT-005` remains `[~]`. Tool adapters `TOOL-001`…`TOOL-005` are open
 backlog items. Checklist acceptance statuses are not changed automatically by
 green CI.
 
@@ -107,19 +108,35 @@ Acceptance evidence:
 - rejection occurs before jobs, sessions or external calls;
 - regression tests verify secret-safe errors and persisted request handling.
 
-- [ ] `INPUT-002` — Enforce strict framework validation.
+- [~] `INPUT-002` — Enforce strict framework validation.
 
-Partial evidence (acceptance still open):
+POC acceptance evidence (independent review, PR #37):
 
-- Markdown `FrameworkRegistry` for `agents/*.md` with optional YAML frontmatter;
-- without frontmatter: id from filename, title from H1, deterministic
-  `src-<hash>` version;
-- multiline requirement sections and Markdown lists;
-- compact catalog + compact requirement index + full text for the current
-  requirement only;
-- invalid frameworks remain visible with errors but are not executable;
-- drop-in `.md` frameworks require no Python changes;
+- optional YAML frontmatter;
+- framework ID derived from filename when frontmatter is absent;
+- title derived from H1;
+- deterministic `src-<hash>` version;
+- multiline Markdown sections and lists;
+- compact framework catalog;
+- compact requirement index;
+- full text only for the current requirement;
+- invalid frameworks visible but not executable;
+- fail-closed requirement prompt retrieval (`get_requirement_prompt_block()`);
+- fail-closed checklist loading (`load_framework_checklist()` — no unvalidated
+  ad-hoc fallback);
+- no Python changes required to add a new Markdown framework;
+- bundled `agents/*.md` compatibility;
 - tests: `tests/test_framework_registry.py`, `tests/test_checklist.py`.
+
+Production-hardening backlog (deferred; does not block POC, blocks `[x]`):
+
+1. Detect unclosed YAML frontmatter. When a file starts with `---` but has no
+   valid closing delimiter, register `invalid_frontmatter`. The framework must
+   remain visible but non-executable.
+2. Detect malformed requirement-like headings. Markdown sections that look like
+   requirements but do not match the supported requirement ID format must
+   produce `malformed_requirement_heading`. They must not be silently dropped
+   while the rest of the framework remains executable.
 
 - [ ] `AGENT-001` — Provide administrator-managed Markdown audit agents under `agents/`.
 - [x] `INPUT-003` — Introduce a validated inventory model.
@@ -259,8 +276,10 @@ Remaining work:
 - `INPUT-005`: complete YAML/JSON execution integration and independent
   acceptance of production discovery.
 - `TOOL-001`…`TOOL-005`: dedicated SSH / WinRM / HTTP / TCP / SNMP adapters.
-- `AGENT-001` / `INPUT-002`: administrator-managed agent authoring with strict
-  framework validation.
+- `INPUT-002`: production hardening (`invalid_frontmatter`,
+  `malformed_requirement_heading`) before marking `[x]`.
+- `AGENT-001`: administrator-managed agent authoring (depends on INPUT-002
+  production completion).
 - `FLOW-007`: remove deprecated process-wide graph getters after independent review.
 - `DOC-001`: synchronize baseline and evidence-layout documentation.
 - `CI-001`: complete workflow/report/review E2E and migration coverage.
