@@ -730,11 +730,20 @@ class EvidenceStore:
         result: str,
         *,
         error: str | None = None,
+        tool_result: Any | None = None,
+        client_id: str = "",
+        audit_run_id: str = "",
+        requirement_title: str = "",
+        tool_catalog_hash: str = "",
+        capability_policy_hash: str = "",
     ) -> Path:
         """Append one command/tool execution result under the requirement folder.
 
         Files are named ``NNN_<tool>.txt`` with a human-readable header plus
         the full stdout/result body. A JSON sidecar is written alongside.
+
+        When ``tool_result`` (a :class:`~auditor.domain.tool_result.ToolResult`)
+        is provided, the sidecar uses the normalized schema with provenance.
 
         Args:
             framework_id: Evidence framework key.
@@ -743,6 +752,12 @@ class EvidenceStore:
             arguments: Tool call arguments (secrets redacted).
             result: Full tool output text.
             error: Optional error message when the call failed.
+            tool_result: Optional normalized ToolResult (EVID-001/003).
+            client_id: Optional client id for provenance.
+            audit_run_id: Optional audit run id for provenance.
+            requirement_title: Optional requirement title for provenance.
+            tool_catalog_hash: Optional pinned catalog hash.
+            capability_policy_hash: Optional pinned policy hash.
 
         Returns:
             Path to the ``.txt`` evidence file.
@@ -760,14 +775,84 @@ class EvidenceStore:
 
         # Also keep a machine-readable sidecar for the same step.
         json_path = req_dir / f"{seq:03d}_{safe_tool}.json"
-        record = {
-            "seq": seq,
-            "tool": tool_name,
-            "arguments": safe_args,
-            "error": error,
-            "result": result,
-            "written_at": datetime.now(timezone.utc).isoformat(),
-        }
+        written_at = datetime.now(timezone.utc).isoformat()
+        if tool_result is not None and hasattr(tool_result, "to_evidence_record"):
+            # Enrich provenance from the active evidence/run context when empty.
+            try:
+                from auditor.domain.tool_result import ToolProvenance, ToolResult
+
+                if isinstance(tool_result, ToolResult):
+                    prov = tool_result.provenance
+                    enriched = ToolResult(
+                        status=tool_result.status,
+                        output=tool_result.output,
+                        error=tool_result.error,
+                        tool_id=tool_result.tool_id,
+                        tool_version=tool_result.tool_version,
+                        target=tool_result.target,
+                        started_at=tool_result.started_at,
+                        finished_at=tool_result.finished_at,
+                        provenance=ToolProvenance(
+                            client_id=prov.client_id or client_id,
+                            audit_run_id=prov.audit_run_id or audit_run_id,
+                            framework_id=prov.framework_id or framework_id,
+                            requirement_id=prov.requirement_id or req_id,
+                            requirement_title=prov.requirement_title or requirement_title,
+                            asset_id=prov.asset_id or (host or ""),
+                            source=prov.source or "tool_registry",
+                            tool_catalog_hash=prov.tool_catalog_hash or tool_catalog_hash,
+                            capability_policy_hash=(
+                                prov.capability_policy_hash or capability_policy_hash
+                            ),
+                            policy_decision=prov.policy_decision,
+                            command_hash=prov.command_hash,
+                        ),
+                        exit_code=tool_result.exit_code,
+                        arguments=redact_secrets(dict(tool_result.arguments or safe_args)),
+                    )
+                    record = enriched.to_evidence_record()
+                    record["seq"] = seq
+                    result = enriched.to_llm_text()
+                    error = enriched.error
+                    safe_args = dict(enriched.arguments)
+                    tool_name = enriched.tool_id or tool_name
+                else:
+                    record = tool_result.to_evidence_record()
+                    record["seq"] = seq
+            except Exception:  # noqa: BLE001 — never fail evidence write
+                record = {
+                    "seq": seq,
+                    "tool": tool_name,
+                    "arguments": safe_args,
+                    "error": error,
+                    "result": result,
+                    "written_at": written_at,
+                }
+        else:
+            record = {
+                "schema": "tool_result.v1",
+                "seq": seq,
+                "tool": tool_name,
+                "tool_id": tool_name,
+                "arguments": safe_args,
+                "error": error,
+                "result": result,
+                "output": result,
+                "written_at": written_at,
+                "provenance": {
+                    "client_id": client_id,
+                    "audit_run_id": audit_run_id,
+                    "framework_id": framework_id,
+                    "requirement_id": req_id,
+                    "requirement_title": requirement_title,
+                    "asset_id": host or "",
+                    "source": "tool_execution",
+                    "tool_catalog_hash": tool_catalog_hash,
+                    "capability_policy_hash": capability_policy_hash,
+                    "policy_decision": "allow" if not error else "error",
+                    "command_hash": "",
+                },
+            }
         json_path.write_text(
             json.dumps(record, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
@@ -776,7 +861,7 @@ class EvidenceStore:
         lines = [
             f"tool: {tool_name}",
             f"seq: {seq}",
-            f"written_at: {record['written_at']}",
+            f"written_at: {record.get('written_at', written_at)}",
             "arguments:",
             json.dumps(safe_args, indent=2, ensure_ascii=False),
         ]

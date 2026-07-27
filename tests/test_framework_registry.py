@@ -448,8 +448,13 @@ def test_tool_adapter_checklist_and_defect_map_coverage() -> None:
         assert tool_id in en_ids
         assert tool_id in ru_ids
         assert tool_id in mapped
-        assert re.search(rf"^- \[ \] `{tool_id}`", en, re.MULTILINE)
-        assert re.search(rf"^- \[ \] `{tool_id}`", ru, re.MULTILINE)
+        # TOOL-001 may be partial [~] after the SSH registry POC; others stay open.
+        if tool_id == "TOOL-001":
+            assert re.search(rf"^- \[[ ~]\] `{tool_id}`", en, re.MULTILINE)
+            assert re.search(rf"^- \[[ ~]\] `{tool_id}`", ru, re.MULTILINE)
+        else:
+            assert re.search(rf"^- \[ \] `{tool_id}`", en, re.MULTILINE)
+            assert re.search(rf"^- \[ \] `{tool_id}`", ru, re.MULTILINE)
     assert "WIN-001" not in en_ids
     assert "WIN-001" not in ru_ids
     assert "WIN-001" not in mapped

@@ -1,0 +1,445 @@
+"""INPUT-004 / TOOL-001 / EVID-001…003: tool registry + SSH vertical slice."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from auditor.config import Settings
+from auditor.domain.tool_result import ToolProvenance, ToolResult
+from auditor.evidence_store import EvidenceStore
+from auditor.tool_registry import (
+    ToolNotAuthorized,
+    get_tool_registry,
+    load_tool_registry,
+    reset_tool_registry_cache,
+)
+from auditor.tools.ssh import invoke_ssh_read_file, invoke_ssh_run, take_last_tool_result
+from auditor.tools.ssh_policy import is_readonly_ssh_command
+
+
+@pytest.fixture(autouse=True)
+def _reset_registry_cache() -> None:
+    reset_tool_registry_cache()
+    yield
+    reset_tool_registry_cache()
+
+
+def _write_manifest(catalog: Path, name: str, payload: dict) -> Path:
+    catalog.mkdir(parents=True, exist_ok=True)
+    path = catalog / f"{name}.json"
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _write_policy(root: Path, profile: str, payload: dict) -> Path:
+    policy_dir = root / "policies"
+    policy_dir.mkdir(parents=True, exist_ok=True)
+    path = policy_dir / f"{profile}.json"
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _valid_ssh_manifest(tool_id: str = "ssh_run") -> dict:
+    return {
+        "id": tool_id,
+        "version": "1.0.0",
+        "title": tool_id,
+        "description": "test",
+        "transport": "ssh",
+        "adapter": f"auditor.tools.ssh:invoke_{tool_id}",
+        "capabilities": ["host.read"],
+        "risk": "low",
+        "readonly": True,
+        "inventory_access": ["ssh"],
+        "credential_source": "inventory:ssh",
+        "blocked_operations": ["destructive_shell"],
+        "timeout_seconds": 30,
+        "max_output_bytes": 1000,
+        "enabled": True,
+        "profiles": ["poc_audit_v1"],
+        "input_schema": {"type": "object"},
+        "output_schema": {"type": "object"},
+    }
+
+
+@pytest.mark.unit
+def test_load_valid_and_invalid_manifests(tmp_path: Path) -> None:
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    _write_manifest(catalog, "ssh_run", _valid_ssh_manifest("ssh_run"))
+    _write_manifest(
+        catalog,
+        "broken",
+        {
+            "id": "broken_tool",
+            # missing version / adapter / capabilities
+            "transport": "ssh",
+            "readonly": True,
+            "enabled": True,
+            "profiles": ["poc_audit_v1"],
+        },
+    )
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": ["ssh_run", "broken_tool"],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 6000,
+            "require_inventory_credentials": True,
+        },
+    )
+
+    registry = load_tool_registry(root, profile="poc_audit_v1")
+    catalog_rows = registry.catalog(executable_only=False)
+    ids = {r.id for r in catalog_rows}
+    assert "ssh_run" in ids
+    assert "broken_tool" in ids
+
+    ssh = registry.get("ssh_run")
+    assert ssh is not None and ssh.executable
+    assert registry.is_authorized("ssh_run")
+
+    broken = registry.get("broken_tool")
+    assert broken is not None
+    assert not broken.executable
+    assert not registry.is_authorized("broken_tool")
+    # Invalid tools remain visible but are not bound.
+    bound_names = {t.name for t in registry.bindable_langchain_tools()}
+    assert "ssh_run" in bound_names
+    assert "broken_tool" not in bound_names
+
+
+@pytest.mark.unit
+def test_unauthorized_tool_rejection(tmp_path: Path) -> None:
+    root = tmp_path / "tools"
+    _write_manifest(root / "catalog", "ssh_run", _valid_ssh_manifest("ssh_run"))
+    _write_manifest(root / "catalog", "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": ["ssh_run"],  # ssh_read_file denied by omission
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 4000,
+            "require_inventory_credentials": True,
+        },
+    )
+    registry = load_tool_registry(root, profile="poc_audit_v1")
+    assert registry.is_authorized("ssh_run")
+    assert not registry.is_authorized("ssh_read_file")
+    with pytest.raises(ToolNotAuthorized):
+        registry.require_authorized("ssh_read_file")
+    bound = {t.name for t in registry.bindable_langchain_tools()}
+    assert bound == {"ssh_run"}
+
+
+@pytest.mark.unit
+def test_default_catalog_registers_ssh_tools() -> None:
+    registry = get_tool_registry(refresh=True)
+    assert registry.get("ssh_run") is not None
+    assert registry.get("ssh_read_file") is not None
+    assert registry.is_authorized("ssh_run")
+    assert registry.is_authorized("ssh_read_file")
+    assert registry.catalog_hash.startswith("tool-")
+    assert registry.policy_hash.startswith("pol-")
+    bound = {t.name for t in registry.bindable_langchain_tools(transports=("ssh",))}
+    assert bound == {"ssh_run", "ssh_read_file"}
+
+
+@pytest.mark.unit
+def test_readonly_ssh_policy() -> None:
+    assert is_readonly_ssh_command("ss -lntp | grep 5432")
+    assert is_readonly_ssh_command("cat /etc/os-release")
+    assert not is_readonly_ssh_command("rm -rf /var/lib/postgresql")
+    assert not is_readonly_ssh_command("apt-get install nginx")
+    assert not is_readonly_ssh_command("")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ssh_invocation_through_registry_denies_destructive() -> None:
+    settings = Settings(
+        _env_file=None,
+        ssh_host="db.example",
+        ssh_port=22,
+        ssh_user="auditor",
+        ssh_password="s3cret-password",
+        ssh_strict_host_key=False,
+    )
+    result = await invoke_ssh_run("rm -rf /tmp/data", settings=settings)
+    assert result.status == "denied"
+    assert result.error and "read-only" in result.error
+    assert "s3cret-password" not in result.to_llm_text()
+    assert "s3cret-password" not in json.dumps(result.to_evidence_record())
+    assert result.arguments.get("command") == "rm -rf /tmp/data"
+    assert result.target.host == "db.example"
+    assert take_last_tool_result() is result
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ssh_invocation_requires_inventory_target() -> None:
+    settings = Settings(_env_file=None, ssh_host="", ssh_password="")
+    result = await invoke_ssh_run("uname -a", settings=settings)
+    assert result.status == "unauthorized"
+    assert "not resolved" in (result.error or "")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ssh_invocation_normalized_result_with_mock_transport() -> None:
+    settings = Settings(
+        _env_file=None,
+        ssh_host="10.0.0.5",
+        ssh_port=22,
+        ssh_user="audit",
+        ssh_password="pw-should-not-leak",
+        ssh_strict_host_key=False,
+        ssh_command_timeout=5,
+    )
+
+    class _FakeResult:
+        exit_status = 0
+        stdout = "Linux\n"
+        stderr = ""
+
+    class _FakeConn:
+        async def run(self, command: str, check: bool = False, timeout: float = 0) -> _FakeResult:
+            assert "uname" in command
+            return _FakeResult()
+
+        async def __aenter__(self) -> _FakeConn:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    with patch("auditor.tools.ssh.asyncssh.connect", return_value=_FakeConn()):
+        result = await invoke_ssh_run(
+            "uname -a",
+            settings=settings,
+            provenance=ToolProvenance(
+                client_id="client_demo",
+                audit_run_id="arun_demo",
+                framework_id="postgres_cis",
+                requirement_id="REQ-001",
+                tool_catalog_hash="tool-abc",
+                capability_policy_hash="pol-xyz",
+            ),
+        )
+
+    assert result.status == "ok"
+    assert "Linux" in result.output
+    assert result.exit_code == 0
+    assert result.tool_id == "ssh_run"
+    assert result.provenance.client_id == "client_demo"
+    assert result.provenance.command_hash
+    assert result.provenance.policy_decision == "allow"
+    record = result.to_evidence_record()
+    dumped = json.dumps(record)
+    assert "pw-should-not-leak" not in dumped
+    assert record["provenance"]["framework_id"] == "postgres_cis"
+    assert record["schema"] == "tool_result.v1"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ssh_read_file_through_adapter() -> None:
+    settings = Settings(
+        _env_file=None,
+        ssh_host="host1",
+        ssh_user="u",
+        ssh_password="secret",
+        ssh_strict_host_key=False,
+    )
+
+    class _FakeResult:
+        exit_status = 0
+        stdout = "listen_addresses = '*'\n"
+        stderr = ""
+
+    class _FakeConn:
+        async def run(self, command: str, check: bool = False, timeout: float = 0) -> _FakeResult:
+            assert "head -c" in command
+            assert "postgresql.conf" in command
+            return _FakeResult()
+
+        async def __aenter__(self) -> _FakeConn:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    with patch("auditor.tools.ssh.asyncssh.connect", return_value=_FakeConn()):
+        result = await invoke_ssh_read_file("/etc/postgresql/postgresql.conf", settings=settings)
+
+    assert result.status == "ok"
+    assert result.tool_id == "ssh_read_file"
+    assert "listen_addresses" in result.output
+    assert result.arguments.get("path") == "/etc/postgresql/postgresql.conf"
+
+
+@pytest.mark.unit
+def test_evidence_store_writes_normalized_provenance(tmp_path: Path) -> None:
+    store = EvidenceStore(tmp_path, run_id="run_tools")
+    store.write_run_meta(client_id="client_a", audit_run_id="arun_a000000000001")
+    tool_result = ToolResult(
+        status="ok",
+        output="exit_code=0\nstdout:\nok",
+        error=None,
+        tool_id="ssh_run",
+        tool_version="1.0.0",
+        started_at="2026-01-01T00:00:00+00:00",
+        finished_at="2026-01-01T00:00:01+00:00",
+        provenance=ToolProvenance(
+            policy_decision="allow",
+            command_hash="abcd",
+        ),
+        arguments={"command": "uname -a", "password": "should-redact"},
+    )
+    path = store.write_tool_result(
+        "postgres_cis",
+        "REQ-001",
+        "ssh_run",
+        {"command": "uname -a", "password": "should-redact"},
+        "exit_code=0\nstdout:\nok",
+        tool_result=tool_result,
+        client_id="client_a",
+        audit_run_id="arun_a000000000001",
+        requirement_title="Hostname",
+        tool_catalog_hash="tool-deadbeef",
+        capability_policy_hash="pol-cafebabe",
+    )
+    sidecar = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert sidecar["schema"] == "tool_result.v1"
+    assert sidecar["tool_id"] == "ssh_run"
+    assert sidecar["provenance"]["client_id"] == "client_a"
+    assert sidecar["provenance"]["audit_run_id"] == "arun_a000000000001"
+    assert sidecar["provenance"]["framework_id"] == "postgres_cis"
+    assert sidecar["provenance"]["requirement_id"] == "REQ-001"
+    assert sidecar["provenance"]["tool_catalog_hash"] == "tool-deadbeef"
+    assert "should-redact" not in path.read_text(encoding="utf-8")
+    assert sidecar["arguments"]["password"] == "***REDACTED***"
+
+
+@pytest.mark.unit
+def test_audit_plan_pins_tool_hashes() -> None:
+    from auditor.domain.inventory import (
+        ClientInventory,
+        InventoryHost,
+        InventoryVersion,
+    )
+    from auditor.inventory.plan import generate_audit_plan
+
+    inventory = ClientInventory(
+        client_id="client_plan",
+        version=InventoryVersion(
+            version_id="inv-aaaaaaaaaaaa",
+            content_hash="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            source_format="markdown",
+            source_path="PlanCo/INVENTORY.md",
+            recorded_at="2026-01-01T00:00:00Z",
+        ),
+        hosts=(
+            InventoryHost(
+                host_id="h1",
+                address="10.0.0.1",
+                hostname="h1",
+                os_family="linux",
+            ),
+        ),
+    )
+    plan = generate_audit_plan(inventory, detections=[])
+    assert plan.tool_catalog_hash.startswith("tool-")
+    assert plan.capability_policy_hash.startswith("pol-")
+
+
+@pytest.mark.unit
+def test_audit_run_scope_pins_tool_hashes(tmp_path: Path) -> None:
+    from auditor.audit_registry import AuditRegistry
+
+    registry = AuditRegistry(tmp_path / "registry.sqlite")
+    run = registry.create_run(
+        client_id="client_toolreg0001",
+        scope={"frameworks": ["postgres_cis"]},
+    )
+    assert run.scope.get("tool_catalog_hash", "").startswith("tool-")
+    assert run.scope.get("capability_policy_hash", "").startswith("pol-")
+
+
+@pytest.mark.unit
+def test_graph_binds_registry_ssh_tools_only() -> None:
+    from auditor.graph import AuditorGraph, _registry_ssh_tools
+
+    settings = Settings(
+        _env_file=None,
+        agents_dir=Path("agents"),
+        memory_enabled=False,
+        litellm_base_url="http://localhost:9",
+    )
+    names = {t.name for t in _registry_ssh_tools()}
+    assert names == {"ssh_run", "ssh_read_file"}
+    graph = AuditorGraph(settings=settings)
+    assert "ssh_run" in graph.tools_by_name
+    assert "ssh_read_file" in graph.tools_by_name
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_execute_tool_calls_persists_ssh_tool_result(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from auditor.workflows.tool_execution import execute_tool_calls
+
+    store = EvidenceStore(tmp_path, run_id="run_exec")
+    store.write_run_meta(client_id="client_x", audit_run_id="arun_x000000000001")
+
+    class _Tool:
+        name = "ssh_run"
+
+        async def ainvoke(self, args: dict) -> str:
+            result = await invoke_ssh_run(
+                str(args.get("command") or ""),
+                settings=Settings(
+                    _env_file=None,
+                    ssh_host="h",
+                    ssh_user="u",
+                    ssh_password="hidden-secret",
+                    ssh_strict_host_key=False,
+                ),
+            )
+            return result.to_llm_text()
+
+    runtime = SimpleNamespace(
+        tools_by_name={"ssh_run": _Tool()},
+        settings=Settings(_env_file=None, max_tool_output_chars=2000, memory_learn=False),
+        playbooks=None,
+    )
+    messages = await execute_tool_calls(
+        runtime,  # type: ignore[arg-type]
+        [{"name": "ssh_run", "args": {"command": "rm -rf /"}, "id": "c1"}],
+        framework_id="postgres_cis",
+        req_id="REQ-002",
+        requirement_title="Destructive gate",
+        store=store,
+    )
+    assert messages[0].content.startswith("Tool denied:")
+    sidecar = json.loads(
+        (store.root / "postgres_cis" / "REQ-002" / "001_ssh_run.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["status"] == "denied"
+    assert sidecar["provenance"]["requirement_id"] == "REQ-002"
+    assert "hidden-secret" not in json.dumps(sidecar)

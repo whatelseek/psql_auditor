@@ -14,16 +14,16 @@
 
 ## Сводка статусов
 
-| Статус                 |          Количество |
-| ---------------------- | ------------------: |
-| Принято `[x]`          | **10 / 77 (13,0%)** |
-| Частично `[~]`         |   **6 / 77 (7,8%)** |
-| Открыто `[ ]`          | **61 / 77 (79,2%)** |
-| Не полностью завершено | **67 / 77 (87,0%)** |
+| Статус                 |           Количество |
+| ---------------------- | -------------------: |
+| Принято `[x]`          |  **10 / 77 (13,0%)** |
+| Частично `[~]`         | **11 / 77 (14,3%)** |
+| Открыто `[ ]`          |  **56 / 77 (72,7%)** |
+| Не полностью завершено |  **67 / 77 (87,0%)** |
 
 Принято: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `INPUT-001`, `INPUT-003`.
 
-Частично: `CORE-006`, `INPUT-002`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
+Частично: `CORE-006`, `INPUT-002`, `INPUT-004`, `INPUT-005`, `TOOL-001`, `FLOW-007`, `EVID-001`, `EVID-002`, `EVID-003`, `OPS-004`, `DOC-001`.
 
 ## Архитектурное решение продукта
 
@@ -45,48 +45,51 @@ discovery, собирать и интерпретировать evidence, выб
 
 PR #36 влит в `main` commit
 [`7be1eae`](https://github.com/whatelseek/psql_auditor/commit/7be1eae717f002612efe5d434d517f5c47a219f1).
-`INPUT-001` и `INPUT-003` остаются независимо принятыми. `INPUT-005` остаётся
-`[~]`: детерминированная основа preflight реализована, но остаются интеграция
-YAML/JSON execution и переход от hardcoded discovery collectors к реестру tools.
+PR #37 влит как
+[`eb2ef61`](https://github.com/whatelseek/psql_auditor/commit/eb2ef6130ac17e3f2d7142095045c316ed9a6cbd).
+`INPUT-001` и `INPUT-003` остаются независимо принятыми. Markdown framework
+registry принят для POC (`INPUT-002` = `[~]`). `INPUT-005` остаётся `[~]`.
 
-В v1.14 добавлены `TOOL-001`…`TOOL-005`. Локальная defect map в этом пакете
-покрывает все **77** ID; после commit требуется повторно запустить
-`make validate-defect-map` в repository CI.
+POC tool-registry vertical slice (эта ревизия): `INPUT-004`, `TOOL-001`,
+`EVID-001`, `EVID-002` и `EVID-003` — `[~]`. SSH зарегистрирован через
+`ToolRegistry` с capability policy, normalized `ToolResult`, read-only
+enforcement и provenance. `TOOL-002`…`TOOL-005` остаются открытыми. Не
+помечать `[x]` без независимой приёмки.
 
 | Проверка          | Результат                                           |
 | ----------------- | --------------------------------------------------- |
-| Format / Lint     | Passed на PR #36                                    |
-| Type check        | Passed, 88 files на PR #36                          |
-| Unit tests        | 442 passed на PR #36                                |
-| Integration tests | 8 passed на PR #36                                  |
-| Full suite        | 450 passed на PR #36                                |
-| Defect map        | Локальный пакет v1.14: 77/77 ID; требуется CI rerun |
+| Format / Lint     | Passed                                              |
+| Type check        | Passed, 92 files                                    |
+| Unit tests        | 473 passed                                          |
+| Integration tests | 8 passed                                            |
+| Full suite        | 481 passed                                          |
+| Defect map        | `validate-defect-map: OK` (77/77)                   |
 
 ## Реестр задач
 
 ### M0 — Базовая линия, тесты и CI
 
-* [x] `AUD-001` — Зафиксировать воспроизводимую базовую линию.
-* [x] `AUD-002` — Единые локальные и CI quality gates.
-* [x] `AUD-003` — Общие детерминированные тестовые фикстуры.
+- [x] `AUD-001` — Зафиксировать воспроизводимую базовую линию.
+- [x] `AUD-002` — Единые локальные и CI quality gates.
+- [x] `AUD-003` — Общие детерминированные тестовые фикстуры.
 
 `AUD-001` принят. Checklist v1.14 и локальная defect map покрывают все 77 ID.
 После commit требуется повторно запустить `make validate-defect-map` в CI.
 
 ### M1 — Идентификаторы и доменная модель
 
-* [x] `CORE-001` — Разделить `client_id` и `audit_run_id`.
-* [x] `CORE-002` — Разделить `AuditRun` и `AuditJob`.
-* [x] `CORE-003` — Каноническая идентичность результата.
-* [x] `CORE-004` — Структурированный `AssessmentResult`.
-* [x] `CORE-005` — Изоляция checkpoint и артефактов по audit run.
-* [~] `CORE-006` — Убрать скрытое глобальное изменяемое состояние.
+- [x] `CORE-001` — Разделить `client_id` и `audit_run_id`.
+- [x] `CORE-002` — Разделить `AuditRun` и `AuditJob`.
+- [x] `CORE-003` — Каноническая идентичность результата.
+- [x] `CORE-004` — Структурированный `AssessmentResult`.
+- [x] `CORE-005` — Изоляция checkpoint и артефактов по audit run.
+- [~] `CORE-006` — Убрать скрытое глобальное изменяемое состояние.
 
 `CORE-006` остаётся частичным до независимой приёмки.
 
 ### M2 — Входы и планирование аудита
 
-* [x] `INPUT-001` — Строгий `AuditRequest`.
+- [x] `INPUT-001` — Строгий `AuditRequest`.
 
 Доказательства приёмки:
 
@@ -100,9 +103,9 @@ YAML/JSON execution и переход от hardcoded discovery collectors к р�
 
 * независимо принято на review-base PR #35 и перенесено в merged PR #36.
 
-* [~] `INPUT-002` — Строгая валидация и регистрация текстовых фреймворков.
+- [~] `INPUT-002` — Строгая валидация и регистрация текстовых фреймворков.
 
-* [x] `INPUT-003` — Валидируемая модель inventory.
+- [x] `INPUT-003` — Валидируемая модель inventory.
 
 Для приёмки `INPUT-002` администратор должен добавлять человекочитаемый
 Markdown-фреймворк в `agents/` без изменения core Python. Фреймворк должен
@@ -120,7 +123,19 @@ source of truth; невалидные фреймворки fail-closed и не �
 
 * независимо принято на review-base PR #35 и перенесено в merged PR #36.
 
-* [ ] `INPUT-004` — Управляемый администратором реестр MCP/инструментов и политика capabilities.
+- [~] `INPUT-004` — Управляемый администратором реестр MCP/инструментов и политика capabilities.
+
+POC частичные доказательства (независимая приёмка обязательна — не помечать `[x]`):
+
+* versioned manifests в `tools/catalog/*.json` (capabilities, risk, schemas,
+  timeout/output limits, credential-source);
+* capability policy snapshot `tools/policies/poc_audit_v1.json`;
+* `ToolRegistry` fail-closed: invalid tools видимы, но не bind-ятся к LLM
+  (`src/auditor/tool_registry.py`);
+* SSH зарегистрирован через registry; WinRM/MCP остаются transitional;
+* каждый `AuditPlan` / `AuditRun` фиксирует `tool_catalog_hash` и
+  `capability_policy_hash`;
+* тесты: `tests/test_tool_registry.py`.
 
 Текущие временные способы расширения:
 
@@ -151,11 +166,21 @@ source of truth; невалидные фреймворки fail-closed и не �
 Агент выбирает tools через `INPUT-004`; детерминированный код контролирует scope,
 authorization, read-only policy, timeout, credentials, sanitization и provenance.
 
-* [ ] `TOOL-001` — Зарегистрированный SSH execution adapter.
-* [ ] `TOOL-002` — Зарегистрированный WinRM PowerShell adapter.
-* [ ] `TOOL-003` — Зарегистрированный HTTP/HTTPS request adapter.
-* [ ] `TOOL-004` — Зарегистрированный TCP connectivity adapter.
-* [ ] `TOOL-005` — Зарегистрированный SNMP GET/WALK adapter.
+- [~] `TOOL-001` — Зарегистрированный SSH execution adapter.
+- [ ] `TOOL-002` — Зарегистрированный WinRM PowerShell adapter.
+- [ ] `TOOL-003` — Зарегистрированный HTTP/HTTPS request adapter.
+- [ ] `TOOL-004` — Зарегистрированный TCP connectivity adapter.
+- [ ] `TOOL-005` — Зарегистрированный SNMP GET/WALK adapter.
+
+POC частичные доказательства `TOOL-001` (не помечать `[x]` без независимой приёмки):
+
+* manifests `tools/catalog/ssh_run.json` и `ssh_read_file.json`;
+* adapters `invoke_ssh_run` / `invoke_ssh_read_file` резолвят target/credentials
+  только из active inventory/run context (`effective_settings`);
+* normalized `ToolResult` с secret-free target и provenance;
+* read-only command gate, timeout, output limits и redaction секретов;
+* LangChain wrappers совместимы с текущим SSH audit behavior;
+* тесты: `tests/test_tool_registry.py`.
 
 Общие критерии приёмки:
 
@@ -180,7 +205,7 @@ authorization, read-only policy, timeout, credentials, sanitization и provenanc
 
 * E2E selection для Windows Server и PostgreSQL на Windows.
 
-* [~] `INPUT-005` — Воспроизводимый агентный preflight и `AuditPlan`.
+- [~] `INPUT-005` — Воспроизводимый агентный preflight и `AuditPlan`.
 
 Для приёмки `INPUT-004` нужны добавляемые администратором MCP и инструменты,
 версионированные schemas/capabilities, политика read-only и опасных действий,
@@ -223,7 +248,7 @@ RU manual; тесты `tests/test_input005_discovery.py`,
 
 ### M3 — Управляемый агент, LangGraph и сбор доказательств
 
-* [ ] `AGENT-001` — Реализовать управляемый LLM agent runtime.
+- [ ] `AGENT-001` — Реализовать управляемый LLM agent runtime.
 
 Критерии приёмки `AGENT-001`:
 
@@ -253,97 +278,112 @@ RU manual; тесты `tests/test_input005_discovery.py`,
 * E2E покрывает Windows + AD DS, Linux + PostgreSQL, неподдерживаемые активы,
   недостаточные evidence, сбой MCP/tool и добавляемый администратором framework.
 
-* [ ] `FLOW-001` — Типизированное минимальное состояние графа.
+- [ ] `FLOW-001` — Типизированное минимальное состояние графа.
 
-* [ ] `FLOW-002` — Заменить `asyncio.gather` на LangGraph `Send`.
+- [ ] `FLOW-002` — Заменить `asyncio.gather` на LangGraph `Send`.
 
-* [ ] `FLOW-003` — Бесшовный reducer результатов.
+- [ ] `FLOW-003` — Бесшовный reducer результатов.
 
-* [ ] `FLOW-004` — Отдельный worker/subgraph требований.
+- [ ] `FLOW-004` — Отдельный worker/subgraph требований.
 
-* [ ] `FLOW-005` — Таймауты, retries и backpressure.
+- [ ] `FLOW-005` — Таймауты, retries и backpressure.
 
-* [ ] `FLOW-006` — Корректный resume и cancellation.
+- [ ] `FLOW-006` — Корректный resume и cancellation.
 
-* [~] `FLOW-007` — Убрать process-wide singleton графа.
+- [~] `FLOW-007` — Убрать process-wide singleton графа.
 
-* [ ] `EVID-001` — Нормализация вывода инструментов.
+- [~] `EVID-001` — Нормализация вывода инструментов.
 
-* [ ] `EVID-002` — Read-only поведение и безопасный вызов.
+- [~] `EVID-002` — Read-only поведение и безопасный вызов.
 
-* [ ] `EVID-003` — Provenance для каждого evidence.
+- [~] `EVID-003` — Provenance для каждого evidence.
 
-* [ ] `EVID-004` — Structured output вместо хрупкого JSON-парсинга.
+POC частичные доказательства `EVID-001`…`EVID-003` (SSH slice; не помечать `[x]`):
 
-* [ ] `EVID-005` — Достаточность evidence и confidence.
+* схема `ToolResult` (`src/auditor/domain/tool_result.py`): status, output,
+  error, tool identity, target, timestamps, provenance;
+* SSH read-only deny-list (`src/auditor/tools/ssh_policy.py`), timeout и
+  bounded output;
+* evidence sidecars пишут `tool_result.v1` с provenance client/run/framework/
+  requirement и catalog/policy hashes;
+* credentials не попадают в arguments/logs/evidence (redaction).
 
-* [ ] `EVID-006` — Защита неизменяемых полей фреймворка.
+- [ ] `EVID-004` — Structured output вместо хрупкого JSON-парсинга.
 
-* [ ] `EVID-007` — Без скрытой потери данных при truncation.
+- [ ] `EVID-005` — Достаточность evidence и confidence.
+
+- [ ] `EVID-006` — Защита неизменяемых полей фреймворка.
+
+- [ ] `EVID-007` — Без скрытой потери данных при truncation.
 
 ### M4 — PostgreSQL, история и исключения
 
-* [ ] `DB-001` — Версионированные миграции БД.
-* [ ] `DB-002` — Repository и границы транзакций.
-* [ ] `DB-003` — Разделить initial/external/analyst/effective оценки.
-* [ ] `DB-004` — Optimistic concurrency и audit log.
-* [ ] `HIST-001` — Получение предыдущего сравнимого результата.
-* [ ] `HIST-002` — Детерминированный классификатор изменений.
-* [ ] `EXC-001` — Реестр утверждённых исключений.
-* [ ] `EXC-002` — Применение исключений к observed items.
-* [ ] `HIST-003` — История и исключения в текущей оценке.
-* [ ] `HIST-004` — E2E регрессия повторного аудита.
+- [ ] `DB-001` — Версионированные миграции БД.
+- [ ] `DB-002` — Repository и границы транзакций.
+- [ ] `DB-003` — Разделить initial/external/analyst/effective оценки.
+- [ ] `DB-004` — Optimistic concurrency и audit log.
+- [ ] `HIST-001` — Получение предыдущего сравнимого результата.
+- [ ] `HIST-002` — Детерминированный классификатор изменений.
+- [ ] `EXC-001` — Реестр утверждённых исключений.
+- [ ] `EXC-002` — Применение исключений к observed items.
+- [ ] `HIST-003` — История и исключения в текущей оценке.
+- [ ] `HIST-004` — E2E регрессия повторного аудита.
 
 ### M5 — Единая генерация отчётов
 
-* [ ] `REPORT-001` — Отдельный reporting-пакет.
-* [ ] `REPORT-002` — Версионированный `ReportDataset`.
-* [ ] `REPORT-003` — Сборка dataset из структурированных источников.
-* [ ] `REPORT-004` — Межзаписевая валидация.
-* [ ] `REPORT-005` — Единый metrics engine.
-* [ ] `REPORT-006` — Канонический `report.json` и checksum.
-* [ ] `REPORT-007` — Markdown из `ReportDataset`.
-* [ ] `REPORT-008` — Excel для менеджмента.
-* [ ] `REPORT-009` — Word для менеджмента.
-* [ ] `REPORT-010` — Атомарная публикация и версионирование.
-* [ ] `REPORT-011` — Интеграция reporting во все call sites.
-* [ ] `REPORT-012` — Полный reporting regression suite.
+- [ ] `REPORT-001` — Отдельный reporting-пакет.
+- [ ] `REPORT-002` — Версионированный `ReportDataset`.
+- [ ] `REPORT-003` — Сборка dataset из структурированных источников.
+- [ ] `REPORT-004` — Межзаписевая валидация.
+- [ ] `REPORT-005` — Единый metrics engine.
+- [ ] `REPORT-006` — Канонический `report.json` и checksum.
+- [ ] `REPORT-007` — Markdown из `ReportDataset`.
+- [ ] `REPORT-008` — Excel для менеджмента.
+- [ ] `REPORT-009` — Word для менеджмента.
+- [ ] `REPORT-010` — Атомарная публикация и версионирование.
+- [ ] `REPORT-011` — Интеграция reporting во все call sites.
+- [ ] `REPORT-012` — Полный reporting regression suite.
 
 ### M6 — Анонимизация и внешний model review
 
-* [ ] `REVIEW-001` — Версионированный `ReviewPackage`.
-* [ ] `REVIEW-002` — Обратимая карта анонимизации.
-* [ ] `REVIEW-003` — Детекция утечек перед отправкой.
-* [ ] `REVIEW-004` — Адаптер внешней модели.
-* [ ] `REVIEW-005` — Валидация ответа внешней модели.
-* [ ] `REVIEW-006` — Атомарная деанонимизация.
-* [ ] `REVIEW-007` — Сохранение review и пересчёт effective results.
-* [ ] `REVIEW-008` — Семантика ошибок и публикации.
-* [ ] `REVIEW-009` — Тест полного external-review пути.
+- [ ] `REVIEW-001` — Версионированный `ReviewPackage`.
+- [ ] `REVIEW-002` — Обратимая карта анонимизации.
+- [ ] `REVIEW-003` — Детекция утечек перед отправкой.
+- [ ] `REVIEW-004` — Адаптер внешней модели.
+- [ ] `REVIEW-005` — Валидация ответа внешней модели.
+- [ ] `REVIEW-006` — Атомарная деанонимизация.
+- [ ] `REVIEW-007` — Сохранение review и пересчёт effective results.
+- [ ] `REVIEW-008` — Семантика ошибок и публикации.
+- [ ] `REVIEW-009` — Тест полного external-review пути.
 
 ### M7 — Правки аналитика и регенерация
 
-* [ ] `ANALYST-001` — Детерминированный импорт reviewed Excel.
-* [ ] `ANALYST-002` — Транзакционные overrides и версии отчётов.
-* [ ] `ANALYST-003` — Явные service/CLI/API операции.
-* [ ] `ANALYST-004` — Round-trip тесты import/regeneration.
+- [ ] `ANALYST-001` — Детерминированный импорт reviewed Excel.
+- [ ] `ANALYST-002` — Транзакционные overrides и версии отчётов.
+- [ ] `ANALYST-003` — Явные service/CLI/API операции.
+- [ ] `ANALYST-004` — Round-trip тесты import/regeneration.
 
 ### M8 — Наблюдаемость, cleanup и release gate
 
-* [ ] `OPS-001` — Типизированная таксономия ошибок.
-* [ ] `OPS-002` — Structured logs, metrics и run manifest.
-* [ ] `OPS-003` — Убрать legacy Markdown-парсинг из production flow.
-* [~] `OPS-004` — Модульный cleanup и dependency review.
-* [~] `DOC-001` — Обновить пользовательскую и developer-документацию.
-* [ ] `DOC-002` — Полностью синтетический sample package.
-* [ ] `CI-001` — Полный release pipeline.
-* [ ] `E2E-001` — Финальный acceptance-сценарий.
+- [ ] `OPS-001` — Типизированная таксономия ошибок.
+- [ ] `OPS-002` — Structured logs, metrics и run manifest.
+- [ ] `OPS-003` — Убрать legacy Markdown-парсинг из production flow.
+- [~] `OPS-004` — Модульный cleanup и dependency review.
+- [~] `DOC-001` — Обновить пользовательскую и developer-документацию.
+- [ ] `DOC-002` — Полностью синтетический sample package.
+- [ ] `CI-001` — Полный release pipeline.
+- [ ] `E2E-001` — Финальный acceptance-сценарий.
 
 ## Текущие блокеры
 
 * `INPUT-002`: закрыть два deferred parser hardening finding; `AGENT-001`: завершить интеграцию governed runtime.
-* `INPUT-004`: единый tool registry, capability policy и immutable per-run catalog snapshot.
-* `TOOL-001`…`TOOL-005`: выделить SSH, WinRM, HTTP, TCP и SNMP из hardcoded discovery в protocol adapters.
+* `INPUT-004`: завершить MCP registration в unified registry, расширить
+  capability policies и независимую приёмку catalog snapshot.
+* `TOOL-001`: независимая приёмка registered SSH adapter; migrate discovery
+  collectors с hardcoded path.
+* `TOOL-002`…`TOOL-005`: выделить WinRM, HTTP, TCP и SNMP adapters.
+* `EVID-001`…`EVID-003`: расширить normalized ToolResult + provenance за пределы
+  SSH (WinRM/MCP) и завершить независимую приёмку.
 * `INPUT-005`: перейти на общий tool-driven discovery, завершить YAML/JSON execution и независимую приёмку.
 * `FLOW-007`: удалить deprecated process-wide graph getters после независимой приёмки.
 * `DOC-001`: синхронизировать architecture, tools и evidence layout.

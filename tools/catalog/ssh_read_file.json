@@ -1,0 +1,38 @@
+{
+  "id": "ssh_read_file",
+  "version": "1.0.0",
+  "title": "SSH read file",
+  "description": "Read a remote file over SSH (bounded output) from an inventory target.",
+  "transport": "ssh",
+  "adapter": "auditor.tools.ssh:invoke_ssh_read_file",
+  "capabilities": ["host.read", "host.read_file"],
+  "risk": "low",
+  "readonly": true,
+  "inventory_access": ["ssh"],
+  "credential_source": "inventory:ssh",
+  "blocked_operations": [
+    "destructive_shell",
+    "package_mutate",
+    "service_mutate",
+    "filesystem_mutate"
+  ],
+  "timeout_seconds": 30,
+  "max_output_bytes": 200000,
+  "enabled": true,
+  "profiles": ["poc_audit_v1"],
+  "input_schema": {
+    "type": "object",
+    "required": ["path"],
+    "properties": {
+      "path": {"type": "string", "description": "Remote filesystem path"}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "status": {"type": "string"},
+      "output": {"type": "string"},
+      "exit_code": {"type": ["integer", "null"]}
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "profile": "poc_audit_v1",
+  "description": "POC capability policy: SSH host inspection only via registered adapters.",
+  "readonly_required": true,
+  "allowed_tools": ["ssh_run", "ssh_read_file"],
+  "denied_tools": [],
+  "allowed_transports": ["ssh"],
+  "max_output_chars": 6000,
+  "require_inventory_credentials": true
+}

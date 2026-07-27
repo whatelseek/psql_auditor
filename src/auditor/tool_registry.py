@@ -1,0 +1,675 @@
+"""Administrator-managed tool registry and capability policy (INPUT-004).
+
+Discovers versioned tool manifests under ``tools/catalog/``, validates them,
+and exposes only authorized, executable tools for LLM binding. Invalid tools
+remain visible in the catalog but are never bound.
+
+Each audit plan/run pins ``tool_catalog_hash`` and ``capability_policy_hash``.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable, Literal
+
+from auditor.domain.audit_request import POC_TOOL_PROFILE
+
+ValidationLevel = Literal["error", "warning", "information"]
+
+_SECRET_ENV_TOKENS = ("password", "secret", "token", "api_key", "private_key")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolValidationIssue:
+    """One validation finding for a tool manifest or policy."""
+
+    level: ValidationLevel
+    code: str
+    message: str
+    tool_id: str = ""
+    location: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ToolManifest:
+    """Validated (or invalid) versioned tool manifest."""
+
+    id: str
+    version: str
+    title: str
+    description: str
+    transport: str
+    adapter: str
+    capabilities: tuple[str, ...]
+    risk: str
+    readonly: bool
+    inventory_access: tuple[str, ...]
+    credential_source: str
+    blocked_operations: tuple[str, ...]
+    timeout_seconds: int
+    max_output_bytes: int
+    enabled: bool
+    profiles: tuple[str, ...]
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    source_path: str = ""
+    source_hash: str = ""
+    issues: tuple[ToolValidationIssue, ...] = ()
+
+    @property
+    def executable(self) -> bool:
+        return self.enabled and not any(i.level == "error" for i in self.issues)
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityPolicy:
+    """Immutable capability-policy snapshot for a tool profile."""
+
+    version: str
+    profile: str
+    description: str
+    readonly_required: bool
+    allowed_tools: tuple[str, ...]
+    denied_tools: tuple[str, ...]
+    allowed_transports: tuple[str, ...]
+    max_output_chars: int
+    require_inventory_credentials: bool
+    source_path: str = ""
+    source_hash: str = ""
+    issues: tuple[ToolValidationIssue, ...] = ()
+
+    @property
+    def executable(self) -> bool:
+        return not any(i.level == "error" for i in self.issues)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCatalogEntry:
+    """Compact catalog row for operators / preflight prompts."""
+
+    id: str
+    version: str
+    title: str
+    transport: str
+    readonly: bool
+    executable: bool
+    profiles: tuple[str, ...]
+    validation_errors: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class ToolRegistry:
+    """Loaded tool catalog + active capability policy."""
+
+    tools: dict[str, ToolManifest] = field(default_factory=dict)
+    policy: CapabilityPolicy | None = None
+    catalog_dir: Path | None = None
+    policy_path: Path | None = None
+    catalog_hash: str = ""
+    policy_hash: str = ""
+
+    def list_tools(self, *, executable_only: bool = False) -> list[ToolManifest]:
+        items = [self.tools[k] for k in sorted(self.tools)]
+        if executable_only:
+            return [t for t in items if t.executable]
+        return items
+
+    def get(self, tool_id: str) -> ToolManifest | None:
+        return self.tools.get((tool_id or "").strip())
+
+    def catalog(self, *, executable_only: bool = False) -> list[ToolCatalogEntry]:
+        rows: list[ToolCatalogEntry] = []
+        for tool in self.list_tools(executable_only=False):
+            if executable_only and not self.is_authorized(tool.id):
+                continue
+            errors = tuple(i.message for i in tool.issues if i.level == "error")
+            rows.append(
+                ToolCatalogEntry(
+                    id=tool.id,
+                    version=tool.version,
+                    title=tool.title,
+                    transport=tool.transport,
+                    readonly=tool.readonly,
+                    executable=self.is_authorized(tool.id),
+                    profiles=tool.profiles,
+                    validation_errors=errors,
+                )
+            )
+        return rows
+
+    def is_authorized(self, tool_id: str) -> bool:
+        """Return True when the tool is executable and allowed by the policy."""
+        tool = self.get(tool_id)
+        if tool is None or not tool.executable:
+            return False
+        policy = self.policy
+        if policy is None or not policy.executable:
+            return False
+        if tool_id in policy.denied_tools:
+            return False
+        if policy.allowed_tools and tool_id not in policy.allowed_tools:
+            return False
+        if policy.allowed_transports and tool.transport not in policy.allowed_transports:
+            return False
+        if policy.readonly_required and not tool.readonly:
+            return False
+        if tool.profiles and policy.profile not in tool.profiles:
+            return False
+        return True
+
+    def authorized_tools(
+        self,
+        *,
+        transports: Iterable[str] | None = None,
+    ) -> list[ToolManifest]:
+        wanted = {t.lower() for t in transports} if transports is not None else None
+        out: list[ToolManifest] = []
+        for tool in self.list_tools():
+            if not self.is_authorized(tool.id):
+                continue
+            if wanted is not None and tool.transport.lower() not in wanted:
+                continue
+            out.append(tool)
+        return out
+
+    def bindable_langchain_tools(
+        self,
+        *,
+        transports: Iterable[str] | None = None,
+    ) -> list[Any]:
+        """Return LangChain tools for authorized manifests only."""
+        tools: list[Any] = []
+        for manifest in self.authorized_tools(transports=transports):
+            bound = _resolve_langchain_tool(manifest)
+            if bound is not None:
+                tools.append(bound)
+        return tools
+
+    def require_authorized(self, tool_id: str) -> ToolManifest:
+        tool = self.get(tool_id)
+        if tool is None:
+            raise ToolNotAuthorized(f"unknown tool {tool_id!r}", code="unknown_tool")
+        if not tool.executable:
+            msgs = "; ".join(i.message for i in tool.issues if i.level == "error")
+            raise ToolNotAuthorized(
+                f"tool {tool_id!r} is not executable: {msgs or 'validation errors'}",
+                code="tool_not_executable",
+            )
+        if not self.is_authorized(tool_id):
+            raise ToolNotAuthorized(
+                f"tool {tool_id!r} is not authorized by capability policy",
+                code="tool_unauthorized",
+            )
+        return tool
+
+    def snapshot_hashes(self) -> dict[str, str]:
+        return {
+            "tool_catalog_hash": self.catalog_hash,
+            "capability_policy_hash": self.policy_hash,
+        }
+
+
+class ToolNotAuthorized(ValueError):
+    """Raised when a tool cannot be bound or invoked under the active policy."""
+
+    def __init__(self, message: str, *, code: str = "tool_unauthorized") -> None:
+        self.code = code
+        super().__init__(message)
+
+
+def default_tools_dir() -> Path:
+    """Default ``tools/`` directory (cwd-relative)."""
+    return Path("tools")
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _short_hash(digest: str) -> str:
+    return f"tool-{digest[:12]}"
+
+
+def _policy_short_hash(digest: str) -> str:
+    return f"pol-{digest[:12]}"
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"tool manifest must be a JSON object: {path}")
+    return raw
+
+
+def _validate_manifest(raw: dict[str, Any], *, path: Path, source_hash: str) -> ToolManifest:
+    issues: list[ToolValidationIssue] = []
+    tool_id = str(raw.get("id") or "").strip()
+    if not tool_id:
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="missing_id",
+                message="manifest id is required",
+                location=str(path),
+            )
+        )
+        tool_id = path.stem
+
+    version = str(raw.get("version") or "").strip()
+    if not version:
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="missing_version",
+                message="manifest version is required",
+                tool_id=tool_id,
+                location=str(path),
+            )
+        )
+
+    adapter = str(raw.get("adapter") or "").strip()
+    if not adapter or ":" not in adapter:
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="invalid_adapter",
+                message="adapter must be 'module:attr'",
+                tool_id=tool_id,
+                location=str(path),
+            )
+        )
+
+    transport = str(raw.get("transport") or "").strip().lower()
+    if not transport:
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="missing_transport",
+                message="transport is required",
+                tool_id=tool_id,
+                location=str(path),
+            )
+        )
+
+    # Reject secret-shaped static config blocks if present.
+    for key in ("env", "credentials", "secrets"):
+        block = raw.get(key)
+        if isinstance(block, dict):
+            for env_key in block:
+                low = str(env_key).lower()
+                if any(tok in low for tok in _SECRET_ENV_TOKENS):
+                    issues.append(
+                        ToolValidationIssue(
+                            level="error",
+                            code="secret_in_manifest",
+                            message=(
+                                f"manifest must not contain secret key {env_key!r}; "
+                                "resolve credentials from inventory/run context"
+                            ),
+                            tool_id=tool_id,
+                            location=str(path),
+                        )
+                    )
+
+    input_schema = raw.get("input_schema") or raw.get("inputSchema") or {}
+    output_schema = raw.get("output_schema") or raw.get("outputSchema") or {}
+    if not isinstance(input_schema, dict):
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="invalid_input_schema",
+                message="input_schema must be an object",
+                tool_id=tool_id,
+                location=str(path),
+            )
+        )
+        input_schema = {}
+    if not isinstance(output_schema, dict):
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="invalid_output_schema",
+                message="output_schema must be an object",
+                tool_id=tool_id,
+                location=str(path),
+            )
+        )
+        output_schema = {}
+
+    caps = raw.get("capabilities") or []
+    if not isinstance(caps, list) or not caps:
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="missing_capabilities",
+                message="capabilities must be a non-empty list",
+                tool_id=tool_id,
+                location=str(path),
+            )
+        )
+        caps = []
+
+    profiles = raw.get("profiles") or [POC_TOOL_PROFILE]
+    if not isinstance(profiles, list):
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="invalid_profiles",
+                message="profiles must be a list",
+                tool_id=tool_id,
+                location=str(path),
+            )
+        )
+        profiles = []
+
+    timeout = int(raw.get("timeout_seconds") or 30)
+    max_out = int(raw.get("max_output_bytes") or 200_000)
+    if timeout <= 0:
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="invalid_timeout",
+                message="timeout_seconds must be > 0",
+                tool_id=tool_id,
+                location=str(path),
+            )
+        )
+    if max_out <= 0:
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="invalid_max_output",
+                message="max_output_bytes must be > 0",
+                tool_id=tool_id,
+                location=str(path),
+            )
+        )
+
+    inventory_access = raw.get("inventory_access") or []
+    blocked = raw.get("blocked_operations") or []
+    if not isinstance(inventory_access, list):
+        inventory_access = []
+    if not isinstance(blocked, list):
+        blocked = []
+
+    return ToolManifest(
+        id=tool_id,
+        version=version or "0",
+        title=str(raw.get("title") or tool_id),
+        description=str(raw.get("description") or ""),
+        transport=transport,
+        adapter=adapter,
+        capabilities=tuple(str(c) for c in caps),
+        risk=str(raw.get("risk") or "low"),
+        readonly=bool(raw.get("readonly", True)),
+        inventory_access=tuple(str(x) for x in inventory_access),
+        credential_source=str(raw.get("credential_source") or ""),
+        blocked_operations=tuple(str(x) for x in blocked),
+        timeout_seconds=timeout if timeout > 0 else 30,
+        max_output_bytes=max_out if max_out > 0 else 200_000,
+        enabled=bool(raw.get("enabled", True)),
+        profiles=tuple(str(p) for p in profiles),
+        input_schema=dict(input_schema),
+        output_schema=dict(output_schema),
+        source_path=str(path),
+        source_hash=source_hash,
+        issues=tuple(issues),
+    )
+
+
+def _validate_policy(raw: dict[str, Any], *, path: Path, source_hash: str) -> CapabilityPolicy:
+    issues: list[ToolValidationIssue] = []
+    profile = str(raw.get("profile") or "").strip()
+    if not profile:
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="missing_profile",
+                message="capability policy profile is required",
+                location=str(path),
+            )
+        )
+    version = str(raw.get("version") or "").strip() or "0"
+    allowed = raw.get("allowed_tools") or []
+    denied = raw.get("denied_tools") or []
+    transports = raw.get("allowed_transports") or []
+    if not isinstance(allowed, list):
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="invalid_allowed_tools",
+                message="allowed_tools must be a list",
+                location=str(path),
+            )
+        )
+        allowed = []
+    if not isinstance(denied, list):
+        denied = []
+    if not isinstance(transports, list):
+        transports = []
+    max_chars = int(raw.get("max_output_chars") or 6000)
+    if max_chars <= 0:
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="invalid_max_output_chars",
+                message="max_output_chars must be > 0",
+                location=str(path),
+            )
+        )
+        max_chars = 6000
+    return CapabilityPolicy(
+        version=version,
+        profile=profile or POC_TOOL_PROFILE,
+        description=str(raw.get("description") or ""),
+        readonly_required=bool(raw.get("readonly_required", True)),
+        allowed_tools=tuple(str(x) for x in allowed),
+        denied_tools=tuple(str(x) for x in denied),
+        allowed_transports=tuple(str(x).lower() for x in transports),
+        max_output_chars=max_chars,
+        require_inventory_credentials=bool(raw.get("require_inventory_credentials", True)),
+        source_path=str(path),
+        source_hash=source_hash,
+        issues=tuple(issues),
+    )
+
+
+def _resolve_langchain_tool(manifest: ToolManifest) -> Any | None:
+    """Import the module:attr adapter and return a LangChain tool if present."""
+    module_name, _, attr = manifest.adapter.partition(":")
+    if not module_name or not attr:
+        return None
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:  # noqa: BLE001
+        return None
+    target = getattr(module, attr, None)
+    if target is None:
+        return None
+    # Prefer a sibling LangChain tool named after the manifest id when the
+    # adapter is an invoke helper (e.g. invoke_ssh_run → ssh_run).
+    if callable(target) and getattr(target, "name", None) == manifest.id:
+        return target
+    langchain_name = manifest.id
+    sibling = getattr(module, langchain_name, None)
+    if sibling is not None and getattr(sibling, "name", None) == langchain_name:
+        return sibling
+    # Adapter may itself be a LangChain StructuredTool.
+    if getattr(target, "name", None):
+        return target
+    return None
+
+
+def load_capability_policy(
+    tools_dir: Path | str | None = None,
+    *,
+    profile: str = POC_TOOL_PROFILE,
+) -> CapabilityPolicy:
+    """Load ``tools/policies/<profile>.json``."""
+    root = Path(tools_dir) if tools_dir is not None else default_tools_dir()
+    path = root / "policies" / f"{profile}.json"
+    if not path.is_file():
+        return CapabilityPolicy(
+            version="0",
+            profile=profile,
+            description="",
+            readonly_required=True,
+            allowed_tools=(),
+            denied_tools=(),
+            allowed_transports=(),
+            max_output_chars=6000,
+            require_inventory_credentials=True,
+            source_path=str(path),
+            source_hash="",
+            issues=(
+                ToolValidationIssue(
+                    level="error",
+                    code="policy_missing",
+                    message=f"capability policy not found: {path}",
+                    location=str(path),
+                ),
+            ),
+        )
+    text = path.read_text(encoding="utf-8")
+    digest = _sha256_text(text)
+    raw = json.loads(text)
+    if not isinstance(raw, dict):
+        raise ValueError(f"capability policy must be a JSON object: {path}")
+    return _validate_policy(raw, path=path, source_hash=digest)
+
+
+def load_tool_registry(
+    tools_dir: Path | str | None = None,
+    *,
+    profile: str = POC_TOOL_PROFILE,
+) -> ToolRegistry:
+    """Load and validate tool manifests + the active capability policy.
+
+    Invalid manifests remain in the registry (visible) but ``executable`` is
+    false so they are never authorized for binding.
+    """
+    root = Path(tools_dir) if tools_dir is not None else default_tools_dir()
+    catalog_dir = root / "catalog"
+    tools: dict[str, ToolManifest] = {}
+    hash_parts: list[str] = []
+
+    if catalog_dir.is_dir():
+        for path in sorted(catalog_dir.glob("*.json")):
+            text = path.read_text(encoding="utf-8")
+            digest = _sha256_text(text)
+            hash_parts.append(f"{path.name}:{digest}")
+            try:
+                raw = _load_json(path)
+            except Exception as exc:  # noqa: BLE001
+                tool_id = path.stem
+                tools[tool_id] = ToolManifest(
+                    id=tool_id,
+                    version="0",
+                    title=tool_id,
+                    description="",
+                    transport="",
+                    adapter="",
+                    capabilities=(),
+                    risk="unknown",
+                    readonly=True,
+                    inventory_access=(),
+                    credential_source="",
+                    blocked_operations=(),
+                    timeout_seconds=30,
+                    max_output_bytes=200_000,
+                    enabled=False,
+                    profiles=(),
+                    input_schema={},
+                    output_schema={},
+                    source_path=str(path),
+                    source_hash=digest,
+                    issues=(
+                        ToolValidationIssue(
+                            level="error",
+                            code="invalid_json",
+                            message=f"failed to parse manifest: {exc}",
+                            tool_id=tool_id,
+                            location=str(path),
+                        ),
+                    ),
+                )
+                continue
+            manifest = _validate_manifest(raw, path=path, source_hash=digest)
+            # Duplicate ids: keep first, mark later as error entry under unique key.
+            if manifest.id in tools:
+                conflict = ToolManifest(
+                    id=manifest.id,
+                    version=manifest.version,
+                    title=manifest.title,
+                    description=manifest.description,
+                    transport=manifest.transport,
+                    adapter=manifest.adapter,
+                    capabilities=manifest.capabilities,
+                    risk=manifest.risk,
+                    readonly=manifest.readonly,
+                    inventory_access=manifest.inventory_access,
+                    credential_source=manifest.credential_source,
+                    blocked_operations=manifest.blocked_operations,
+                    timeout_seconds=manifest.timeout_seconds,
+                    max_output_bytes=manifest.max_output_bytes,
+                    enabled=False,
+                    profiles=manifest.profiles,
+                    input_schema=manifest.input_schema,
+                    output_schema=manifest.output_schema,
+                    source_path=manifest.source_path,
+                    source_hash=manifest.source_hash,
+                    issues=manifest.issues
+                    + (
+                        ToolValidationIssue(
+                            level="error",
+                            code="duplicate_id",
+                            message=f"duplicate tool id {manifest.id!r}",
+                            tool_id=manifest.id,
+                            location=str(path),
+                        ),
+                    ),
+                )
+                tools[f"{manifest.id}#{path.stem}"] = conflict
+                # Also mark the first as having a duplicate warning? Keep first executable.
+                continue
+            tools[manifest.id] = manifest
+
+    policy = load_capability_policy(root, profile=profile)
+    catalog_digest = _sha256_text("\n".join(hash_parts) if hash_parts else "empty-catalog")
+    return ToolRegistry(
+        tools=tools,
+        policy=policy,
+        catalog_dir=catalog_dir,
+        policy_path=Path(policy.source_path) if policy.source_path else None,
+        catalog_hash=_short_hash(catalog_digest),
+        policy_hash=_policy_short_hash(policy.source_hash or _sha256_text(policy.profile)),
+    )
+
+
+# Process-level cache for the default cwd catalog (tests can bypass via tools_dir).
+_CACHED: ToolRegistry | None = None
+
+
+def get_tool_registry(
+    *,
+    tools_dir: Path | str | None = None,
+    profile: str = POC_TOOL_PROFILE,
+    refresh: bool = False,
+) -> ToolRegistry:
+    """Return the tool registry, caching the default-path load."""
+    global _CACHED
+    if tools_dir is not None:
+        return load_tool_registry(tools_dir, profile=profile)
+    if _CACHED is None or refresh:
+        _CACHED = load_tool_registry(profile=profile)
+    return _CACHED
+
+
+def reset_tool_registry_cache() -> None:
+    """Drop the cached default registry (tests)."""
+    global _CACHED
+    _CACHED = None
