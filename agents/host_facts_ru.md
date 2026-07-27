@@ -1,13 +1,28 @@
 ---
 id: host_facts_ru
-aliases: [host facts, host inventory, facts, system inventory, baseline inventory, факты хоста, инвентаризация хоста, системная инвентаризация]
-description: Инвентаризация хоста — ОС, оборудование, хранилище, сеть, сервисы, ПО
+aliases: [host facts, host inventory, facts, system inventory, baseline inventory]
+description: Host inventory facts — OS, hardware, storage, network, services, software
 domain: it
 language: ru
 family_id: host_facts
+type: audit
+title: Host Facts Inventory
 detect:
   always: true
 version: "1.0"
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+    - fact: asset.type
+      operator: in
+      value: [server, database_server, workstation]
+required_capabilities:
+  any_of:
+    - ssh.command.read
+    - winrm.command.read
+required_facts:
+  - asset.id
 ---
 # Чеклист инвентаризации фактов хоста
 

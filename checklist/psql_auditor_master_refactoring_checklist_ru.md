@@ -50,22 +50,30 @@ PR #37 влит как
 `INPUT-001` и `INPUT-003` остаются независимо принятыми. Markdown framework
 registry принят для POC (`INPUT-002` = `[~]`). `INPUT-005` остаётся `[~]`.
 
-POC tool-registry vertical slice (эта ревизия): `INPUT-004`, `TOOL-001`,
+POC tool-registry vertical slice: `INPUT-004`, `TOOL-001`,
 `EVID-001`, `EVID-002` и `EVID-003` — `[~]`. SSH зарегистрирован через
 `ToolRegistry` с capability policy, normalized `ToolResult`, strict allow-list,
 path restrictions, secret redaction, fail-closed binding и provenance.
-Hardening по independent review: без legacy SSH fallback; reject stale
-tool/policy hashes; duplicate IDs non-executable; non-zero SSH exit → error.
+Hardening PR #39: без legacy SSH fallback; reject stale tool/policy hashes;
+duplicate IDs non-executable; non-zero SSH exit → error.
+
+Tool-driven discovery POC (эта ревизия): `INPUT-005` остаётся `[~]`. SSH
+discovery выбирает инструменты через `ToolRegistry`, выполняет allow-listed
+пробы через `ssh_run`, сохраняет `HostCapabilitySnapshot` v1, классифицирует
+технологии (confirmed/suspected/absent/unknown/unsupported), помечает
+unsupported network devices (Cisco без `cisco.cli.read`) и фиксирует hashes
+inventory / discovery / framework / tool-catalog / policy в `AuditPlan`.
+Подтверждение оператора обязательно до создания `AuditRun` / `AuditJob`.
 `TOOL-002`…`TOOL-005` остаются открытыми. Не помечать `[x]` без независимой
 приёмки.
 
 | Проверка          | Результат                                           |
 | ----------------- | --------------------------------------------------- |
 | Format / Lint     | Passed                                              |
-| Type check        | Passed, 92 files                                    |
-| Unit tests        | 481 passed                                          |
+| Type check        | Passed, 94 files                                    |
+| Unit tests        | 483 passed                                          |
 | Integration tests | 8 passed                                            |
-| Full suite        | 489 passed                                          |
+| Full suite        | 491 passed                                          |
 | Defect map        | `validate-defect-map: OK` (77/77)                   |
 
 ## Реестр задач
@@ -220,20 +228,17 @@ secret-safe invocation, неизменяемый snapshot каталога на 
 создать незарегистрированный transport, обойти policy или выполнить скрытый код.
 
 Частичные доказательства `INPUT-005`: типизированный `AuditPlan` с обязательным
-подтверждением; stale-plan при расхождении inventory **или** discovery/effective
-facts; runtime-резолв `CREDENTIALS.md` / `credentials.md` / `connection.md` без
-персистенции секретов; переходные
-`SshDiscoveryCollector` / `WinrmDiscoveryCollector` / `CompositeDiscoveryCollector`
-из PR #36; это не целевая extensibility boundary, их нужно перенести в
-`TOOL-001` / `TOOL-002` и общий discovery workflow. Сейчас они используются
-по умолчанию (`--no-discovery` / `{ "discovery": false }` → no-op); read-only
-SSH/WinRM; PostgreSQL только по сильным признакам (порт 5432 сам по себе не
-выбирает `postgres_cis`); типизированные ошибки discovery, timeout/retry,
-изоляция сбоя одного хоста; санитизированные evidence + детерминированные
-preflight-ревизии; `audit start --confirm` не перезапускает discovery молча
-(`--refresh-discovery` опционально); docs `docs/inventory-driven-audit.md` +
-RU manual; тесты `tests/test_input005_discovery.py`,
-`tests/integration/test_ssh_discovery_container.py`.
+подтверждением; stale-plan (`audit_plan_stale`) при расхождении inventory /
+discovery / framework / tool / policy; immutable `plan_revision_id`;
+персистенция и reload effective inventory для confirm/start; **динамический
+выбор фреймворков** из declarative Markdown `applicability` (typed predicates;
+без hardcoded platform→framework map; legacy только через
+`use_legacy_tech_mapping`); normalized facts + candidate evaluation +
+capability-based discovery plan через ToolRegistry; registry TCP/HTTP/SNMP
+adapters; tool-driven SSH discovery без `_tcp_reachable`;
+`HostCapabilitySnapshot` v1; Cisco framework из Markdown + snmp.get;
+jobs только после confirmation; docs/tests обновлены
+(`tests/test_input005_dynamic_selection.py`).
 Независимая приёмка обязательна — не помечать `[x]` автоматически.
 
 Дополнительные критерии `INPUT-005`:
@@ -385,12 +390,13 @@ POC частичные доказательства `EVID-001`…`EVID-003` (SSH
 * `INPUT-002`: закрыть два deferred parser hardening finding; `AGENT-001`: завершить интеграцию governed runtime.
 * `INPUT-004`: завершить MCP registration в unified registry, расширить
   capability policies и независимую приёмку catalog snapshot.
-* `TOOL-001`: независимая приёмка registered SSH adapter; migrate discovery
-  collectors с hardcoded path.
+* `TOOL-001`: независимая приёмка registered SSH adapter (discovery уже идёт
+  через registry для SSH).
 * `TOOL-002`…`TOOL-005`: выделить WinRM, HTTP, TCP и SNMP adapters.
 * `EVID-001`…`EVID-003`: расширить normalized ToolResult + provenance за пределы
   SSH (WinRM/MCP) и завершить независимую приёмку.
-* `INPUT-005`: перейти на общий tool-driven discovery, завершить YAML/JSON execution и независимую приёмку.
+* `INPUT-005`: завершить YAML/JSON execution, расширить tool-driven discovery
+  за пределы SSH и независимую приёмку.
 * `FLOW-007`: удалить deprecated process-wide graph getters после независимой приёмки.
 * `DOC-001`: синхронизировать architecture, tools и evidence layout.
 * `CI-001`: завершить workflow/report/review E2E и migration coverage.

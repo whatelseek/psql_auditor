@@ -50,8 +50,18 @@ POC tool-registry vertical slice (this revision): `INPUT-004`, `TOOL-001`,
 validated `ToolRegistry` with capability policy, normalized `ToolResult`,
 strict allow-list policy, path restrictions, secret redaction, fail-closed
 binding, and provenance-bearing evidence. Independent-review hardening landed
-in this PR (no legacy SSH fallback; stale tool/policy hash rejection; duplicate
-IDs non-executable; non-zero SSH exit → error). WinRM/HTTP/TCP/SNMP adapters
+in PR #39 (no legacy SSH fallback; stale tool/policy hash rejection; duplicate
+IDs non-executable; non-zero SSH exit → error).
+
+Tool-driven discovery POC (this revision): `INPUT-005` remains `[~]`. SSH
+discovery now selects registered tools via `ToolRegistry`, executes
+allow-listed probes through `ssh_run`, persists `HostCapabilitySnapshot` v1
+(OS, access, technologies, ports, services, catalog/policy hashes), classifies
+technologies as confirmed/suspected/absent/unknown/unsupported, marks
+unsupported network devices (e.g. Cisco without `cisco.cli.read`), and pins
+inventory / discovery / framework / tool-catalog / policy hashes on the
+deterministic `AuditPlan`. Operator confirmation is still required before
+`AuditRun` / `AuditJob` creation. WinRM/HTTP/TCP/SNMP adapters
 (`TOOL-002`…`TOOL-005`) remain open. Do not mark `[x]` without independent
 acceptance.
 
@@ -59,10 +69,10 @@ acceptance.
 | --- | --- |
 | Format | Passed |
 | Lint | Passed |
-| Type check | Passed, 92 files |
-| Unit tests | 481 passed |
+| Type check | Passed, 94 files |
+| Unit tests | 483 passed |
 | Integration tests | 8 passed |
-| Full suite | 489 passed |
+| Full suite | 491 passed |
 | Defect map | `validate-defect-map: OK` (77/77) |
 
 ## Quality assessment
@@ -251,8 +261,10 @@ sanitation, and provenance.
   gate for `ssh_read_file`; stdout/stderr secret scan/redaction;
 - fail-closed registry binding (no legacy SSH fallback); stale tool/policy hash
   rejection on confirm/start/invoke; non-zero exit → `ToolResult.status=error`;
+- SSH discovery collectors invoke adapters only through the registry
+  (`RegistrySshTransport` / `invoke_ssh_run`);
 - LangChain wrappers remain compatible with existing SSH audit behavior;
-- tests: `tests/test_tool_registry.py`.
+- tests: `tests/test_tool_registry.py`, `tests/test_input005_discovery.py`.
 
 Common acceptance criteria:
 
@@ -288,21 +300,51 @@ unregistered transport, bypass policy, or execute hidden arbitrary code.
   discovery/effective-facts hashes diverge;
 - `CREDENTIALS.md` / `credentials.md` / `connection.md` runtime credential
   resolution + secret redaction; `needs_discovery` for IP/port-only hosts;
-- transitional `SshDiscoveryCollector` / `WinrmDiscoveryCollector` /
-  `CompositeDiscoveryCollector` implementation landed in PR #36; these collectors
-  are not the target extensibility boundary and must be migrated to registered
-  `TOOL-001` / `TOOL-002` adapters plus a generic discovery workflow;
-- current SSH/WinRM discovery commands are read-oriented and PostgreSQL is
-  confirmed only with strong evidence, but final invocation policy belongs to
-  `INPUT-004`, `EVID-002`, and the protocol tool tasks;
+- **tool-driven SSH discovery POC**: `SshDiscoveryCollector` selects authorized
+  tools via `ToolRegistry` (`select_discovery_tools` / `ssh_run` only in this
+  PR), executes allow-listed atomic probes through `invoke_ssh_run`, and
+  persists per-host `HostCapabilitySnapshot` v1 (OS/version, SSH access,
+  technologies, running services, listening ports, catalog/policy hashes);
+- technology statuses: confirmed / suspected / absent / unknown / unsupported;
+- framework decisions: selected / not_applicable / requires_operator_decision /
+  unsupported / blocked (with reasons; Cisco → unsupported + missing
+  `cisco.cli.read`);
+- discovery is skipped when inventory validation contains errors;
+- WinRM remains transitional (`WinrmDiscoveryCollector`); HTTP/TCP/SNMP not added;
+- current SSH discovery commands are read-oriented and PostgreSQL is
+  confirmed only with strong evidence (port 5432 alone → suspected);
 - typed discovery errors, per-host timeout/retry, one-host failure isolation;
 - sanitized discovery evidence under `artifacts/<slug>/preflight/…` with
   secret scanning; deterministic preflight revisions;
+- plan pins inventory, discovery/effective-facts, `framework_hash`,
+  `tool_catalog_hash`, and `capability_policy_hash`; stale confirm/start →
+  `audit_plan_stale`;
+- immutable `plan_revision_id` derived from inventory version/hash, preflight
+  revision, discovery/effective facts, framework, tool catalog, and capability
+  policy hashes;
+- **dynamic framework selection** from declarative Markdown `applicability` /
+  `required_capabilities` / `required_facts` / `discovery_hints` (typed
+  predicates; no hardcoded platform→framework map on the default path; legacy
+  map behind `use_legacy_tech_mapping=True`);
+- normalized fact namespace + framework candidate evaluation + capability-based
+  discovery plans executed only through ToolRegistry adapters;
+- registry-driven TCP (`tcp_connect`), HTTP (`http_get`), and SNMP
+  (`snmp_get` / `snmp_walk`) discovery tools with fail-closed policy;
+- effective (reconciled) inventory is persisted and reloaded for confirm/start
+  validation (not the raw source-only inventory);
+- client-level frameworks expand to explicit per-host plan targets so plan
+  identity matches AuditJob fan-out;
+- SSH discovery no longer uses a direct `_tcp_reachable` probe — the registered
+  SSH adapter classifies connection failures;
+- `HostCapabilitySnapshot.technologies` come from the same
+  `detect_technologies` path used for framework selection (port-only →
+  suspected; unsupported Cisco snapshots persisted);
 - CLI sync `start_confirmed_audit` / API `await astart_confirmed_audit` →
   `AuditRequest` → `arun_request` (confirmed start does not silently re-run
-  discovery; `--refresh-discovery` optional);
+  discovery; `--refresh-discovery` optional); no assessment jobs before confirm;
 - docs: `docs/inventory-driven-audit.md` (+ RU manual); tests:
   `tests/test_input005_discovery.py`,
+  `tests/test_input005_dynamic_selection.py`,
   `tests/integration/test_ssh_discovery_container.py`.
   Independent acceptance still required — do not mark `[x]` automatically.
 
@@ -440,7 +482,8 @@ POC partial evidence for `EVID-001`…`EVID-003` (SSH slice; do not mark `[x]`):
   add WinRM, HTTP, TCP, and SNMP tools.
 - `EVID-001`…`EVID-003`: extend normalized ToolResult + provenance beyond SSH
   (WinRM/MCP) and complete independent acceptance.
-- `INPUT-005`: migrate to generic tool-driven discovery, complete YAML/JSON execution integration, and pass independent acceptance.
+- `INPUT-005`: complete YAML/JSON execution integration, extend tool-driven
+  discovery beyond SSH, and pass independent acceptance.
 - `FLOW-007`: remove deprecated process-wide graph getters after independent review.
 - `DOC-001`: synchronize architecture, tool, and evidence-layout documentation.
 - `CI-001`: complete workflow/report/review E2E and migration coverage.

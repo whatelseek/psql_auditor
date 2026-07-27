@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import socket
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +83,7 @@ class DiscoveredHostFacts:
     postgres_processes: list[str] = field(default_factory=list)
     postgres_services: list[str] = field(default_factory=list)
     postgres_binaries: list[str] = field(default_factory=list)
+    postgres_version: str = ""
     transport: str = ""
     collector: str = ""
     confidence: ConfidenceLevel = "high"
@@ -93,24 +93,29 @@ class DiscoveredHostFacts:
     error_code: str = ""
     limitations: list[str] = field(default_factory=list)
     command_results: list[CommandResult] = field(default_factory=list)
+    discovery_tool_ids: list[str] = field(default_factory=list)
 
 
 # Re-export name used by discovery.py / tests historically.
 # (discovery.py will import DiscoveredHostFacts from here or redefine thin wrapper)
 
 
+# Allow-listed atomic probes — kept in sync with tool_discovery.SSH_DISCOVERY_COMMANDS.
 SSH_COMMANDS: tuple[str, ...] = (
     "hostname",
     "cat /etc/os-release",
     "uname -a",
-    "ss -lntup || netstat -lntup",
+    "uname -m",
+    "ss -lntp",
+    "ss -lntup",
     "systemctl list-units --type=service --state=running --no-pager",
     "command -v psql",
     "command -v postgres",
+    "psql --version",
+    "postgres --version",
+    "systemctl is-active postgresql",
     "ps -ef",
-    "ps -ef | grep '[p]ostgres'",
-    "systemctl list-units --type=service --all | grep -i postgres",
-    "dpkg-query -W 2>/dev/null | grep -i postgres || rpm -qa 2>/dev/null | grep -i postgres",
+    "systemctl list-units --type=service --all --no-pager",
 )
 
 WINRM_COMMANDS: tuple[str, ...] = (
@@ -254,45 +259,54 @@ def postgres_confirmed(
 
 def _extract_postgres_linux(
     results: dict[str, CommandResult],
-) -> tuple[list[str], list[str], list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], list[str], str]:
+    from auditor.inventory.tool_discovery import parse_postgres_version
+
     processes: list[str] = []
     services: list[str] = []
     packages: list[str] = []
     binaries: list[str] = []
+    version = ""
 
-    proc = results.get("ps -ef | grep '[p]ostgres'")
-    if proc and proc.stdout.strip():
-        processes = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
-
-    # Also scan full ps -ef for postgres postmaster.
+    # Scan full ps -ef for postgres/postmaster (no shell grep — allow-list safe).
     ps_all = results.get("ps -ef")
-    if ps_all and not processes:
+    if ps_all and ps_all.stdout.strip():
         for ln in ps_all.stdout.splitlines():
-            if re.search(r"\b(postgres|postmaster)\b", ln, re.I) and "grep" not in ln:
+            if re.search(r"\b(postgres|postmaster)\b", ln, re.I) and "grep" not in ln.lower():
                 processes.append(ln.strip())
 
-    svc = results.get("systemctl list-units --type=service --all | grep -i postgres")
-    if svc and svc.stdout.strip():
+    active = results.get("systemctl is-active postgresql")
+    if active and active.exit_code == 0 and "active" in (active.stdout or "").lower():
+        services.append("postgresql")
+
+    for cmd in (
+        "systemctl list-units --type=service --all --no-pager",
+        "systemctl list-units --type=service --state=running --no-pager",
+    ):
+        svc = results.get(cmd)
+        if not svc or not svc.stdout.strip():
+            continue
         for ln in svc.stdout.splitlines():
             parts = ln.lstrip("●").split()
-            if parts:
-                name = parts[0].removesuffix(".service")
-                if "postgres" in name.lower():
-                    services.append(name)
-
-    pkg_cmd = (
-        "dpkg-query -W 2>/dev/null | grep -i postgres || rpm -qa 2>/dev/null | grep -i postgres"
-    )
-    pkg = results.get(pkg_cmd)
-    if pkg and pkg.stdout.strip():
-        packages = [ln.strip() for ln in pkg.stdout.splitlines() if ln.strip()]
+            if not parts:
+                continue
+            name = parts[0].removesuffix(".service")
+            if "postgres" in name.lower() and name not in services:
+                services.append(name)
 
     for cmd in ("command -v psql", "command -v postgres"):
         res = results.get(cmd)
         if res and res.exit_code == 0 and res.stdout.strip():
             binaries.append(res.stdout.strip().splitlines()[0].strip())
 
-    return processes, services, packages, binaries
+    for cmd in ("psql --version", "postgres --version"):
+        res = results.get(cmd)
+        if res and res.exit_code == 0 and res.stdout.strip():
+            version = parse_postgres_version(res.stdout) or res.stdout.strip().splitlines()[0]
+            if version:
+                break
+
+    return processes, services, packages, binaries, version
 
 
 def _extract_postgres_windows(
@@ -558,14 +572,6 @@ def _match_credential(
     return None
 
 
-def _tcp_reachable(host: str, port: int, timeout: float) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
 def _sanitize_command_results(
     results: list[CommandResult],
     *,
@@ -622,7 +628,7 @@ def _run_with_retries(
 
 @dataclass(slots=True)
 class SshDiscoveryCollector:
-    """Read-only SSH discovery for Linux/Unix hosts."""
+    """Read-only SSH discovery for Linux/Unix hosts via ToolRegistry."""
 
     inventory_dir: Path | str
     client_name: str
@@ -633,11 +639,48 @@ class SshDiscoveryCollector:
         Callable[[InventorySshTarget, DiscoveryHostSettings], ShellTransport] | None
     ) = None
     collector_version: str = COLLECTOR_VERSION
+    use_tool_registry: bool = True
 
     def discover(self, inventory: ClientInventory) -> list[DiscoveredHostFacts]:
+        discovery_tool_ids: list[str] = []
+        if self.use_tool_registry:
+            from auditor.inventory.tool_discovery import (
+                require_ssh_discovery_tool,
+                select_discovery_tools,
+            )
+
+            tools = select_discovery_tools()
+            discovery_tool_ids = [t.id for t in tools]
+            # Fail closed when ssh_run is not authorized (POC SSH-only path).
+            require_ssh_discovery_tool()
+
         targets = list_client_ssh_targets(self.inventory_dir, self.client_name)
         results: list[DiscoveredHostFacts] = []
         for host in inventory.hosts:
+            if getattr(host, "is_unsupported_network_device", False):
+                # Unsupported network devices are recorded without SSH probing.
+                # Persist a capability snapshot so missing capabilities remain auditable.
+                vendor = (host.vendor or "cisco").lower()
+                facts = DiscoveredHostFacts(
+                    host_id=host.host_id,
+                    transport="",
+                    collector="unsupported",
+                    collected_at=utc_now(),
+                    error=(
+                        f"unsupported asset_type={host.asset_type or 'network_device'} "
+                        f"vendor={host.vendor or 'unknown'}"
+                    ),
+                    error_code=ERROR_UNSUPPORTED_TRANSPORT,
+                    limitations=[
+                        "unsupported_asset",
+                        f"missing:{vendor}.cli.read",
+                    ],
+                    confidence="low",
+                    discovery_tool_ids=discovery_tool_ids,
+                )
+                self._persist_unsupported(facts, host, inventory)
+                results.append(facts)
+                continue
             if "ssh" not in host.connection_types and host.os_family == "windows":
                 continue
             if "ssh" not in host.connection_types and "winrm" in host.connection_types:
@@ -647,7 +690,14 @@ class SshDiscoveryCollector:
                 # Still try SSH when access is undeclared / linux-ish.
                 if "winrm" in host.connection_types:
                     continue
-            results.append(self._discover_host(host, inventory, targets))
+            results.append(
+                self._discover_host(
+                    host,
+                    inventory,
+                    targets,
+                    discovery_tool_ids=discovery_tool_ids,
+                )
+            )
         return results
 
     def _discover_host(
@@ -655,12 +705,15 @@ class SshDiscoveryCollector:
         host: InventoryHost,
         inventory: ClientInventory,
         targets: list[InventorySshTarget],
+        *,
+        discovery_tool_ids: list[str] | None = None,
     ) -> DiscoveredHostFacts:
         settings = _host_settings(host, self.defaults, self.host_overrides)
         cred = _match_credential(host, targets, transport="ssh")
         collected_at = utc_now()
+        tool_ids = list(discovery_tool_ids or [])
         if cred is None:
-            return DiscoveredHostFacts(
+            facts = DiscoveredHostFacts(
                 host_id=host.host_id,
                 transport="ssh",
                 collector="ssh",
@@ -669,14 +722,17 @@ class SshDiscoveryCollector:
                 error_code=ERROR_AUTHENTICATION_FAILED,
                 limitations=["missing_ssh_credentials"],
                 confidence="low",
+                discovery_tool_ids=tool_ids,
             )
+            self._persist(facts, inventory, [])
+            return facts
         known_secrets = [cred.password] if cred.password else []
 
         factory = self.transport_factory or _default_ssh_transport
         try:
             transport = factory(cred, settings)
         except Exception as exc:  # noqa: BLE001
-            return DiscoveredHostFacts(
+            facts = DiscoveredHostFacts(
                 host_id=host.host_id,
                 transport="ssh",
                 collector="ssh",
@@ -684,27 +740,13 @@ class SshDiscoveryCollector:
                 error=str(exc),
                 error_code=_classify_transport_error(exc),
                 confidence="low",
-            )
-
-        # Optional reachability probe.
-        try:
-            port = int(cred.port or "22")
-        except ValueError:
-            port = 22
-        if not _tcp_reachable(cred.host, port, settings.connection_timeout):
-            facts = DiscoveredHostFacts(
-                host_id=host.host_id,
-                transport="ssh",
-                collector="ssh",
-                collected_at=collected_at,
-                error=f"host unreachable: {cred.host}:{port}",
-                error_code=ERROR_HOST_UNREACHABLE,
-                limitations=["host_unreachable"],
-                confidence="low",
+                discovery_tool_ids=tool_ids,
             )
             self._persist(facts, inventory, known_secrets)
             return facts
 
+        # Connection failures are classified by the registered SSH adapter
+        # (invoke_ssh_run / RegistrySshTransport) — no direct TCP probe.
         command_results: list[CommandResult] = []
         by_cmd: dict[str, CommandResult] = {}
         connect_error: DiscoveredHostFacts | None = None
@@ -732,6 +774,7 @@ class SshDiscoveryCollector:
                         limitations=[result.error_code],
                         confidence="low",
                         command_results=command_results,
+                        discovery_tool_ids=tool_ids,
                     )
                     break
 
@@ -768,8 +811,10 @@ class SshDiscoveryCollector:
                 partial = True
                 limitations.append("os_release_unavailable")
 
-        ports_res = by_cmd.get("ss -lntup || netstat -lntup")
         listening_ports: list[int] = []
+        ports_res = by_cmd.get("ss -lntp")
+        if not (ports_res and ports_res.stdout.strip() and not ports_res.error_code):
+            ports_res = by_cmd.get("ss -lntup")
         if ports_res and ports_res.stdout.strip() and not ports_res.error_code:
             listening_ports = _parse_listening_ports_linux(ports_res.stdout)
         elif ports_res and ports_res.error_code:
@@ -784,7 +829,7 @@ class SshDiscoveryCollector:
             partial = True
             limitations.append("running_services_unavailable")
 
-        processes, pg_services, packages, binaries = _extract_postgres_linux(by_cmd)
+        processes, pg_services, packages, binaries, pg_version = _extract_postgres_linux(by_cmd)
         confirmed = postgres_confirmed(
             processes=processes,
             services=pg_services,
@@ -826,6 +871,7 @@ class SshDiscoveryCollector:
             postgres_processes=[sanitize_text(p, known_secrets=known_secrets) for p in processes],
             postgres_services=pg_services,
             postgres_binaries=binaries,
+            postgres_version=pg_version,
             transport="ssh",
             collector="ssh",
             confidence=confidence,
@@ -835,6 +881,7 @@ class SshDiscoveryCollector:
             error_code=error_code,
             limitations=limitations,
             command_results=safe_results,
+            discovery_tool_ids=tool_ids,
         )
         self._persist(facts, inventory, known_secrets)
         return facts
@@ -878,10 +925,12 @@ class SshDiscoveryCollector:
                 ],
                 "postgres_services": list(facts.postgres_services),
                 "postgres_binaries": list(facts.postgres_binaries),
+                "postgres_version": facts.postgres_version,
                 "services": list(facts.services),
                 "confidence": facts.confidence,
                 "source": "discovered",
                 "collector": "ssh",
+                "discovery_tool_ids": list(facts.discovery_tool_ids),
             },
             commands=commands,
             error_code=facts.error_code,
@@ -899,24 +948,169 @@ class SshDiscoveryCollector:
         except Exception:  # noqa: BLE001
             logger.exception("failed to persist SSH discovery evidence for %s", facts.host_id)
 
+        try:
+            from auditor.inventory.tool_discovery import (
+                build_host_capability_snapshot,
+                persist_host_capability_snapshot,
+            )
+
+            snapshot = build_host_capability_snapshot(
+                host_id=facts.host_id,
+                client_id=inventory.client_id,
+                inventory_version_id=inventory.version.version_id,
+                asset_type=next(
+                    (h.asset_type for h in inventory.hosts if h.host_id == facts.host_id),
+                    "server",
+                )
+                or "server",
+                os_name=facts.os_name,
+                os_family=facts.os_family,
+                os_version=facts.os_version,
+                ssh_access=facts.error_code
+                not in {
+                    ERROR_AUTHENTICATION_FAILED,
+                    ERROR_HOST_UNREACHABLE,
+                    ERROR_CONNECTION_TIMEOUT,
+                    ERROR_UNSUPPORTED_TRANSPORT,
+                }
+                and bool(
+                    facts.os_family or facts.hostname or facts.services or not facts.error_code
+                ),
+                running_services=list(facts.running_services),
+                listening_ports=list(facts.listening_ports),
+                postgresql_present="postgresql" in facts.services,
+                postgresql_version=facts.postgres_version,
+                postgresql_status=(
+                    "confirmed"
+                    if "postgresql" in facts.services
+                    else (
+                        "suspected"
+                        if 5432 in facts.listening_ports and not facts.error_code
+                        else ("unknown" if facts.error_code else "absent")
+                    )
+                ),
+                transport="ssh",
+                tool_ids=tuple(facts.discovery_tool_ids),
+                collector="ssh",
+                confidence=facts.confidence,
+                evidence_ref=facts.evidence_ref,
+                collected_at=facts.collected_at,
+                limitations=list(facts.limitations),
+                error=facts.error,
+                error_code=facts.error_code,
+            )
+            persist_host_capability_snapshot(
+                snapshot,
+                artifacts_root=self.artifacts_root,
+                client_slug=inventory.client_id,
+                inventory_version_id=inventory.version.version_id,
+                known_secrets=known_secrets,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("failed to persist HostCapabilitySnapshot for %s", facts.host_id)
+
+    def _persist_unsupported(
+        self,
+        facts: DiscoveredHostFacts,
+        host: InventoryHost,
+        inventory: ClientInventory,
+    ) -> None:
+        """Persist evidence + capability snapshot for unsupported assets (e.g. Cisco)."""
+        if self.artifacts_root is None:
+            return
+        vendor = (host.vendor or "cisco").lower()
+        evidence = HostDiscoveryEvidence(
+            host_id=facts.host_id,
+            transport="",
+            collector="unsupported",
+            collector_version=self.collector_version,
+            collected_at=facts.collected_at,
+            facts={
+                "asset_type": host.asset_type or "network_device",
+                "vendor": host.vendor or vendor,
+                "confidence": facts.confidence,
+                "source": "inventory",
+                "collector": "unsupported",
+                "discovery_tool_ids": list(facts.discovery_tool_ids),
+            },
+            commands=[],
+            error_code=facts.error_code,
+            error=facts.error,
+            limitations=list(facts.limitations),
+        )
+        try:
+            persist_host_evidence(
+                evidence,
+                artifacts_root=self.artifacts_root,
+                client_slug=inventory.client_id,
+                inventory_version_id=inventory.version.version_id,
+                known_secrets=[],
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "failed to persist unsupported discovery evidence for %s", facts.host_id
+            )
+
+        try:
+            from auditor.domain.host_capability import SnapshotTechnology
+            from auditor.inventory.tool_discovery import (
+                build_host_capability_snapshot,
+                persist_host_capability_snapshot,
+            )
+
+            missing_cap = f"{vendor}.cli.read"
+            snapshot = build_host_capability_snapshot(
+                host_id=facts.host_id,
+                client_id=inventory.client_id,
+                inventory_version_id=inventory.version.version_id,
+                asset_type=host.asset_type or "network_device",
+                os_name="",
+                os_family="",
+                os_version="",
+                ssh_access=False,
+                ssh_status="unavailable",
+                transport="",
+                tool_ids=tuple(facts.discovery_tool_ids),
+                collector="unsupported",
+                confidence=facts.confidence,
+                collected_at=facts.collected_at,
+                limitations=list(facts.limitations),
+                error=facts.error,
+                error_code=facts.error_code,
+            )
+            snapshot.technologies = [
+                SnapshotTechnology(
+                    technology_id="network_device",
+                    status="unsupported",
+                    evidence=[
+                        f"asset_type={host.asset_type or 'network_device'}",
+                        f"vendor={host.vendor or vendor}",
+                        f"missing={missing_cap}",
+                    ],
+                )
+            ]
+            snapshot.platform = host.vendor or vendor or "network_device"
+            persist_host_capability_snapshot(
+                snapshot,
+                artifacts_root=self.artifacts_root,
+                client_slug=inventory.client_id,
+                inventory_version_id=inventory.version.version_id,
+                known_secrets=[],
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "failed to persist unsupported HostCapabilitySnapshot for %s", facts.host_id
+            )
+
 
 def _default_ssh_transport(
     cred: InventorySshTarget,
     settings: DiscoveryHostSettings,
 ) -> ShellTransport:
-    try:
-        port = int(cred.port or "22")
-    except ValueError:
-        port = 22
-    return AsyncsshTransport(
-        host=cred.host,
-        port=port,
-        username=cred.user,
-        password=cred.password,
-        private_key_path=cred.private_key_path,
-        connect_timeout=settings.connection_timeout,
-        strict_host_key=(cred.strict_host_key or "").lower() in {"1", "true", "yes"},
-    )
+    """Default SSH transport: ToolRegistry-authorized ``ssh_run`` adapter."""
+    from auditor.inventory.tool_discovery import RegistrySshTransport
+
+    return RegistrySshTransport(command_timeout=settings.command_timeout)
 
 
 @dataclass(slots=True)

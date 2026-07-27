@@ -437,6 +437,8 @@ def reconcile_inventory(
             host_id=host.host_id,
             hostname=hostname,
             address=host.address,
+            asset_type=host.asset_type,
+            vendor=host.vendor,
             os_family=os_family,
             os_name=os_name,
             roles=host.roles,

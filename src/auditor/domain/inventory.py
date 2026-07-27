@@ -32,13 +32,27 @@ FactSource = Literal[
 FactConfidence = StrictFloat
 DetectionStatus = Literal[
     "confirmed",
+    "suspected",
+    "absent",
+    "unknown",
+    "unsupported",
+    # Legacy aliases retained for persisted inventory / fixtures.
     "probable",
     "possible",
     "not_detected",
-    "unknown",
 ]
 ValidationLevel = Literal["error", "warning", "information"]
 ConnectionType = Literal["ssh", "winrm", "postgresql", "mysql", "oracle", "unknown"]
+FrameworkDecisionStatus = Literal[
+    "selected",
+    "not_applicable",
+    "requires_operator_decision",
+    "unsupported",
+    "blocked",
+    # Legacy aliases retained for persisted plans / fixtures.
+    "rejected",
+    "considered",
+]
 
 CLIENT_NAME_PATTERN = r"^[A-Za-z0-9_]+$"
 SUPPORTED_INVENTORY_FORMATS = frozenset({"markdown", "yaml", "json"})
@@ -100,6 +114,8 @@ class InventoryHost(BaseModel):
     host_id: StrictStr = Field(min_length=1)
     hostname: StrictStr = ""
     address: StrictStr = ""
+    asset_type: StrictStr = "server"
+    vendor: StrictStr = ""
     os_family: StrictStr = ""
     os_name: StrictStr = ""
     roles: tuple[StrictStr, ...] = ()
@@ -116,6 +132,16 @@ class InventoryHost(BaseModel):
         if not text:
             raise ValueError("host_id must be non-empty")
         return text
+
+    @property
+    def is_unsupported_network_device(self) -> bool:
+        asset = (self.asset_type or "").strip().lower()
+        vendor = (self.vendor or "").strip().lower()
+        return asset in {"network_device", "network", "switch", "router", "firewall"} or vendor in {
+            "cisco",
+            "juniper",
+            "aruba",
+        }
 
 
 class ValidationIssue(BaseModel):
@@ -222,4 +248,9 @@ class FrameworkSelectionDecision(BaseModel):
     framework_version: StrictStr = ""
     target_id: StrictStr = Field(min_length=1)
     reason: StrictStr = Field(min_length=1)
-    status: Literal["selected", "rejected", "considered"]
+    status: FrameworkDecisionStatus
+    missing_capabilities: tuple[StrictStr, ...] = ()
+    matched_facts: tuple[StrictStr, ...] = ()
+    missing_facts: tuple[StrictStr, ...] = ()
+    evidence_refs: tuple[StrictStr, ...] = ()
+    confidence: StrictFloat = 0.0

@@ -6,6 +6,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from auditor.domain.audit_plan import (
     AuditPlan,
@@ -36,6 +37,52 @@ def _tool_snapshot_hashes() -> dict[str, str]:
         return {"tool_catalog_hash": "", "capability_policy_hash": ""}
 
 
+def _framework_selection_hash(decisions: list[Any] | tuple[Any, ...]) -> str:
+    """Deterministic hash of selected framework identities on the plan."""
+    rows = sorted(
+        f"{getattr(d, 'framework_id', '')}@"
+        f"{getattr(d, 'framework_version', '')}:"
+        f"{getattr(d, 'target_id', '')}"
+        for d in decisions
+        if getattr(d, "status", "") == "selected"
+    )
+    digest = hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"fw-{digest[:12]}"
+
+
+def framework_selection_hash(decisions: list[Any] | tuple[Any, ...]) -> str:
+    """Public wrapper for framework-selection hash pinning."""
+    return _framework_selection_hash(decisions)
+
+
+def _plan_revision_id(
+    *,
+    inventory_version_id: str,
+    inventory_content_hash: str,
+    preflight_revision_id: str,
+    discovery_result_hash: str,
+    effective_facts_hash: str,
+    framework_hash: str,
+    tool_catalog_hash: str,
+    capability_policy_hash: str,
+) -> str:
+    """Immutable plan revision identity from all pinned plan inputs."""
+    payload = {
+        "inventory_version_id": inventory_version_id,
+        "inventory_content_hash": inventory_content_hash,
+        "preflight_revision_id": preflight_revision_id,
+        "discovery_result_hash": discovery_result_hash,
+        "effective_facts_hash": effective_facts_hash,
+        "framework_hash": framework_hash,
+        "tool_catalog_hash": tool_catalog_hash,
+        "capability_policy_hash": capability_policy_hash,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"prev-{digest[:16]}"
+
+
 def generate_audit_plan(
     inventory: ClientInventory,
     detections: list[TechnologyDetection],
@@ -48,54 +95,60 @@ def generate_audit_plan(
     """Build a draft audit plan from inventory + technology detections.
 
     Plan generation is idempotent for the same inventory version: the plan id
-    is derived from ``client_id`` + ``inventory_version_id``.
+    is derived from ``client_id`` + ``inventory_version_id``. Client-level
+    frameworks are expanded into explicit per-host targets before confirmation
+    so plan targets match execution jobs 1:1.
     """
     decisions = select_frameworks_for_inventory(inventory, detections, agents_dir=agents_dir)
     host_by_id = {h.host_id: h for h in inventory.hosts}
+    executable_hosts = [
+        h for h in inventory.hosts_without_errors() if not h.is_unsupported_network_device
+    ]
 
     targets: list[AuditPlanTarget] = []
     for decision in decisions:
         if decision.status != "selected":
             continue
         if decision.target_id.startswith("client:"):
-            # Client-level infrastructure — attach to first valid host as scope
-            # marker is retained via target_id for reporting; skip host-less
-            # execution rows when no hosts exist.
-            if not inventory.hosts_without_errors():
-                continue
-            # Represent general assessment once against the client namespace.
-            targets.append(
-                AuditPlanTarget(
-                    target_id=decision.target_id,
-                    host_id=inventory.client_id,
-                    service="infrastructure",
-                    framework_id=decision.framework_id,
-                    framework_version=decision.framework_version,
-                    connection_methods=(),
-                    expected_evidence_sources=("inventory", "questionnaire"),
-                    limitations=(),
+            # Expand client-level frameworks into explicit per-host targets so the
+            # confirmed plan identity matches AuditJob fan-out exactly.
+            for host in executable_hosts:
+                targets.append(
+                    AuditPlanTarget(
+                        target_id=f"{host.host_id}/{decision.framework_id}",
+                        host_id=host.host_id,
+                        service="infrastructure",
+                        framework_id=decision.framework_id,
+                        framework_version=decision.framework_version,
+                        connection_methods=tuple(host.connection_types),
+                        expected_evidence_sources=("inventory", "questionnaire"),
+                        limitations=(),
+                    )
                 )
-            )
             continue
 
         host_id = decision.target_id.split("/", 1)[0]
-        host = host_by_id.get(host_id)
-        if host is None:
+        matched = host_by_id.get(host_id)
+        if matched is None:
+            continue
+        # Network devices may have declarative decisions (e.g. blocked/selected
+        # cisco_device) but are not executable SSH/WinRM audit job targets.
+        if matched.is_unsupported_network_device:
             continue
         service = ""
         if "/" in decision.target_id:
             service = decision.target_id.split("/", 1)[1]
         limitations: list[str] = []
-        if not host.address:
+        if not matched.address:
             limitations.append("missing host address")
-        if not host.connection_types:
+        if not matched.connection_types:
             limitations.append("no connection method declared")
         evidence_sources: list[str] = ["inventory"]
-        if "ssh" in host.connection_types:
+        if "ssh" in matched.connection_types:
             evidence_sources.insert(0, "ssh")
-        if "winrm" in host.connection_types:
+        if "winrm" in matched.connection_types:
             evidence_sources.insert(0, "winrm")
-        if service == "postgresql" or "postgresql" in host.connection_types:
+        if service == "postgresql" or "postgresql" in matched.connection_types:
             evidence_sources.append("postgresql")
         targets.append(
             AuditPlanTarget(
@@ -104,7 +157,7 @@ def generate_audit_plan(
                 service=service,
                 framework_id=decision.framework_id,
                 framework_version=decision.framework_version,
-                connection_methods=tuple(host.connection_types),
+                connection_methods=tuple(matched.connection_types),
                 expected_evidence_sources=tuple(dict.fromkeys(evidence_sources)),
                 limitations=tuple(limitations),
             )
@@ -134,7 +187,12 @@ def generate_audit_plan(
         *(
             f"Clarify framework selection for {d.target_id}: {d.reason}"
             for d in decisions
-            if d.status == "considered"
+            if d.status in {"requires_operator_decision", "considered"}
+        ),
+        *(
+            f"Unsupported asset {d.target_id}: {d.reason}"
+            for d in decisions
+            if d.status == "unsupported"
         ),
         *(
             f"Resolve discovery limitation on {i.host_id}: {i.message}"
@@ -172,15 +230,29 @@ def generate_audit_plan(
         potentially_destructive=False,
     )
 
+    tool_hashes = _tool_snapshot_hashes()
+    framework_hash = _framework_selection_hash(decisions)
+    plan_revision_id = _plan_revision_id(
+        inventory_version_id=inventory.version.version_id,
+        inventory_content_hash=inventory.version.content_hash,
+        discovery_result_hash=discovery_result_hash,
+        effective_facts_hash=effective_facts_hash,
+        preflight_revision_id=preflight_revision_id,
+        framework_hash=framework_hash,
+        tool_catalog_hash=str(tool_hashes["tool_catalog_hash"]),
+        capability_policy_hash=str(tool_hashes["capability_policy_hash"]),
+    )
     return AuditPlan(
         plan_id=_plan_id(inventory.client_id, inventory.version.version_id),
+        plan_revision_id=plan_revision_id,
         client_id=inventory.client_id,
         inventory_version_id=inventory.version.version_id,
         inventory_content_hash=inventory.version.content_hash,
         discovery_result_hash=discovery_result_hash,
         effective_facts_hash=effective_facts_hash,
         preflight_revision_id=preflight_revision_id,
-        **_tool_snapshot_hashes(),
+        framework_hash=framework_hash,
+        **tool_hashes,
         status="draft",
         targets=tuple(targets),
         framework_decisions=tuple(decisions),
@@ -318,7 +390,7 @@ def assert_plan_matches_inventory(plan: AuditPlan, inventory: ClientInventory) -
         raise PlanConfirmationRejected(
             "audit plan is stale: inventory changed since plan generation; "
             "re-run inventory analyze / audit plan to regenerate",
-            code="plan_stale",
+            code="audit_plan_stale",
         )
 
 
@@ -334,14 +406,14 @@ def assert_plan_matches_preflight(
             raise PlanConfirmationRejected(
                 "audit plan is stale: discovery results changed since plan generation; "
                 "re-run inventory analyze / audit plan --refresh",
-                code="plan_stale",
+                code="audit_plan_stale",
             )
     if plan.effective_facts_hash and effective_facts_hash:
         if plan.effective_facts_hash != effective_facts_hash:
             raise PlanConfirmationRejected(
                 "audit plan is stale: effective discovery facts changed since plan "
                 "generation; re-run inventory analyze / audit plan --refresh",
-                code="plan_stale",
+                code="audit_plan_stale",
             )
 
 
@@ -355,7 +427,23 @@ def assert_plan_matches_tool_registry(plan: AuditPlan) -> None:
             capability_policy_hash=plan.capability_policy_hash,
         )
     except ToolSnapshotStale as exc:
-        raise PlanConfirmationRejected(str(exc), code=exc.code) from exc
+        raise PlanConfirmationRejected(str(exc), code="audit_plan_stale") from exc
+
+
+def assert_plan_matches_framework_hash(
+    plan: AuditPlan,
+    *,
+    framework_hash: str = "",
+) -> None:
+    """Reject confirm/start when selected framework identities diverged."""
+    pinned = (plan.framework_hash or "").strip()
+    current = (framework_hash or "").strip()
+    if pinned and current and pinned != current:
+        raise PlanConfirmationRejected(
+            "audit plan is stale: framework selection changed since plan generation; "
+            "re-run inventory analyze / audit plan",
+            code="audit_plan_stale",
+        )
 
 
 def plan_confirmation_prompt(plan: AuditPlan) -> str:

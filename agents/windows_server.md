@@ -5,9 +5,26 @@ description: Windows Server baseline audit checklist (WinRM)
 domain: cybersecurity
 language: en
 family_id: windows_server
+type: audit
+title: Windows Server Baseline
 detect:
   os_ids: [windows]
 version: "1.0"
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: windows
+  any:
+    - fact: technology.windows_server.status
+      operator: in
+      value: [confirmed, suspected]
+required_capabilities:
+  any_of:
+    - winrm.command.read
+    - ssh.command.read
+required_facts:
+  - os.family
 ---
 # Windows Server Security Audit Checklist
 

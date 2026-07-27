@@ -1,14 +1,47 @@
 ---
 id: postgres_cis_ru
-aliases: [postgres, postgresql, psql, database, pg, постгрес, postgres cis, аудит postgres]
-description: Чеклист hardening PostgreSQL (RU)
+aliases: [postgres, postgresql, psql, database, pg]
+description: PostgreSQL CIS / hardening checklist
 domain: cybersecurity
 language: ru
 family_id: postgres_cis
+type: audit
+title: PostgreSQL CIS Assessment
 detect:
   binaries: [postgres, psql]
   ports: [5432]
 version: "1.0"
+applicability:
+  all:
+    - fact: asset.type
+      operator: in
+      value: [server, database_server]
+  any:
+    - fact: technology.postgresql.status
+      operator: in
+      value: [confirmed, suspected]
+required_capabilities:
+  any_of:
+    - ssh.command.read
+    - postgresql.query.read
+required_facts:
+  - asset.type
+  - technology.postgresql.status
+discovery_hints:
+  - capability: tcp.connect
+    purpose: Detect PostgreSQL listener
+    arguments:
+      ports: [5432]
+    expected_facts: [port.5432.status]
+  - capability: ssh.command.read
+    purpose: Confirm PostgreSQL installation
+    operation_ids:
+      - detect_postgresql_binary
+      - detect_postgresql_service
+      - read_postgresql_version
+    expected_facts:
+      - technology.postgresql.status
+      - technology.postgresql.version
 ---
 # Чеклист аудита безопасности PostgreSQL
 

@@ -1,0 +1,36 @@
+{
+  "id": "snmp_get",
+  "version": "1.0.0",
+  "title": "SNMP GET",
+  "description": "Read allow-listed SNMP OIDs from an inventory host.",
+  "transport": "snmp",
+  "adapter": "auditor.tools.snmp:invoke_snmp_get",
+  "capabilities": ["snmp.get"],
+  "risk": "low",
+  "readonly": true,
+  "inventory_access": ["snmp"],
+  "credential_source": "inventory:snmp",
+  "blocked_operations": ["snmp_set", "arbitrary_oid"],
+  "timeout_seconds": 10,
+  "max_output_bytes": 32768,
+  "enabled": true,
+  "profiles": ["poc_audit_v1"],
+  "input_schema": {
+    "type": "object",
+    "required": ["oids"],
+    "properties": {
+      "oids": {
+        "type": "array",
+        "items": {"type": "string"},
+        "maxItems": 30
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "status": {"type": "string"},
+      "output": {"type": "string"}
+    }
+  }
+}
