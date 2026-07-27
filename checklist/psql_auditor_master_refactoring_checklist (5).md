@@ -1,10 +1,10 @@
 # `psql_auditor` — Master Development and Acceptance Checklist
 
 Checklist version: **1.14**  
-Date: **2026-07-26**  
+Date: **2026-07-27**  
 Repository: `whatelseek/psql_auditor`  
 Baseline commit: [`b064e26`](https://github.com/whatelseek/psql_auditor/commit/b064e26e9150d0bf4ebc2036ecc7c839b4b219e4)  
-Latest independently reviewed revision: [`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8)  
+Latest independently reviewed revision: [`eb2ef61`](https://github.com/whatelseek/psql_auditor/commit/eb2ef6130ac17e3f2d7142095045c316ed9a6cbd)  
 Total tasks: **77**
 
 ## Status summary
@@ -12,44 +12,48 @@ Total tasks: **77**
 | Status | Count |
 | --- | ---: |
 | Complete `[x]` | **10 / 77 (13.0%)** |
-| Partially complete `[~]` | **5 / 77 (6.5%)** |
-| Open `[ ]` | **62 / 77 (80.5%)** |
+| Partially complete `[~]` | **6 / 77 (7.8%)** |
+| Open `[ ]` | **61 / 77 (79.2%)** |
 | Not fully complete | **67 / 77 (87.0%)** |
 
 Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `INPUT-001`, `INPUT-003`.
 
-Partially complete: `CORE-006`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
+Partially complete: `CORE-006`, `INPUT-002`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
+
+## Product architecture decision
+
+The target product is a governed AI auditor rather than a catalog of hardcoded
+platform branches. Administrators provide versioned inventory, credential
+references, human-readable Markdown frameworks, MCP servers, tools, and
+capability policies. The LLM uses those resources to plan discovery, collect and
+interpret evidence, select every applicable framework, and perform assessments.
+
+The control plane remains deterministic for input validation, credential
+protection, tool authorization, read-only enforcement, evidence persistence,
+provenance, version/hash pinning, stale-plan rejection, confirmation, and audit
+logging. Agent reasoning may be non-deterministic, but the accepted `AuditPlan`
+must be reproducible from a pinned inventory, framework catalog, tool catalog,
+policy snapshot, and evidence set.
 
 ## Latest verification
 
-PR #36 (inventory-driven audit + SSH/WinRM discovery) is merged. Independent
-review of the inventory-driven launch path accepted `INPUT-001` and
-`INPUT-003` at
-[`83434eb`](https://github.com/whatelseek/psql_auditor/commit/83434eb94643bfeb0df196b0f7f5b35b25415af8).
-`INPUT-005` remains `[~]`. `INPUT-002` remains `[ ]` (Markdown framework
-registry candidate on PR #37). Tool adapters `TOOL-001`…`TOOL-005` are open
-backlog items. Checklist acceptance statuses are not changed automatically by
-green CI.
+PR #36 was merged into `main` as commit
+[`7be1eae`](https://github.com/whatelseek/psql_auditor/commit/7be1eae717f002612efe5d434d517f5c47a219f1).
+PR #37 was merged as
+[`eb2ef61`](https://github.com/whatelseek/psql_auditor/commit/eb2ef6130ac17e3f2d7142095045c316ed9a6cbd).
+`INPUT-001` and `INPUT-003` remain independently accepted. The Markdown
+framework registry is accepted for POC, so `INPUT-002` is `[~]`; two production
+hardening findings remain in backlog. `INPUT-005` remains `[~]`. Registered tool
+adapters `TOOL-001`…`TOOL-005` remain open.
 
 | Check | Verified result |
 | --- | --- |
-| Format | Passed |
-| Lint | Passed |
+| Format / lint | Passed on PR #37 |
 | Type check | Passed, 89 files |
 | Unit tests | 460 passed |
 | Integration tests | 8 passed |
 | Full suite | 468 passed |
 | Defect map | `validate-defect-map: OK` (77/77) |
-| Prior clean CI (PR #36 merge base) | See Actions after PR #36 merge |
-| Prior clean CI (PR #35 review base) | [Run 30209929260](https://github.com/whatelseek/psql_auditor/actions/runs/30209929260), all jobs passed |
-
-### Closed findings carried from PR #35 (superseded by PR #36)
-
-- stale `AuditPlan` confirmation after inventory modification;
-- `CREDENTIALS.md` was detected but not loaded;
-- `audit start` created a request without starting execution;
-- API start called `asyncio.run()` inside an active event loop;
-- saved `AuditRequest` could be replayed after inventory modification.
 
 ## Quality assessment
 
@@ -70,25 +74,70 @@ green CI.
 - [x] `AUD-002` — Establish unified local and CI quality gates.
 - [x] `AUD-003` — Prepare shared deterministic test fixtures.
 
-Closure evidence:
+`AUD-001` is complete. Checklist v1.14 and the local defect map cover all 77
+IDs. `make validate-defect-map` must be rerun in repository CI after this update
+is committed.
 
-- defect-to-module map covers all 77 checklist IDs and is enforced in CI;
-- canonical local and CI targets include format, lint, typecheck, unit, integration and full-suite tests;
-- deterministic shared fixtures and fake LLM scenarios are reused across regression tests;
-- mandatory tests block unintended external HTTP/LLM access.
+`AUD-003` closure evidence:
+
+- shared module `tests/fixtures/canonical_audit.py` with
+  `build_canonical_scenario()` → immutable `CanonicalScenario`;
+- fixed UTC clock `FIXED_NOW = 2026-07-26T09:00:00Z` via `FixedClock`;
+- two clients, alpha with previous+current runs, beta with one run;
+- two frameworks each defining distinct `REQ-001`, two linux assets;
+- all seven result statuses plus observation/formula/history/exception cases;
+- deterministic fake LLM scenarios reused through `DeterministicFakeChatModel`;
+- validation in `tests/test_canonical_fixtures.py`; sample reuse in identity,
+  quality-gate LLM, and report-export tests.
+
+`AUD-002` closure evidence:
+
+- canonical targets: `format-check`, `lint`, `typecheck`, `test-unit`,
+  `test-integration`, `test`, and `check`;
+- CI invokes the same Make targets without `continue-on-error`;
+- `scripts/run_pytest_group.py` rejects zero-test discovery;
+- each PostgreSQL test creates, migrates, and drops an `aud002_<hex>` database;
+- `DeterministicFakeChatModel` is injected through a model factory;
+- external HTTP/LLM access is blocked in mandatory tests;
+- controlled red runs and the final green run are linked above.
 
 ### M1 — Identifiers and domain model
 
 - [x] `CORE-001` — Separate `client_id` from `audit_run_id`.
+
+`CORE-001` closure evidence:
+
+- `require_client_id` / `require_audit_run_id` reject empty and swapped ids;
+- `AuditRegistry.create_run` / `save_run` validate explicit `audit_run_id` via `require_audit_run_id`;
+- warehouse `start_session` / upsert paths require both identifiers;
+- `AuditRegistry.save_run` rejects client reassignment;
+- resume/bootstrap reject conflicting client ownership;
+- legacy API `run_id` means evidence folder, not `audit_run_id`;
+- tests reuse AUD-003 fixtures in `tests/test_client_audit_run_identity.py`.
+
 - [x] `CORE-002` — Separate `AuditRun` from `AuditJob`.
 - [x] `CORE-003` — Introduce canonical result identity.
 - [x] `CORE-004` — Introduce structured `AssessmentResult`.
 - [x] `CORE-005` — Isolate checkpoints and artifacts by audit run.
+
+`CORE-005` closure evidence (gap closure):
+
+- `acquire_run_checkpointer` binds compiled graph + checkpointer to
+  `client_id` + `audit_run_id` on `runtime._scoped_checkpoints`;
+- concurrent `arun_one` captures a local scoped graph; another run cannot
+  replace or close its checkpointer;
+- canonical Sqlite init failure raises `CheckpointInitError` (no MemorySaver);
+- `EvidenceStore.rebind_run_id` validates destination ownership before any
+  mkdir/copy/rename and leaves both dirs unchanged on reject;
+- regression tests in `tests/test_run_scope_isolation.py`.
+
 - [~] `CORE-006` — Remove hidden global mutable state.
 
-`CORE-006` remains partial. `ApplicationRuntime` ownership and multiple lifecycle
-race fixes are implemented, but complete removal of legacy process-wide mutable
-state still requires a dedicated independent acceptance review.
+`CORE-006` remains partially complete pending independent acceptance review.
+`ApplicationRuntime` ownership is implemented; lifecycle race fixes (lease-aware
+MCP pool, truthful task-registry timeouts, balanced checkpoint leases without
+force-close, failure-atomic scoped Sqlite init) are ready for acceptance.
+Do not mark complete based on class existence alone.
 
 ### M2 — Inputs and audit planning
 
@@ -96,90 +145,170 @@ state still requires a dedicated independent acceptance review.
 
 Acceptance evidence:
 
-- strict, typed and immutable versioned request model;
-- mandatory client, inventory, targets, framework versions, tool profile and run settings;
-- secret-shaped request fields are forbidden;
-- inventory reference pins normalized `version_id` and `content_hash`;
-- semantic validation reloads the current inventory through the loader/normalizer;
-- stale requests fail with `inventory_hash_mismatch` or `inventory_version_mismatch`;
-- the same execution-boundary validation applies to CLI, HTTP, direct
-  `AuditorGraph.arun_request()` and saved-request replay;
-- rejection occurs before jobs, sessions or external calls;
-- regression tests verify secret-safe errors and persisted request handling.
+- strict immutable versioned request model;
+- pinned normalized inventory `version_id` and `content_hash`;
+- stale requests fail closed at CLI, HTTP, direct execution, and replay boundaries;
+- secret-shaped fields are rejected and credentials are resolved at runtime;
+- independently accepted on the PR #35 review base carried into merged PR #36.
 
-- [ ] `INPUT-002` — Enforce strict framework validation.
-
-Partial evidence (acceptance still open):
-
-- Markdown `FrameworkRegistry` for `agents/*.md` with optional YAML frontmatter;
-- without frontmatter: id from filename, title from H1, deterministic
-  `src-<hash>` version;
-- multiline requirement sections and Markdown lists;
-- compact catalog + compact requirement index + full text for the current
-  requirement only;
-- invalid frameworks remain visible with errors but are not executable;
-- drop-in `.md` frameworks require no Python changes;
-- tests: `tests/test_framework_registry.py`, `tests/test_checklist.py`.
-
-- [ ] `AGENT-001` — Provide administrator-managed Markdown audit agents under `agents/`.
+- [~] `INPUT-002` — Enforce strict validation and registration of text-based frameworks.
 - [x] `INPUT-003` — Introduce a validated inventory model.
 
-Acceptance evidence:
+`INPUT-002` is accepted for POC. Implemented evidence:
 
-- canonical `ClientInventory`, `InventoryHost`, `InventoryService`,
-  `InventoryFact` and `CredentialReference` models;
-- Markdown, YAML and JSON loading with error/warning/information validation levels;
-- stable normalized inventory `version_id` and `content_hash`;
-- separate `CREDENTIALS.md` parsing, merge, duplicate handling and host mapping;
-- plaintext secrets are excluded from inventory, plan, request, API response and
-  persisted secret-free artifacts;
-- missing OS becomes `needs_discovery`, not a blocking validation error;
-- Testcompany fixtures cover five hosts, multiple formats, credentials and version changes.
+- administrator-managed `agents/*.md` registry with no Python change required;
+- optional YAML frontmatter; filename/H1/source-hash fallbacks;
+- multiline requirement sections and lists;
+- compact catalog, compact REQ index, and full body only for the current REQ;
+- invalid frameworks remain visible but are not executable;
+- prompt retrieval and checklist loading fail closed;
+- bundled frameworks remain compatible.
 
-The incomplete YAML/JSON execution path does not block `INPUT-003`; it belongs to
-execution integration rather than the validated inventory domain model.
+Production-hardening backlog before `[x]`:
 
-- [ ] `INPUT-004` — Introduce a tool registry and capability policy.
-- [ ] `TOOL-001` — SSH execution adapter.
-- [ ] `TOOL-002` — WinRM PowerShell adapter.
-- [ ] `TOOL-003` — HTTP/HTTPS request adapter.
-- [ ] `TOOL-004` — TCP connectivity adapter.
-- [ ] `TOOL-005` — SNMP adapter.
-- [~] `INPUT-005` — Implement deterministic preflight and `AuditPlan`.
+- a file beginning with `---` but missing a closing delimiter must produce
+  `invalid_frontmatter` and remain non-executable;
+- malformed requirement-like headings must produce
+  `malformed_requirement_heading` instead of being silently ignored.
 
-Partial evidence:
+The Markdown source remains authoritative.
 
-- typed `AuditPlan` with mandatory explicit confirmation;
-- deterministic technology detection and framework selection with select/reject reasons;
-- stale-plan rejection on confirm/start when inventory **or** discovery/effective
-  facts hashes diverge;
-- secret-safe `CREDENTIALS.md` / `credentials.md` / `connection.md` runtime
-  credential resolution (secrets never persisted in models, plans, API, logs, or
-  evidence);
-- production `SshDiscoveryCollector` / `WinrmDiscoveryCollector` /
-  `CompositeDiscoveryCollector` on the default analyze path
-  (`--no-discovery` / `{ "discovery": false }` keep the no-op path);
-- read-only SSH/WinRM command sets; PostgreSQL confirmed only with strong
-  evidence (port 5432 alone does not select `postgres_cis`);
+`INPUT-003` acceptance evidence:
+
+- canonical `ClientInventory`, host, service, fact, and credential-reference models;
+- Markdown, YAML, and JSON loaders with typed validation issues;
+- stable normalized inventory identity and secret-free persisted payloads;
+- independently accepted on the PR #35 review base carried into merged PR #36.
+
+- [ ] `INPUT-004` — Introduce an administrator-managed MCP/tool registry and capability policy.
+
+Current temporary extension paths:
+
+- MCP tool: add `mcps/registry.json` entry, resolve credentials from inventory,
+  implement or select curated read-only wrappers, bind them in runtime, and add
+  policy/evidence tests;
+- built-in tool: add a Python `@tool` adapter under `src/auditor/tools/`, expose
+  it through `get_*_tools()`, bind it into audit/discovery runtime, and add tests;
+- SSH and WinRM still also exist as hardcoded discovery collectors, so a protocol
+  currently has to be integrated in more than one place.
+
+Target extension model after `INPUT-004`:
+
+- known MCP server → registry entry plus capability policy;
+- known adapter → versioned manifest under a tool catalog, without graph edits;
+- new protocol → one Python adapter plus manifest;
+- the manifest declares tool id/version, adapter entrypoint, capabilities, risk,
+  input/output schemas, inventory access types, credential source, blocked
+  operations, timeout/retry, and output limits;
+- registry validation is fail-closed: invalid tools are visible to administrators
+  but are not bound to the model;
+- each `AuditRun` pins an immutable tool-catalog and capability-policy snapshot;
+- the LLM receives only tools authorized for the confirmed target and scope.
+
+### Registered transport and protocol tools
+
+The following tasks implement transport/execution boundaries. They must not
+contain technology detection, framework selection, or audit conclusions. The
+agent chooses among these tools through `INPUT-004`; deterministic code enforces
+scope, authorization, read-only policy, timeouts, credential handling,
+sanitation, and provenance.
+
+- [ ] `TOOL-001` — Implement a registered SSH execution adapter.
+- [ ] `TOOL-002` — Implement a registered WinRM PowerShell adapter.
+- [ ] `TOOL-003` — Implement a registered HTTP/HTTPS request adapter.
+- [ ] `TOOL-004` — Implement a registered TCP connectivity adapter.
+- [ ] `TOOL-005` — Implement a registered SNMP GET/WALK adapter.
+
+Common acceptance criteria:
+
+- versioned tool id, input schema, output schema, and capability declaration;
+- target authorization and credential references resolved only at runtime;
+- normalized `ToolResult` compatible with `EVID-001` and `EVID-003`;
+- safe defaults, bounded output, timeout/retry policy, and secret redaction;
+- agent-callable only through the registry and active capability-policy snapshot;
+- protocol-specific integration tests and failure taxonomy.
+
+Additional `TOOL-002` acceptance criteria:
+
+- structured PowerShell output, preferably `ConvertTo-Json`;
+- no `Win32_Product` inventory query;
+- TLS certificate validation enabled by default with explicit insecure override;
+- correct `LocalPort` parsing without PID contamination;
+- real Windows Server/WinRM integration coverage;
+- Windows Server and Windows-hosted PostgreSQL E2E framework selection.
+
+- [~] `INPUT-005` — Implement reproducible agentic preflight and `AuditPlan`.
+
+`INPUT-004` acceptance must cover administrator-supplied MCP servers and tools,
+versioned schemas/capabilities, read-only and destructive-action policies,
+secret-safe invocation, per-run catalog snapshots, and fail-closed authorization.
+The LLM may choose among registered capabilities but may not instantiate an
+unregistered transport, bypass policy, or execute hidden arbitrary code.
+
+`INPUT-005` partial evidence:
+
+- typed `AuditPlan` with confirmation gate (`src/auditor/domain/audit_plan.py`);
+- technology detection + framework selection decisions with reject reasons;
+- stale-plan rejection (`plan_stale`) on confirm/start when inventory **or**
+  discovery/effective-facts hashes diverge;
+- `CREDENTIALS.md` / `credentials.md` / `connection.md` runtime credential
+  resolution + secret redaction; `needs_discovery` for IP/port-only hosts;
+- transitional `SshDiscoveryCollector` / `WinrmDiscoveryCollector` /
+  `CompositeDiscoveryCollector` implementation landed in PR #36; these collectors
+  are not the target extensibility boundary and must be migrated to registered
+  `TOOL-001` / `TOOL-002` adapters plus a generic discovery workflow;
+- current SSH/WinRM discovery commands are read-oriented and PostgreSQL is
+  confirmed only with strong evidence, but final invocation policy belongs to
+  `INPUT-004`, `EVID-002`, and the protocol tool tasks;
 - typed discovery errors, per-host timeout/retry, one-host failure isolation;
 - sanitized discovery evidence under `artifacts/<slug>/preflight/…` with
-  deterministic preflight revisions;
-- CLI sync `start_confirmed_audit` / API `await astart_confirmed_audit` create a
-  validated `AuditRequest`, invoke `arun_request` and return `audit_run_id`
-  (confirmed start does not silently re-run discovery; `--refresh-discovery`
-  optional);
-- docs: `docs/inventory-driven-audit.md`; tests:
+  secret scanning; deterministic preflight revisions;
+- CLI sync `start_confirmed_audit` / API `await astart_confirmed_audit` →
+  `AuditRequest` → `arun_request` (confirmed start does not silently re-run
+  discovery; `--refresh-discovery` optional);
+- docs: `docs/inventory-driven-audit.md` (+ RU manual); tests:
   `tests/test_input005_discovery.py`,
   `tests/integration/test_ssh_discovery_container.py`.
+  Independent acceptance still required — do not mark `[x]` automatically.
 
-Remaining work:
+Additional `INPUT-005` acceptance criteria:
 
-- YAML/JSON inventory execution integration beyond the validated domain model;
-- independent acceptance review for production discovery (do not mark `[x]`
-  automatically);
-- dedicated tool adapters tracked under `TOOL-001`…`TOOL-005`.
+- preflight gives the governed LLM the normalized inventory, valid Markdown
+  frameworks, registered MCP/tools, and the active capability-policy snapshot;
+- the LLM may create and iterate a discovery plan, collect additional evidence,
+  identify software/roles/services, and select multiple applicable frameworks;
+- framework selection is not limited to hardcoded platform-to-framework maps;
+- every selected framework has evidence-backed applicability reasons;
+- the final plan pins inventory, framework, tool, policy, and evidence identities;
+- the same pinned inputs and accepted evidence produce a stable plan payload;
+- uncertain or conflicting conclusions become questions/limitations rather than
+  silently invented facts;
+- discovery is tool-driven and extensible: adding HTTP, TCP, SNMP, or another
+  registered capability does not require a new hardcoded platform collector;
+- complete YAML/JSON inventory execution integration and independent acceptance.
 
-### M3 — LangGraph orchestration and evidence collection
+### M3 — Governed agent runtime, LangGraph orchestration, and evidence collection
+
+- [ ] `AGENT-001` — Implement the governed LLM agent runtime.
+
+`AGENT-001` acceptance criteria:
+
+- the LLM receives normalized inventory and credential references, never raw
+  persisted credentials;
+- the LLM receives all valid text frameworks plus registered MCP/tool schemas;
+- the LLM can plan discovery, choose authorized tools, interpret outputs, request
+  more evidence, identify technologies, and select multiple frameworks;
+- every material fact and framework decision references evidence, tool identity,
+  collection time, provenance, and confidence;
+- deterministic code authorizes calls, enforces read-only policy, sanitizes and
+  stores evidence, pins versions/hashes, rejects stale plans, and records an
+  audit trail;
+- the LLM cannot bypass capability policy, mutate the target, silently expand
+  confirmed scope, or execute unregistered code;
+- a pinned evidence/catalog snapshot yields a stable final `AuditPlan`, even when
+  the internal reasoning trace differs;
+- end-to-end tests cover Windows + AD DS, Linux + PostgreSQL, unsupported assets,
+  insufficient evidence, MCP/tool failure, and administrator-added frameworks.
 
 - [ ] `FLOW-001` — Make graph state typed and minimal.
 - [ ] `FLOW-002` — Replace internal `asyncio.gather` with LangGraph `Send`.
@@ -256,20 +385,24 @@ Remaining work:
 
 ## Current blockers
 
-- `INPUT-005`: complete YAML/JSON execution integration and independent
-  acceptance of production discovery.
-- `TOOL-001`…`TOOL-005`: dedicated SSH / WinRM / HTTP / TCP / SNMP adapters.
-- `AGENT-001` / `INPUT-002`: administrator-managed agent authoring with strict
-  framework validation.
+- `INPUT-002`: complete the two deferred production-hardening parser findings; `AGENT-001`: finish governed runtime integration.
+- `INPUT-004`: implement the unified tool registry, capability policy, and immutable per-run catalog snapshot.
+- `TOOL-001`…`TOOL-005`: extract protocol adapters from hardcoded discovery and add SSH, WinRM, HTTP, TCP, and SNMP tools.
+- `INPUT-005`: migrate to generic tool-driven discovery, complete YAML/JSON execution integration, and pass independent acceptance.
 - `FLOW-007`: remove deprecated process-wide graph getters after independent review.
-- `DOC-001`: synchronize baseline and evidence-layout documentation.
+- `DOC-001`: synchronize architecture, tool, and evidence-layout documentation.
 - `CI-001`: complete workflow/report/review E2E and migration coverage.
 
 ## Status rules
 
 - `[ ]` Open: no acceptance review has confirmed the task.
-- `[~]` Partial: meaningful implementation exists, but at least one acceptance criterion or proof is missing.
-- `[x]` Complete: every acceptance criterion has code/test evidence and required verification has passed.
+- `[~]` Partial: meaningful implementation exists, but at least one acceptance
+  criterion or proof is missing.
+- `[x]` Complete: every acceptance criterion has code/test evidence and the
+  required verification has passed.
 
-The Russian checklist is the synchronized translated status register. Both files
-must be updated together.
+The Russian checklist
+([`psql_auditor_master_refactoring_checklist_ru.md`](psql_auditor_master_refactoring_checklist_ru.md))
+is the synchronized detailed status register. This English version remains the
+task register for implementation planning and handoff. Both must be updated
+together; open items must not be marked accepted without independent review.
