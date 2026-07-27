@@ -187,7 +187,7 @@ def _normalize(step: DiscoveryStep, result: ToolResult) -> list[NormalizedFact]:
             NormalizedFact(
                 fact=str(item["fact"]),
                 value=item["value"],
-                confidence=float(item.get("confidence") or 0.5),
+                confidence=float(item.get("confidence") or 0.5),  # type: ignore[arg-type]
                 source=str(item.get("source") or step.tool_id or step.capability),
                 evidence_ref=str(item.get("evidence_ref") or ref),
             )

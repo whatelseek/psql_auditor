@@ -14,7 +14,7 @@ from auditor.domain.applicability import (
     FrameworkApplicabilityMeta,
     parse_applicability_meta,
 )
-from auditor.frameworks import Framework, FrameworkDetect, _FRONTMATTER, list_frameworks
+from auditor.frameworks import _FRONTMATTER, Framework, FrameworkDetect, list_frameworks
 
 
 def load_framework_front_matter(path: Path) -> dict[str, Any]:

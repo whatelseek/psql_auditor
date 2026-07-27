@@ -17,20 +17,19 @@ from auditor.domain.applicability import (
 from auditor.domain.normalized_facts import (
     HostFactSet,
     NormalizedFact,
-    build_host_fact_set,
 )
+from auditor.frameworks import get_framework
+from auditor.inventory.detect import detect_technologies
 from auditor.inventory.discovery_plan import build_discovery_plan, select_tool_for_capability
 from auditor.inventory.dynamic_select import select_frameworks_dynamic
 from auditor.inventory.framework_candidates import evaluate_framework_candidates
 from auditor.inventory.framework_meta import applicability_meta_for_framework
-from auditor.frameworks import get_framework, list_frameworks
-from auditor.inventory.detect import detect_technologies
 from auditor.inventory.service import analyze_client_inventory, confirm_audit_plan
-from auditor.tool_registry import get_tool_registry, load_tool_registry, reset_tool_registry_cache
-from auditor.tools.snmp import set_snmp_transport_factory
-from auditor.tools import tcp_connect as tcp_mod
+from auditor.tool_registry import load_tool_registry, reset_tool_registry_cache
 from auditor.tools import http_get as http_mod
 from auditor.tools import snmp as snmp_mod
+from auditor.tools import tcp_connect as tcp_mod
+from auditor.tools.snmp import set_snmp_transport_factory
 
 AGENTS = Path("agents")
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "inventory"
@@ -269,6 +268,7 @@ def test_capability_tool_selection_and_policy_denial(tmp_path: Path):
 
 def test_tcp_http_snmp_argument_validation_and_normalization():
     import asyncio
+
     from auditor.config import Settings
     from auditor.secrets_file import InventorySshTarget, bind_ssh_target
 
@@ -379,7 +379,6 @@ discovery_hints:
     cands = evaluate_framework_candidates(host_facts=facts, agents_dir=agents, registry=reg)
     plan = build_discovery_plan(cands, facts, agents_dir=agents, registry=reg)
     assert any(s.status == "blocked" and s.missing_capability == "snmp.get" for s in plan.steps)
-    decisions = select_frameworks_dynamic.__wrapped__ if False else None
     from auditor.inventory.dynamic_select import candidates_to_decisions
 
     dec = candidates_to_decisions(cands, facts)
@@ -400,15 +399,12 @@ def test_deterministic_plan_revision_with_dynamic_selection():
 
 def test_cisco_framework_blocked_without_snmp_in_decision_summary():
     """Scenario D: missing snmp.get → blocked, still visible."""
-    from auditor.inventory.service import load_client_inventory
-    from auditor.domain.inventory import InventoryHost, InventoryVersion
-    from auditor.domain.inventory import ClientInventory
 
     # Use shipped cisco_device against default registry (snmp present → selected).
     # Simulate missing capability by evaluating with empty available caps path via
     # candidates_to_decisions after stripping caps.
-    from auditor.inventory.framework_candidates import FrameworkCandidate
     from auditor.inventory.dynamic_select import candidates_to_decisions
+    from auditor.inventory.framework_candidates import FrameworkCandidate
 
     cand = FrameworkCandidate(
         host_id="core-sw-01",
@@ -437,9 +433,9 @@ def test_cisco_framework_blocked_without_snmp_in_decision_summary():
 
 @pytest.mark.asyncio
 async def test_registry_tcp_http_snmp_fake_adapters():
-    from auditor.config import Settings
+    from unittest.mock import patch
+
     from auditor.secrets_file import InventorySshTarget, bind_ssh_target
-    from unittest.mock import AsyncMock, patch
 
     with bind_ssh_target(InventorySshTarget(host="127.0.0.1", port="22", user="u", password="")):
         with patch.object(tcp_mod, "_probe", return_value="open"):

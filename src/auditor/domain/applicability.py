@@ -157,10 +157,14 @@ def evaluate_predicate(
         if op == "not_equals":
             return "matched" if _norm(raw) != _norm(expected) else "not_matched"
         if op == "in":
-            options = {_norm(v) for v in (expected or [])}  # type: ignore[union-attr]
+            if not isinstance(expected, (list, tuple, set)):
+                return "invalid"
+            options = {_norm(v) for v in expected}
             return "matched" if _norm(raw) in options else "not_matched"
         if op == "not_in":
-            options = {_norm(v) for v in (expected or [])}  # type: ignore[union-attr]
+            if not isinstance(expected, (list, tuple, set)):
+                return "invalid"
+            options = {_norm(v) for v in expected}
             return "matched" if _norm(raw) not in options else "not_matched"
         if op == "contains":
             return "matched" if str(expected) in str(raw) else "not_matched"

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from auditor.domain.inventory import (
     ClientInventory,
+    FrameworkDecisionStatus,
     FrameworkSelectionDecision,
     TechnologyDetection,
 )
@@ -96,7 +97,7 @@ def candidates_to_decisions(
 def _decision_for_candidate(
     cand: FrameworkCandidate,
     fact_set: HostFactSet | None,
-) -> tuple[str | None, str]:
+) -> tuple[FrameworkDecisionStatus | None, str]:
     if cand.predicate_result == "invalid":
         return (
             "blocked",

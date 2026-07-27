@@ -9,11 +9,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
-from auditor.domain.applicability import DiscoveryHint, FrameworkApplicabilityMeta
+from auditor.domain.applicability import DiscoveryHint
 from auditor.domain.normalized_facts import HostFactSet
 from auditor.inventory.framework_candidates import FrameworkCandidate
 from auditor.inventory.framework_meta import (
-    applicability_meta_for_framework,
     list_frameworks_with_meta,
 )
 from auditor.tool_registry import ToolManifest, ToolRegistry, get_tool_registry
