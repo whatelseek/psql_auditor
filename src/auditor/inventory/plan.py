@@ -128,23 +128,23 @@ def generate_audit_plan(
             continue
 
         host_id = decision.target_id.split("/", 1)[0]
-        host = host_by_id.get(host_id)
-        if host is None:
+        matched = host_by_id.get(host_id)
+        if matched is None:
             continue
         service = ""
         if "/" in decision.target_id:
             service = decision.target_id.split("/", 1)[1]
         limitations: list[str] = []
-        if not host.address:
+        if not matched.address:
             limitations.append("missing host address")
-        if not host.connection_types:
+        if not matched.connection_types:
             limitations.append("no connection method declared")
         evidence_sources: list[str] = ["inventory"]
-        if "ssh" in host.connection_types:
+        if "ssh" in matched.connection_types:
             evidence_sources.insert(0, "ssh")
-        if "winrm" in host.connection_types:
+        if "winrm" in matched.connection_types:
             evidence_sources.insert(0, "winrm")
-        if service == "postgresql" or "postgresql" in host.connection_types:
+        if service == "postgresql" or "postgresql" in matched.connection_types:
             evidence_sources.append("postgresql")
         targets.append(
             AuditPlanTarget(
@@ -153,7 +153,7 @@ def generate_audit_plan(
                 service=service,
                 framework_id=decision.framework_id,
                 framework_version=decision.framework_version,
-                connection_methods=tuple(host.connection_types),
+                connection_methods=tuple(matched.connection_types),
                 expected_evidence_sources=tuple(dict.fromkeys(evidence_sources)),
                 limitations=tuple(limitations),
             )
