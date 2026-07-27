@@ -107,6 +107,17 @@ psql-auditor audit start <Client> --confirm --refresh-discovery
 
 If effective discovery facts changed, the plan is rejected as `plan_stale`.
 
+Analyze persists the reconciled **effective inventory** under
+`.audit_plans/effective.inventory.json`. Confirm/start validate the plan
+against that effective inventory (and still reject when the source inventory
+version/hash diverged). Each plan carries an immutable `plan_revision_id`
+derived from inventory identity, preflight revision, discovery/effective
+facts hashes, framework hash, tool catalog hash, and capability policy hash.
+SSH discovery does not use a direct TCP reachability probe — connection
+failures are classified by the registered SSH adapter. Client-level
+frameworks are expanded into explicit per-host plan targets before
+confirmation so plan identity matches AuditJob fan-out.
+
 ### SSH read-only commands (Linux/Unix)
 
 Allow-listed atomic probes (no shell composition). Executed only through the
