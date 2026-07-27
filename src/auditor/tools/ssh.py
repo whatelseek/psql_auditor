@@ -7,8 +7,9 @@ from the active inventory/run context via
 as arguments.
 
 Invocations produce a normalized :class:`~auditor.domain.tool_result.ToolResult`
-(EVID-001/003) and enforce read-only policy, timeouts, and output limits
-(EVID-002). LangChain wrappers remain string-compatible for existing audits.
+(EVID-001/003) and enforce allow-list policy, path restrictions, timeouts,
+output limits, and secret redaction (EVID-002). LangChain wrappers remain
+string-compatible for existing audits.
 """
 
 from __future__ import annotations
@@ -25,8 +26,13 @@ from langchain_core.tools import tool
 from auditor.config import Settings
 from auditor.domain.tool_result import ToolProvenance, ToolResult, ToolTargetRef
 from auditor.runtime_target import effective_settings
-from auditor.tools.secrets import redact_secrets
-from auditor.tools.ssh_policy import is_readonly_ssh_command, readonly_ssh_denial_reason
+from auditor.tools.secrets import redact_secret_text, redact_secrets
+from auditor.tools.ssh_policy import (
+    is_approved_ssh_command,
+    is_approved_ssh_read_path,
+    ssh_command_denial_reason,
+    ssh_read_path_denial_reason,
+)
 
 _SSH_RUN_VERSION = "1.0.0"
 _SSH_READ_VERSION = "1.0.0"
@@ -54,23 +60,7 @@ def _command_hash(command: str) -> str:
 
 
 def _ssh_kwargs(settings: Settings) -> dict[str, Any]:
-    """Build keyword arguments for ``asyncssh.connect``.
-
-    Prefers private-key auth when ``ssh_private_key_path`` is set; otherwise
-    falls back to password auth. Host keys are verified by default
-    (``SSH_STRICT_HOST_KEY=true``); set ``SSH_STRICT_HOST_KEY=false`` for
-    lab targets without a known_hosts entry.
-
-    Args:
-        settings: Application settings containing SSH target credentials.
-
-    Returns:
-        Dict suitable for ``asyncssh.connect(**kwargs)``.
-
-    Raises:
-        ValueError: If ``SSH_HOST`` is not configured.
-        FileNotFoundError: If a configured private key path does not exist.
-    """
+    """Build keyword arguments for ``asyncssh.connect``."""
     if not settings.ssh_host:
         raise ValueError(
             "SSH_HOST is not configured. Set SSH_HOST (and credentials) in the environment."
@@ -106,6 +96,15 @@ def resolve_ssh_target(settings: Settings | None = None) -> ToolTargetRef:
     )
 
 
+def _known_secrets(settings: Settings) -> tuple[str, ...]:
+    secrets: list[str] = []
+    if settings.ssh_password:
+        secrets.append(str(settings.ssh_password))
+    if settings.pg_password:
+        secrets.append(str(settings.pg_password))
+    return tuple(s for s in secrets if s)
+
+
 def _limit_output(text: str, max_bytes: int) -> str:
     raw = text.encode("utf-8")
     if len(raw) <= max_bytes:
@@ -122,6 +121,19 @@ def _format_remote_result(exit_status: int | None, stdout: str, stderr: str) -> 
     if stderr.strip():
         parts.append(f"stderr:\n{stderr.strip()}")
     return "\n".join(parts)
+
+
+def _sanitize_streams(
+    stdout: str,
+    stderr: str,
+    *,
+    settings: Settings,
+) -> tuple[str, str]:
+    known = _known_secrets(settings)
+    return (
+        redact_secret_text(stdout, known_secrets=known),
+        redact_secret_text(stderr, known_secrets=known),
+    )
 
 
 async def _run_remote_raw(
@@ -150,35 +162,24 @@ async def _run_remote_raw(
                 if isinstance(stderr_raw, bytes)
                 else stderr_raw
             )
-            return (
-                _format_remote_result(result.exit_status, stdout, stderr),
-                int(result.exit_status) if result.exit_status is not None else None,
-                None,
-                "ok",
-            )
+            stdout, stderr = _sanitize_streams(stdout, stderr, settings=settings)
+            exit_code = int(result.exit_status) if result.exit_status is not None else None
+            formatted = _format_remote_result(exit_code, stdout, stderr)
+            if exit_code not in (None, 0):
+                err = f"SSH command exited with non-zero status {exit_code}"
+                return formatted, exit_code, err, "error"
+            return formatted, exit_code, None, "ok"
     except TimeoutError as exc:
         msg = f"SSH error: TimeoutError: command exceeded {timeout_seconds}s ({exc})"
-        return msg, None, msg, "timeout"
+        return redact_secret_text(msg, known_secrets=_known_secrets(settings)), None, msg, "timeout"
     except Exception as exc:  # noqa: BLE001 — surface to agent as evidence
         msg = f"SSH error: {type(exc).__name__}: {exc}"
-        return msg, None, msg, "error"
+        safe = redact_secret_text(msg, known_secrets=_known_secrets(settings))
+        return safe, None, safe, "error"
 
 
 async def _run_remote(command: str, settings: Settings | None = None) -> str:
-    """Execute a shell command on the SSH target and format the result.
-
-    Always captures stdout/stderr and exit code (``check=False``) so non-zero
-    exits still return useful evidence to the model.
-
-    Args:
-        command: Remote shell command string.
-        settings: Optional settings override; defaults to
-            :func:`~auditor.runtime_target.effective_settings`.
-
-    Returns:
-        Multi-line string with ``exit_code``, ``stdout``, and optional
-        ``stderr``, or an ``SSH error: …`` line on connection failure.
-    """
+    """Execute an approved shell command on the SSH target and format the result."""
     settings = settings or effective_settings()
     timeout = float(settings.ssh_command_timeout or 30)
     output, _exit, _err, _status = await _run_remote_raw(command, settings, timeout_seconds=timeout)
@@ -186,20 +187,8 @@ async def _run_remote(command: str, settings: Settings | None = None) -> str:
 
 
 async def _read_remote_file(path: str, settings: Settings | None = None) -> str:
-    """Read a remote file via SSH, truncated to 200 KiB.
-
-    Uses ``head -c`` through the shell so permission errors appear clearly in
-    stderr. Single quotes in ``path`` are escaped for POSIX shells.
-
-    Args:
-        path: Absolute (preferred) or relative path on the remote host.
-        settings: Optional settings override.
-
-    Returns:
-        Same format as ``_run_remote`` (exit code + stdout/stderr).
-    """
+    """Read an approved remote file via SSH, truncated to 200 KiB."""
     settings = settings or effective_settings()
-    # Escape single quotes for safe inclusion in a single-quoted shell string.
     escaped = path.replace("'", "'\"'\"'")
     return await _run_remote(f"head -c 200000 -- '{escaped}'", settings=settings)
 
@@ -226,6 +215,26 @@ def _base_provenance(
     )
 
 
+def _pinned_hash_mismatch(provenance: ToolProvenance | None) -> str | None:
+    """Return an error when provenance pins diverge from the live registry."""
+    if provenance is None:
+        return None
+    pinned_catalog = (provenance.tool_catalog_hash or "").strip()
+    pinned_policy = (provenance.capability_policy_hash or "").strip()
+    if not pinned_catalog and not pinned_policy:
+        return None
+    try:
+        from auditor.tool_registry import assert_tool_snapshot_current
+
+        assert_tool_snapshot_current(
+            tool_catalog_hash=pinned_catalog,
+            capability_policy_hash=pinned_policy,
+        )
+    except Exception as exc:  # noqa: BLE001 — map to deny message
+        return str(exc)
+    return None
+
+
 async def invoke_ssh_run(
     command: str,
     *,
@@ -235,11 +244,33 @@ async def invoke_ssh_run(
     provenance: ToolProvenance | None = None,
     enforce_readonly: bool = True,
 ) -> ToolResult:
-    """Registered SSH adapter: run a command and return a normalized ToolResult."""
+    """Registered SSH adapter: run an allow-listed command; return ToolResult."""
     started = _utc_now_iso()
     settings = settings or effective_settings()
     target = resolve_ssh_target(settings)
     args = redact_secrets({"command": command})
+
+    mismatch = _pinned_hash_mismatch(provenance)
+    if mismatch:
+        finished = _utc_now_iso()
+        return _remember_tool_result(
+            ToolResult(
+                status="unauthorized",
+                output="",
+                error=mismatch,
+                tool_id="ssh_run",
+                tool_version=_SSH_RUN_VERSION,
+                target=target,
+                started_at=started,
+                finished_at=finished,
+                provenance=_base_provenance(
+                    command=command or "",
+                    policy_decision="deny_stale_tool_snapshot",
+                    provenance=provenance,
+                ),
+                arguments=args,
+            )
+        )
 
     if not (settings.ssh_host or "").strip():
         finished = _utc_now_iso()
@@ -263,10 +294,10 @@ async def invoke_ssh_run(
             )
         )
 
-    if enforce_readonly and not is_readonly_ssh_command(command):
+    if enforce_readonly and not is_approved_ssh_command(command):
         finished = _utc_now_iso()
-        reason = readonly_ssh_denial_reason(command) or "not read-only"
-        err = f"SSH command denied by read-only policy: {reason}"
+        reason = ssh_command_denial_reason(command) or "not on allow-list"
+        err = f"SSH command denied by allow-list policy: {reason}"
         return _remember_tool_result(
             ToolResult(
                 status="denied",
@@ -279,7 +310,7 @@ async def invoke_ssh_run(
                 finished_at=finished,
                 provenance=_base_provenance(
                     command=command,
-                    policy_decision="deny_readonly",
+                    policy_decision="deny_allowlist",
                     provenance=provenance,
                 ),
                 arguments=args,
@@ -306,7 +337,7 @@ async def invoke_ssh_run(
             finished_at=finished,
             provenance=_base_provenance(
                 command=command,
-                policy_decision="allow",
+                policy_decision="allow" if status == "ok" else f"result_{status}",
                 provenance=provenance,
             ),
             exit_code=exit_code,
@@ -324,31 +355,105 @@ async def invoke_ssh_read_file(
     provenance: ToolProvenance | None = None,
     enforce_readonly: bool = True,
 ) -> ToolResult:
-    """Registered SSH adapter: read a remote file via bounded ``head -c``."""
+    """Registered SSH adapter: read an approved remote file via bounded ``head -c``."""
+    started = _utc_now_iso()
+    settings = settings or effective_settings()
+    target = resolve_ssh_target(settings)
+    args = redact_secrets({"path": path})
+
+    mismatch = _pinned_hash_mismatch(provenance)
+    if mismatch:
+        finished = _utc_now_iso()
+        return _remember_tool_result(
+            ToolResult(
+                status="unauthorized",
+                output="",
+                error=mismatch,
+                tool_id="ssh_read_file",
+                tool_version=_SSH_READ_VERSION,
+                target=target,
+                started_at=started,
+                finished_at=finished,
+                provenance=_base_provenance(
+                    command=path or "",
+                    policy_decision="deny_stale_tool_snapshot",
+                    provenance=provenance,
+                ),
+                arguments=args,
+            )
+        )
+
+    if not (settings.ssh_host or "").strip():
+        finished = _utc_now_iso()
+        err = "SSH target not resolved from inventory/run context (SSH_HOST empty)"
+        return _remember_tool_result(
+            ToolResult(
+                status="unauthorized",
+                output="",
+                error=err,
+                tool_id="ssh_read_file",
+                tool_version=_SSH_READ_VERSION,
+                target=target,
+                started_at=started,
+                finished_at=finished,
+                provenance=_base_provenance(
+                    command=path or "",
+                    policy_decision="deny_missing_target",
+                    provenance=provenance,
+                ),
+                arguments=args,
+            )
+        )
+
+    if enforce_readonly and not is_approved_ssh_read_path(path):
+        finished = _utc_now_iso()
+        reason = ssh_read_path_denial_reason(path) or "path not approved"
+        err = f"SSH read denied by path allow-list: {reason}"
+        return _remember_tool_result(
+            ToolResult(
+                status="denied",
+                output="",
+                error=err,
+                tool_id="ssh_read_file",
+                tool_version=_SSH_READ_VERSION,
+                target=target,
+                started_at=started,
+                finished_at=finished,
+                provenance=_base_provenance(
+                    command=path or "",
+                    policy_decision="deny_path_allowlist",
+                    provenance=provenance,
+                ),
+                arguments=args,
+            )
+        )
+
     escaped = (path or "").replace("'", "'\"'\"'")
     command = f"head -c {int(max_output_bytes)} -- '{escaped}'"
-    # File reads are inherently read-oriented; still run through ssh_run policy.
-    result = await invoke_ssh_run(
-        command,
-        settings=settings,
-        timeout_seconds=timeout_seconds,
-        max_output_bytes=max_output_bytes,
-        provenance=provenance,
-        enforce_readonly=enforce_readonly,
+    timeout = float(
+        timeout_seconds if timeout_seconds is not None else (settings.ssh_command_timeout or 30)
     )
-    args = redact_secrets({"path": path})
+    output, exit_code, error, status = await _run_remote_raw(
+        command, settings, timeout_seconds=timeout
+    )
+    output = _limit_output(output, max_output_bytes)
+    finished = _utc_now_iso()
     return _remember_tool_result(
         ToolResult(
-            status=result.status,
-            output=result.output,
-            error=result.error,
+            status=status,  # type: ignore[arg-type]
+            output=output,
+            error=error,
             tool_id="ssh_read_file",
             tool_version=_SSH_READ_VERSION,
-            target=result.target,
-            started_at=result.started_at,
-            finished_at=result.finished_at,
-            provenance=result.provenance,
-            exit_code=result.exit_code,
+            target=target,
+            started_at=started,
+            finished_at=finished,
+            provenance=_base_provenance(
+                command=command,
+                policy_decision="allow" if status == "ok" else f"result_{status}",
+                provenance=provenance,
+            ),
+            exit_code=exit_code,
             arguments=args,
         )
     )
@@ -356,13 +461,12 @@ async def invoke_ssh_read_file(
 
 @tool
 async def ssh_run(command: str) -> str:
-    """Run a shell command on the PostgreSQL host over SSH.
+    """Run an approved read-only shell command on the PostgreSQL host over SSH.
 
-    Use for inspecting packages, listening ports, file permissions, and config paths.
-    Examples: `ss -lntp | grep 5432`, `ls -ld /var/lib/postgresql`, `psql --version`.
+    Examples: `ss -lntp`, `ls -ld /var/lib/postgresql`, `psql --version`.
 
     Args:
-        command: Shell command to execute on the remote host.
+        command: Allow-listed shell command to execute on the remote host.
 
     Returns:
         Formatted command output (exit code, stdout, stderr) or an error string.
@@ -373,12 +477,12 @@ async def ssh_run(command: str) -> str:
 
 @tool
 async def ssh_read_file(path: str) -> str:
-    """Read a file on the PostgreSQL host over SSH (truncated for large files).
+    """Read an approved file on the PostgreSQL host over SSH (truncated).
 
-    Use for postgresql.conf, pg_hba.conf, pg_ident.conf, and similar.
+    Use for postgresql.conf, pg_hba.conf, pg_ident.conf under standard paths.
 
     Args:
-        path: Remote filesystem path to read.
+        path: Absolute remote filesystem path on the allow-list.
 
     Returns:
         File contents (truncated) wrapped in the SSH result format, or an error.
@@ -388,13 +492,9 @@ async def ssh_read_file(path: str) -> str:
 
 
 def get_ssh_tools() -> list:
-    """Return LangChain tools for SSH host inspection.
+    """Return LangChain tools for SSH host inspection (tests / transitional).
 
-    Prefer :meth:`auditor.tool_registry.ToolRegistry.bindable_langchain_tools`
-    for policy-aware binding. This helper remains for compatibility and tests.
-
-    Returns:
-        A list containing ``ssh_run`` and ``ssh_read_file``, suitable for
-        binding into the evidence-gathering chat model via ``bind_tools``.
+    Production binding must go through
+    :meth:`auditor.tool_registry.ToolRegistry.bindable_langchain_tools`.
     """
     return [ssh_run, ssh_read_file]

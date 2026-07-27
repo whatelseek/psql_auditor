@@ -345,6 +345,19 @@ def assert_plan_matches_preflight(
             )
 
 
+def assert_plan_matches_tool_registry(plan: AuditPlan) -> None:
+    """Reject confirm/start when tool catalog or capability policy hashes diverged."""
+    from auditor.tool_registry import ToolSnapshotStale, assert_tool_snapshot_current
+
+    try:
+        assert_tool_snapshot_current(
+            tool_catalog_hash=plan.tool_catalog_hash,
+            capability_policy_hash=plan.capability_policy_hash,
+        )
+    except ToolSnapshotStale as exc:
+        raise PlanConfirmationRejected(str(exc), code=exc.code) from exc
+
+
 def plan_confirmation_prompt(plan: AuditPlan) -> str:
     """Render the operator confirmation question for the plan."""
     s = plan.summary

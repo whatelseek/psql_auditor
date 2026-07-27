@@ -64,7 +64,6 @@ from auditor.memory.playbook_store import PlaybookMemory
 from auditor.task_registry import TaskRegistry
 from auditor.tool_registry import get_tool_registry
 from auditor.tools.mcp_client import PostgresMcpPool, build_mcp_tools
-from auditor.tools.ssh import get_ssh_tools
 from auditor.tools.winrm import get_winrm_tools
 from auditor.workflows import assessment as _wf_assessment
 from auditor.workflows import builder as _wf_builder
@@ -104,11 +103,13 @@ __all__ = [
 
 
 def _registry_ssh_tools() -> list:
-    """SSH tools authorized by the tool registry + capability policy (INPUT-004)."""
+    """SSH tools authorized by the tool registry + capability policy (INPUT-004).
+
+    Fail-closed: when the registry/policy authorizes no SSH tools, return an
+    empty list. Never fall back to unbound legacy helpers in production.
+    """
     registry = get_tool_registry()
-    bound = registry.bindable_langchain_tools(transports=("ssh",))
-    # Fall back to legacy helpers only when the catalog is absent (empty tree).
-    return bound if bound else get_ssh_tools()
+    return registry.bindable_langchain_tools(transports=("ssh",))
 
 
 def _all_tools(mcp_pool: PostgresMcpPool | None = None) -> list:

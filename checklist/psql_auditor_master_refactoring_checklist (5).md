@@ -48,18 +48,21 @@ hardening findings remain in backlog. `INPUT-005` remains `[~]`.
 POC tool-registry vertical slice (this revision): `INPUT-004`, `TOOL-001`,
 `EVID-001`, `EVID-002`, and `EVID-003` are `[~]` — SSH is registered through a
 validated `ToolRegistry` with capability policy, normalized `ToolResult`,
-read-only enforcement, and provenance-bearing evidence. WinRM/HTTP/TCP/SNMP
-adapters (`TOOL-002`…`TOOL-005`) remain open. Do not mark `[x]` without
-independent acceptance.
+strict allow-list policy, path restrictions, secret redaction, fail-closed
+binding, and provenance-bearing evidence. Independent-review hardening landed
+in this PR (no legacy SSH fallback; stale tool/policy hash rejection; duplicate
+IDs non-executable; non-zero SSH exit → error). WinRM/HTTP/TCP/SNMP adapters
+(`TOOL-002`…`TOOL-005`) remain open. Do not mark `[x]` without independent
+acceptance.
 
 | Check | Verified result |
 | --- | --- |
 | Format | Passed |
 | Lint | Passed |
 | Type check | Passed, 92 files |
-| Unit tests | 473 passed |
+| Unit tests | 481 passed |
 | Integration tests | 8 passed |
-| Full suite | 481 passed |
+| Full suite | 489 passed |
 | Defect map | `validate-defect-map: OK` (77/77) |
 
 ## Quality assessment

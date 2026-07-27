@@ -245,6 +245,120 @@ def _load_json(path: Path) -> dict[str, Any]:
     return raw
 
 
+def _parse_positive_int(
+    raw: Any,
+    *,
+    default: int,
+    field_name: str,
+    tool_id: str,
+    path: Path,
+    issues: list[ToolValidationIssue],
+) -> int:
+    """Parse a positive int field; malformed values become validation issues."""
+    if raw is None or raw == "":
+        return default
+    try:
+        if isinstance(raw, bool):
+            raise TypeError("bool is not a valid integer field")
+        value = int(raw)
+    except (TypeError, ValueError):
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="invalid_numeric_field",
+                message=f"{field_name} must be a positive integer (got {raw!r})",
+                tool_id=tool_id,
+                location=str(path),
+            )
+        )
+        return default
+    if value <= 0:
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="invalid_numeric_field",
+                message=f"{field_name} must be > 0 (got {value})",
+                tool_id=tool_id,
+                location=str(path),
+            )
+        )
+        return default
+    return value
+
+
+def _parse_bool(
+    raw: Any,
+    *,
+    default: bool,
+    field_name: str,
+    tool_id: str,
+    path: Path,
+    issues: list[ToolValidationIssue],
+) -> bool:
+    """Parse a boolean field; malformed values become validation issues."""
+    if raw is None or raw == "":
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)) and raw in (0, 1) and not isinstance(raw, bool):
+        # Reject bare integers other than explicit JSON true/false.
+        issues.append(
+            ToolValidationIssue(
+                level="error",
+                code="invalid_boolean_field",
+                message=f"{field_name} must be a boolean (got {raw!r})",
+                tool_id=tool_id,
+                location=str(path),
+            )
+        )
+        return default
+    if isinstance(raw, str):
+        low = raw.strip().lower()
+        if low in {"true", "yes", "1"}:
+            return True
+        if low in {"false", "no", "0"}:
+            return False
+    issues.append(
+        ToolValidationIssue(
+            level="error",
+            code="invalid_boolean_field",
+            message=f"{field_name} must be a boolean (got {raw!r})",
+            tool_id=tool_id,
+            location=str(path),
+        )
+    )
+    return default
+
+
+def _with_issue(manifest: ToolManifest, issue: ToolValidationIssue) -> ToolManifest:
+    """Return a copy of ``manifest`` with an added issue (and enabled cleared on error)."""
+    issues = tuple(manifest.issues) + (issue,)
+    enabled = manifest.enabled and not any(i.level == "error" for i in issues)
+    return ToolManifest(
+        id=manifest.id,
+        version=manifest.version,
+        title=manifest.title,
+        description=manifest.description,
+        transport=manifest.transport,
+        adapter=manifest.adapter,
+        capabilities=manifest.capabilities,
+        risk=manifest.risk,
+        readonly=manifest.readonly,
+        inventory_access=manifest.inventory_access,
+        credential_source=manifest.credential_source,
+        blocked_operations=manifest.blocked_operations,
+        timeout_seconds=manifest.timeout_seconds,
+        max_output_bytes=manifest.max_output_bytes,
+        enabled=enabled,
+        profiles=manifest.profiles,
+        input_schema=manifest.input_schema,
+        output_schema=manifest.output_schema,
+        source_path=manifest.source_path,
+        source_hash=manifest.source_hash,
+        issues=issues,
+    )
+
+
 def _validate_manifest(raw: dict[str, Any], *, path: Path, source_hash: str) -> ToolManifest:
     issues: list[ToolValidationIssue] = []
     tool_id = str(raw.get("id") or "").strip()
@@ -366,28 +480,38 @@ def _validate_manifest(raw: dict[str, Any], *, path: Path, source_hash: str) -> 
         )
         profiles = []
 
-    timeout = int(raw.get("timeout_seconds") or 30)
-    max_out = int(raw.get("max_output_bytes") or 200_000)
-    if timeout <= 0:
-        issues.append(
-            ToolValidationIssue(
-                level="error",
-                code="invalid_timeout",
-                message="timeout_seconds must be > 0",
-                tool_id=tool_id,
-                location=str(path),
-            )
-        )
-    if max_out <= 0:
-        issues.append(
-            ToolValidationIssue(
-                level="error",
-                code="invalid_max_output",
-                message="max_output_bytes must be > 0",
-                tool_id=tool_id,
-                location=str(path),
-            )
-        )
+    timeout = _parse_positive_int(
+        raw.get("timeout_seconds"),
+        default=30,
+        field_name="timeout_seconds",
+        tool_id=tool_id,
+        path=path,
+        issues=issues,
+    )
+    max_out = _parse_positive_int(
+        raw.get("max_output_bytes"),
+        default=200_000,
+        field_name="max_output_bytes",
+        tool_id=tool_id,
+        path=path,
+        issues=issues,
+    )
+    readonly = _parse_bool(
+        raw.get("readonly", True),
+        default=True,
+        field_name="readonly",
+        tool_id=tool_id,
+        path=path,
+        issues=issues,
+    )
+    enabled = _parse_bool(
+        raw.get("enabled", True),
+        default=True,
+        field_name="enabled",
+        tool_id=tool_id,
+        path=path,
+        issues=issues,
+    )
 
     inventory_access = raw.get("inventory_access") or []
     blocked = raw.get("blocked_operations") or []
@@ -405,13 +529,13 @@ def _validate_manifest(raw: dict[str, Any], *, path: Path, source_hash: str) -> 
         adapter=adapter,
         capabilities=tuple(str(c) for c in caps),
         risk=str(raw.get("risk") or "low"),
-        readonly=bool(raw.get("readonly", True)),
+        readonly=readonly,
         inventory_access=tuple(str(x) for x in inventory_access),
         credential_source=str(raw.get("credential_source") or ""),
         blocked_operations=tuple(str(x) for x in blocked),
-        timeout_seconds=timeout if timeout > 0 else 30,
-        max_output_bytes=max_out if max_out > 0 else 200_000,
-        enabled=bool(raw.get("enabled", True)),
+        timeout_seconds=timeout,
+        max_output_bytes=max_out,
+        enabled=enabled,
         profiles=tuple(str(p) for p in profiles),
         input_schema=dict(input_schema),
         output_schema=dict(output_schema),
@@ -451,27 +575,42 @@ def _validate_policy(raw: dict[str, Any], *, path: Path, source_hash: str) -> Ca
         denied = []
     if not isinstance(transports, list):
         transports = []
-    max_chars = int(raw.get("max_output_chars") or 6000)
-    if max_chars <= 0:
-        issues.append(
-            ToolValidationIssue(
-                level="error",
-                code="invalid_max_output_chars",
-                message="max_output_chars must be > 0",
-                location=str(path),
-            )
-        )
-        max_chars = 6000
+    max_chars_issues: list[ToolValidationIssue] = []
+    max_chars = _parse_positive_int(
+        raw.get("max_output_chars"),
+        default=6000,
+        field_name="max_output_chars",
+        tool_id="",
+        path=path,
+        issues=max_chars_issues,
+    )
+    issues.extend(max_chars_issues)
+    readonly_required = _parse_bool(
+        raw.get("readonly_required", True),
+        default=True,
+        field_name="readonly_required",
+        tool_id="",
+        path=path,
+        issues=issues,
+    )
+    require_inventory_credentials = _parse_bool(
+        raw.get("require_inventory_credentials", True),
+        default=True,
+        field_name="require_inventory_credentials",
+        tool_id="",
+        path=path,
+        issues=issues,
+    )
     return CapabilityPolicy(
         version=version,
         profile=profile or POC_TOOL_PROFILE,
         description=str(raw.get("description") or ""),
-        readonly_required=bool(raw.get("readonly_required", True)),
+        readonly_required=readonly_required,
         allowed_tools=tuple(str(x) for x in allowed),
         denied_tools=tuple(str(x) for x in denied),
         allowed_transports=tuple(str(x).lower() for x in transports),
         max_output_chars=max_chars,
-        require_inventory_credentials=bool(raw.get("require_inventory_credentials", True)),
+        require_inventory_credentials=require_inventory_credentials,
         source_path=str(path),
         source_hash=source_hash,
         issues=tuple(issues),
@@ -599,44 +738,60 @@ def load_tool_registry(
                 )
                 continue
             manifest = _validate_manifest(raw, path=path, source_hash=digest)
-            # Duplicate ids: keep first, mark later as error entry under unique key.
+            # Duplicate ids: every conflicting manifest becomes non-executable.
             if manifest.id in tools:
-                conflict = ToolManifest(
-                    id=manifest.id,
-                    version=manifest.version,
-                    title=manifest.title,
-                    description=manifest.description,
-                    transport=manifest.transport,
-                    adapter=manifest.adapter,
-                    capabilities=manifest.capabilities,
-                    risk=manifest.risk,
-                    readonly=manifest.readonly,
-                    inventory_access=manifest.inventory_access,
-                    credential_source=manifest.credential_source,
-                    blocked_operations=manifest.blocked_operations,
-                    timeout_seconds=manifest.timeout_seconds,
-                    max_output_bytes=manifest.max_output_bytes,
-                    enabled=False,
-                    profiles=manifest.profiles,
-                    input_schema=manifest.input_schema,
-                    output_schema=manifest.output_schema,
-                    source_path=manifest.source_path,
-                    source_hash=manifest.source_hash,
-                    issues=manifest.issues
-                    + (
-                        ToolValidationIssue(
-                            level="error",
-                            code="duplicate_id",
-                            message=f"duplicate tool id {manifest.id!r}",
-                            tool_id=manifest.id,
-                            location=str(path),
+                first = tools[manifest.id]
+                tools[manifest.id] = _with_issue(
+                    first,
+                    ToolValidationIssue(
+                        level="error",
+                        code="duplicate_id",
+                        message=(
+                            f"duplicate tool id {manifest.id!r} (also defined in {path.name})"
                         ),
+                        tool_id=manifest.id,
+                        location=first.source_path or str(path),
+                    ),
+                )
+                conflict = _with_issue(
+                    manifest,
+                    ToolValidationIssue(
+                        level="error",
+                        code="duplicate_id",
+                        message=(
+                            f"duplicate tool id {manifest.id!r} (also defined in "
+                            f"{Path(first.source_path).name if first.source_path else 'catalog'})"
+                        ),
+                        tool_id=manifest.id,
+                        location=str(path),
                     ),
                 )
                 tools[f"{manifest.id}#{path.stem}"] = conflict
-                # Also mark the first as having a duplicate warning? Keep first executable.
                 continue
             tools[manifest.id] = manifest
+
+    # Second pass: if any id appears under multiple storage keys, ensure none
+    # of those entries remain executable without a duplicate_id error.
+    by_id: dict[str, list[str]] = {}
+    for key, tool in tools.items():
+        by_id.setdefault(tool.id, []).append(key)
+    for tool_id, keys in by_id.items():
+        if len(keys) < 2:
+            continue
+        for key in keys:
+            tool = tools[key]
+            if any(i.code == "duplicate_id" for i in tool.issues):
+                continue
+            tools[key] = _with_issue(
+                tool,
+                ToolValidationIssue(
+                    level="error",
+                    code="duplicate_id",
+                    message=f"duplicate tool id {tool_id!r}",
+                    tool_id=tool_id,
+                    location=tool.source_path,
+                ),
+            )
 
     policy = load_capability_policy(root, profile=profile)
     catalog_digest = _sha256_text("\n".join(hash_parts) if hash_parts else "empty-catalog")
@@ -673,3 +828,43 @@ def reset_tool_registry_cache() -> None:
     """Drop the cached default registry (tests)."""
     global _CACHED
     _CACHED = None
+
+
+class ToolSnapshotStale(ValueError):
+    """Raised when pinned tool/policy hashes diverge from the live registry."""
+
+    def __init__(self, message: str, *, code: str = "tool_snapshot_stale") -> None:
+        self.code = code
+        super().__init__(message)
+
+
+def assert_tool_snapshot_current(
+    *,
+    tool_catalog_hash: str = "",
+    capability_policy_hash: str = "",
+    tools_dir: Path | str | None = None,
+    profile: str = POC_TOOL_PROFILE,
+) -> dict[str, str]:
+    """Reject confirm/start/invoke when pinned hashes differ from the live registry.
+
+    Empty pins are ignored (legacy plans). When a pin is present it must match.
+    """
+    registry = get_tool_registry(tools_dir=tools_dir, profile=profile)
+    current = registry.snapshot_hashes()
+    pinned_catalog = (tool_catalog_hash or "").strip()
+    pinned_policy = (capability_policy_hash or "").strip()
+    if pinned_catalog and pinned_catalog != current["tool_catalog_hash"]:
+        raise ToolSnapshotStale(
+            "tool catalog hash mismatch: plan/run pin "
+            f"{pinned_catalog!r} != current {current['tool_catalog_hash']!r}; "
+            "re-run inventory analyze / audit plan",
+            code="tool_snapshot_stale",
+        )
+    if pinned_policy and pinned_policy != current["capability_policy_hash"]:
+        raise ToolSnapshotStale(
+            "capability policy hash mismatch: plan/run pin "
+            f"{pinned_policy!r} != current {current['capability_policy_hash']!r}; "
+            "re-run inventory analyze / audit plan",
+            code="tool_snapshot_stale",
+        )
+    return current

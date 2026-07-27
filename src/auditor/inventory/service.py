@@ -36,6 +36,7 @@ from auditor.inventory.normalize import normalize_inventory
 from auditor.inventory.plan import (
     assert_plan_matches_inventory,
     assert_plan_matches_preflight,
+    assert_plan_matches_tool_registry,
     ensure_plan_confirmed,
     load_plan,
     persist_plan,
@@ -209,6 +210,7 @@ def confirm_audit_plan(
                 )
             current = load_client_inventory(inventory_dir, client_name)
         assert_plan_matches_inventory(plan, current)
+        assert_plan_matches_tool_registry(plan)
         # If a newer preflight exists for the same inventory with different
         # effective facts, the plan is stale (discovery changed post-plan).
         if inventory_dir is not None and client_name is not None:
@@ -258,6 +260,7 @@ def plan_to_audit_request_payload(
     """
     ensure_plan_confirmed(plan)
     assert_plan_matches_inventory(plan, inventory)
+    assert_plan_matches_tool_registry(plan)
 
     host_by_id = {h.host_id: h for h in inventory.hosts}
     by_ref: dict[str, list[dict[str, str]]] = {}
@@ -350,6 +353,7 @@ async def astart_confirmed_audit(
     # Reload inventory; discovery is not re-run on start by default.
     inventory = load_client_inventory(inventory_dir, client_name)
     assert_plan_matches_inventory(plan, inventory)
+    assert_plan_matches_tool_registry(plan)
 
     registry = get_client_registry(settings.evidence_dir)
     client = registry.ensure_client(display_name=client_name, slug=client_name)
@@ -390,6 +394,7 @@ async def astart_confirmed_audit(
         )
     else:
         assert_plan_matches_inventory(plan, inventory)
+        assert_plan_matches_tool_registry(plan)
 
     payload = plan_to_audit_request_payload(
         plan,

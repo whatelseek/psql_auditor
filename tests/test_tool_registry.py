@@ -18,7 +18,6 @@ from auditor.tool_registry import (
     reset_tool_registry_cache,
 )
 from auditor.tools.ssh import invoke_ssh_read_file, invoke_ssh_run, take_last_tool_result
-from auditor.tools.ssh_policy import is_readonly_ssh_command
 
 
 @pytest.fixture(autouse=True)
@@ -161,11 +160,30 @@ def test_default_catalog_registers_ssh_tools() -> None:
 
 @pytest.mark.unit
 def test_readonly_ssh_policy() -> None:
-    assert is_readonly_ssh_command("ss -lntp | grep 5432")
-    assert is_readonly_ssh_command("cat /etc/os-release")
-    assert not is_readonly_ssh_command("rm -rf /var/lib/postgresql")
-    assert not is_readonly_ssh_command("apt-get install nginx")
-    assert not is_readonly_ssh_command("")
+    from auditor.tools.ssh_policy import (
+        is_approved_ssh_command,
+        is_approved_ssh_read_path,
+        ssh_command_denial_reason,
+        ssh_read_path_denial_reason,
+    )
+
+    # Allow-list: exact approved commands only (no shell composition).
+    assert is_approved_ssh_command("ss -lntp")
+    assert is_approved_ssh_command("cat /etc/os-release")
+    assert is_approved_ssh_command("uname -a")
+    assert not is_approved_ssh_command("ss -lntp | grep 5432")
+    assert not is_approved_ssh_command("bash -c 'uname'")
+    assert not is_approved_ssh_command("rm -rf /var/lib/postgresql")
+    assert not is_approved_ssh_command("apt-get install nginx")
+    assert not is_approved_ssh_command("")
+    assert "composition" in (ssh_command_denial_reason("uname -a; id") or "")
+
+    assert is_approved_ssh_read_path("/etc/postgresql/16/main/postgresql.conf")
+    assert is_approved_ssh_read_path("/etc/os-release")
+    assert not is_approved_ssh_read_path("/etc/shadow")
+    assert not is_approved_ssh_read_path("/home/user/.ssh/id_rsa")
+    assert not is_approved_ssh_read_path("../etc/os-release")
+    assert "sensitive" in (ssh_read_path_denial_reason("/etc/shadow") or "")
 
 
 @pytest.mark.unit
@@ -181,7 +199,7 @@ async def test_ssh_invocation_through_registry_denies_destructive() -> None:
     )
     result = await invoke_ssh_run("rm -rf /tmp/data", settings=settings)
     assert result.status == "denied"
-    assert result.error and "read-only" in result.error
+    assert result.error and "allow-list" in result.error
     assert "s3cret-password" not in result.to_llm_text()
     assert "s3cret-password" not in json.dumps(result.to_evidence_record())
     assert result.arguments.get("command") == "rm -rf /tmp/data"
@@ -236,8 +254,6 @@ async def test_ssh_invocation_normalized_result_with_mock_transport() -> None:
                 audit_run_id="arun_demo",
                 framework_id="postgres_cis",
                 requirement_id="REQ-001",
-                tool_catalog_hash="tool-abc",
-                capability_policy_hash="pol-xyz",
             ),
         )
 
@@ -443,3 +459,268 @@ async def test_execute_tool_calls_persists_ssh_tool_result(tmp_path: Path) -> No
     assert sidecar["status"] == "denied"
     assert sidecar["provenance"]["requirement_id"] == "REQ-002"
     assert "hidden-secret" not in json.dumps(sidecar)
+
+
+@pytest.mark.unit
+def test_registry_fail_closed_no_legacy_ssh_fallback(tmp_path: Path) -> None:
+    """Empty/unauthorized registry must not fall back to unbound SSH tools."""
+    from auditor.graph import _registry_ssh_tools
+    from auditor.tool_registry import load_tool_registry, reset_tool_registry_cache
+
+    root = tmp_path / "tools"
+    (root / "catalog").mkdir(parents=True)
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": [],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 1000,
+            "require_inventory_credentials": True,
+        },
+    )
+    # Point the process cache at the empty authorized set via monkeypatch of loader.
+    reset_tool_registry_cache()
+    empty = load_tool_registry(root, profile="poc_audit_v1")
+    assert empty.bindable_langchain_tools(transports=("ssh",)) == []
+
+    with patch("auditor.graph.get_tool_registry", return_value=empty):
+        assert _registry_ssh_tools() == []
+
+
+@pytest.mark.unit
+def test_duplicate_tool_ids_all_non_executable(tmp_path: Path) -> None:
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    payload = _valid_ssh_manifest("ssh_run")
+    _write_manifest(catalog, "ssh_run", payload)
+    _write_manifest(catalog, "ssh_run_dup", payload)
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": ["ssh_run"],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 1000,
+            "require_inventory_credentials": True,
+        },
+    )
+    registry = load_tool_registry(root, profile="poc_audit_v1")
+    conflicting = [t for t in registry.list_tools() if t.id == "ssh_run"]
+    assert len(conflicting) >= 2
+    assert all(not t.executable for t in conflicting)
+    assert not registry.is_authorized("ssh_run")
+    assert registry.bindable_langchain_tools() == []
+
+
+@pytest.mark.unit
+def test_malformed_numeric_and_boolean_fields_are_validation_issues(tmp_path: Path) -> None:
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    payload = _valid_ssh_manifest("ssh_run")
+    payload["timeout_seconds"] = "not-a-number"
+    payload["max_output_bytes"] = {"nested": True}
+    payload["readonly"] = "sometimes"
+    payload["enabled"] = 2
+    _write_manifest(catalog, "ssh_run", payload)
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": "yes-please",
+            "allowed_tools": ["ssh_run"],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": "plenty",
+            "require_inventory_credentials": True,
+        },
+    )
+    # Must not crash — malformed fields become validation issues.
+    registry = load_tool_registry(root, profile="poc_audit_v1")
+    tool = registry.get("ssh_run")
+    assert tool is not None
+    assert not tool.executable
+    codes = {i.code for i in tool.issues}
+    assert "invalid_numeric_field" in codes
+    assert "invalid_boolean_field" in codes
+    assert registry.policy is not None
+    assert not registry.policy.executable
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ssh_nonzero_exit_maps_to_error_status() -> None:
+    settings = Settings(
+        _env_file=None,
+        ssh_host="10.0.0.8",
+        ssh_user="audit",
+        ssh_password="pw",
+        ssh_strict_host_key=False,
+    )
+
+    class _FakeResult:
+        exit_status = 2
+        stdout = "partial"
+        stderr = "not found"
+
+    class _FakeConn:
+        async def run(self, command: str, check: bool = False, timeout: float = 0) -> _FakeResult:
+            return _FakeResult()
+
+        async def __aenter__(self) -> _FakeConn:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    with patch("auditor.tools.ssh.asyncssh.connect", return_value=_FakeConn()):
+        result = await invoke_ssh_run("uname -a", settings=settings)
+
+    assert result.status == "error"
+    assert result.exit_code == 2
+    assert result.error and "non-zero" in result.error
+    assert "partial" in result.output
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ssh_read_file_blocks_sensitive_paths_and_redacts_output() -> None:
+    settings = Settings(
+        _env_file=None,
+        ssh_host="host1",
+        ssh_user="u",
+        ssh_password="super-secret-pw",
+        ssh_strict_host_key=False,
+    )
+    denied = await invoke_ssh_read_file("/etc/shadow", settings=settings)
+    assert denied.status == "denied"
+    assert "path allow-list" in (denied.error or "")
+
+    class _FakeResult:
+        exit_status = 0
+        stdout = "password=super-secret-pw\nlisten_addresses='*'\n"
+        stderr = "token: abc123"
+
+    class _FakeConn:
+        async def run(self, command: str, check: bool = False, timeout: float = 0) -> _FakeResult:
+            return _FakeResult()
+
+        async def __aenter__(self) -> _FakeConn:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    with patch("auditor.tools.ssh.asyncssh.connect", return_value=_FakeConn()):
+        result = await invoke_ssh_read_file(
+            "/etc/postgresql/16/main/postgresql.conf",
+            settings=settings,
+        )
+
+    assert result.status == "ok"
+    assert "super-secret-pw" not in result.output
+    assert "super-secret-pw" not in result.to_llm_text()
+    assert "***REDACTED***" in result.output
+
+
+@pytest.mark.unit
+def test_stale_tool_snapshot_rejects_confirm_and_invoke(tmp_path: Path) -> None:
+    from auditor.domain.audit_plan import AuditPlan, AuditPlanSummary, PlanConfirmationRejected
+    from auditor.inventory.plan import assert_plan_matches_tool_registry
+    from auditor.tool_registry import ToolSnapshotStale, assert_tool_snapshot_current
+
+    with pytest.raises(ToolSnapshotStale):
+        assert_tool_snapshot_current(
+            tool_catalog_hash="tool-deadbeefdead",
+            capability_policy_hash="pol-cafebabe00",
+        )
+
+    plan = AuditPlan(
+        plan_id="plan-test",
+        client_id="client_plan",
+        inventory_version_id="inv-aaaaaaaaaaaa",
+        inventory_content_hash="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        tool_catalog_hash="tool-stale000000",
+        capability_policy_hash="pol-stale000000",
+        summary=AuditPlanSummary(
+            total_hosts=0,
+            total_audit_target_instances=0,
+        ),
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+    with pytest.raises(PlanConfirmationRejected) as exc:
+        assert_plan_matches_tool_registry(plan)
+    assert exc.value.code == "tool_snapshot_stale"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_invoke_rejects_stale_provenance_hashes() -> None:
+    settings = Settings(
+        _env_file=None,
+        ssh_host="h",
+        ssh_user="u",
+        ssh_password="x",
+        ssh_strict_host_key=False,
+    )
+    result = await invoke_ssh_run(
+        "uname -a",
+        settings=settings,
+        provenance=ToolProvenance(
+            tool_catalog_hash="tool-stalehash01",
+            capability_policy_hash="pol-stalehash01",
+        ),
+    )
+    assert result.status == "unauthorized"
+    assert "mismatch" in (result.error or "").lower() or "stale" in (result.error or "").lower()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_execute_tool_calls_rejects_stale_run_snapshot(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from auditor.workflows.tool_execution import execute_tool_calls
+
+    store = EvidenceStore(tmp_path, run_id="run_stale")
+    store.write_run_meta(
+        client_id="client_x",
+        audit_run_id="arun_x000000000002",
+        tool_catalog_hash="tool-stalehash99",
+        capability_policy_hash="pol-stalehash99",
+    )
+
+    class _Tool:
+        name = "ssh_run"
+        called = False
+
+        async def ainvoke(self, args: dict) -> str:
+            self.called = True
+            return "should-not-run"
+
+    tool = _Tool()
+    runtime = SimpleNamespace(
+        tools_by_name={"ssh_run": tool},
+        settings=Settings(_env_file=None, max_tool_output_chars=2000, memory_learn=False),
+        playbooks=None,
+    )
+    messages = await execute_tool_calls(
+        runtime,  # type: ignore[arg-type]
+        [{"name": "ssh_run", "args": {"command": "uname -a"}, "id": "c1"}],
+        framework_id="postgres_cis",
+        req_id="REQ-009",
+        store=store,
+    )
+    assert not tool.called
+    assert messages[0].content.startswith("Tool unauthorized:")

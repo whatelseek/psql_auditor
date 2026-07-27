@@ -10,9 +10,24 @@ from langchain_core.messages import ToolMessage
 from auditor.context import truncate_text
 from auditor.evidence_store import EvidenceStore
 from auditor.progress import emit_tool_call, emit_tool_result
-from auditor.tool_registry import get_tool_registry
+from auditor.tool_registry import ToolSnapshotStale, assert_tool_snapshot_current, get_tool_registry
 from auditor.workflows.helpers import _tool_result_looks_failed
 from auditor.workflows.protocols import AuditRuntime
+
+
+def _pinned_hashes_from_store(store: EvidenceStore | None) -> dict[str, str]:
+    if store is None or not hasattr(store, "read_run_meta"):
+        return {"tool_catalog_hash": "", "capability_policy_hash": ""}
+    try:
+        meta = store.read_run_meta()
+    except Exception:  # noqa: BLE001
+        return {"tool_catalog_hash": "", "capability_policy_hash": ""}
+    if not isinstance(meta, dict):
+        return {"tool_catalog_hash": "", "capability_policy_hash": ""}
+    return {
+        "tool_catalog_hash": str(meta.get("tool_catalog_hash") or ""),
+        "capability_policy_hash": str(meta.get("capability_policy_hash") or ""),
+    }
 
 
 async def execute_tool_calls(
@@ -27,22 +42,29 @@ async def execute_tool_calls(
     """Execute parallel tool calls from the evidence model response.
 
     Emits progress events, logs to the evidence store, and updates playbook
-    memory on success.
-
-    Args:
-        tool_calls: LangChain tool call dicts from the model.
-        framework_id: Framework id for logging and memory.
-        req_id: Requirement id for logging and memory.
-        requirement_title: Human checklist title for live UI labels.
-        store: Optional evidence store.
-
-    Returns:
-        ``ToolMessage`` list in call order for appending to chat history.
+    memory on success. Rejects invocation when pinned tool/policy hashes on the
+    run diverge from the live registry.
     """
     try:
-        hashes = get_tool_registry().snapshot_hashes()
+        current_hashes = get_tool_registry().snapshot_hashes()
     except Exception:  # noqa: BLE001
-        hashes = {"tool_catalog_hash": "", "capability_policy_hash": ""}
+        current_hashes = {"tool_catalog_hash": "", "capability_policy_hash": ""}
+    pinned = _pinned_hashes_from_store(store)
+    snapshot_error: str | None = None
+    if pinned["tool_catalog_hash"] or pinned["capability_policy_hash"]:
+        try:
+            assert_tool_snapshot_current(
+                tool_catalog_hash=pinned["tool_catalog_hash"],
+                capability_policy_hash=pinned["capability_policy_hash"],
+            )
+        except ToolSnapshotStale as exc:
+            snapshot_error = str(exc)
+    evidence_hashes = {
+        "tool_catalog_hash": pinned["tool_catalog_hash"]
+        or current_hashes.get("tool_catalog_hash", ""),
+        "capability_policy_hash": pinned["capability_policy_hash"]
+        or current_hashes.get("capability_policy_hash", ""),
+    }
 
     async def _one(tc: dict[str, Any]) -> ToolMessage:
         """Invoke a single tool call and return its ``ToolMessage``."""
@@ -61,7 +83,11 @@ async def execute_tool_calls(
         full_result = ""
         normalized = None
         tool = runtime.tools_by_name.get(name)
-        if tool is None:
+        if snapshot_error is not None and name in {"ssh_run", "ssh_read_file"}:
+            full_result = f"Tool unauthorized: {snapshot_error}"
+            error = full_result
+            content = full_result
+        elif tool is None:
             full_result = f"Tool error: unknown tool '{name}'"
             error = full_result
             content = full_result
@@ -118,8 +144,8 @@ async def execute_tool_calls(
                 client_id=str(meta.get("client_id") or ""),
                 audit_run_id=str(meta.get("audit_run_id") or ""),
                 requirement_title=requirement_title,
-                tool_catalog_hash=hashes.get("tool_catalog_hash", ""),
-                capability_policy_hash=hashes.get("capability_policy_hash", ""),
+                tool_catalog_hash=evidence_hashes.get("tool_catalog_hash", ""),
+                capability_policy_hash=evidence_hashes.get("capability_policy_hash", ""),
             )
         # Long-term memory: remember successful recipes (hot path).
         if (

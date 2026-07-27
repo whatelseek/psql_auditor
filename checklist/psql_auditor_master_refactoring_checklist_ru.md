@@ -52,17 +52,20 @@ registry принят для POC (`INPUT-002` = `[~]`). `INPUT-005` остаёт
 
 POC tool-registry vertical slice (эта ревизия): `INPUT-004`, `TOOL-001`,
 `EVID-001`, `EVID-002` и `EVID-003` — `[~]`. SSH зарегистрирован через
-`ToolRegistry` с capability policy, normalized `ToolResult`, read-only
-enforcement и provenance. `TOOL-002`…`TOOL-005` остаются открытыми. Не
-помечать `[x]` без независимой приёмки.
+`ToolRegistry` с capability policy, normalized `ToolResult`, strict allow-list,
+path restrictions, secret redaction, fail-closed binding и provenance.
+Hardening по independent review: без legacy SSH fallback; reject stale
+tool/policy hashes; duplicate IDs non-executable; non-zero SSH exit → error.
+`TOOL-002`…`TOOL-005` остаются открытыми. Не помечать `[x]` без независимой
+приёмки.
 
 | Проверка          | Результат                                           |
 | ----------------- | --------------------------------------------------- |
 | Format / Lint     | Passed                                              |
 | Type check        | Passed, 92 files                                    |
-| Unit tests        | 473 passed                                          |
+| Unit tests        | 481 passed                                          |
 | Integration tests | 8 passed                                            |
-| Full suite        | 481 passed                                          |
+| Full suite        | 489 passed                                          |
 | Defect map        | `validate-defect-map: OK` (77/77)                   |
 
 ## Реестр задач
