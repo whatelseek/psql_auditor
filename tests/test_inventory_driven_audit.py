@@ -719,7 +719,7 @@ async def test_api_start_true_works_in_active_event_loop(tmp_path: Path):
         root, "Testcompany", agents_dir=AGENTS, discovery=False
     )
     plans = root / "Testcompany" / ".audit_plans"
-    plans.mkdir(parents=True)
+    plans.mkdir(parents=True, exist_ok=True)
     persist_plan(plan, plans / "latest.json")
 
     async def _runtime_factory():

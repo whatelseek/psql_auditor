@@ -1274,6 +1274,9 @@ async def test_e2e_api_analyze_confirm_start_with_discovery(tmp_path: Path):
         def __init__(self, settings: Settings):
             self.settings = settings
 
+        async def aclose_runtime_resources(self, timeout: float | None = None) -> None:
+            return None
+
         async def arun_request(self, request, operator_context: str = ""):
             run_id = new_audit_run_id()
             registry = get_audit_registry(self.settings.evidence_dir)

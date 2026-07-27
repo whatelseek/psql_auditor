@@ -430,6 +430,22 @@ def sync_capability_snapshots_from_detections(
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 data = {}
+            # Preserve versions already collected during discovery when
+            # TechnologyDetection rows do not carry a version field.
+            prior_versions = {
+                str(t.get("technology_id") or ""): str(t.get("version") or "")
+                for t in (data.get("technologies") or [])
+                if isinstance(t, dict)
+            }
+            for tech in techs:
+                if not tech.version and prior_versions.get(tech.technology_id):
+                    tech.version = prior_versions[tech.technology_id]
+            if not any(t.technology_id == "postgresql" and t.version for t in techs):
+                # Fall back to postgres_version flat field from prior snapshot.
+                pg_ver = str(data.get("postgresql_version") or "")
+                for tech in techs:
+                    if tech.technology_id == "postgresql" and not tech.version and pg_ver:
+                        tech.version = pg_ver
             snapshot = HostCapabilitySnapshot(
                 schema=str(data.get("schema") or "host_capability_snapshot.v1"),
                 client_id=str(data.get("client_id") or inventory.client_id),
