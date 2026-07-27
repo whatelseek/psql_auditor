@@ -1,0 +1,38 @@
+{
+  "id": "ssh_run",
+  "version": "1.0.0",
+  "title": "SSH run command",
+  "description": "Execute a read-only shell command on an inventory SSH target.",
+  "transport": "ssh",
+  "adapter": "auditor.tools.ssh:invoke_ssh_run",
+  "capabilities": ["host.execute", "host.read"],
+  "risk": "low",
+  "readonly": true,
+  "inventory_access": ["ssh"],
+  "credential_source": "inventory:ssh",
+  "blocked_operations": [
+    "destructive_shell",
+    "package_mutate",
+    "service_mutate",
+    "filesystem_mutate"
+  ],
+  "timeout_seconds": 30,
+  "max_output_bytes": 200000,
+  "enabled": true,
+  "profiles": ["poc_audit_v1"],
+  "input_schema": {
+    "type": "object",
+    "required": ["command"],
+    "properties": {
+      "command": {"type": "string", "description": "Remote shell command"}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "status": {"type": "string"},
+      "output": {"type": "string"},
+      "exit_code": {"type": ["integer", "null"]}
+    }
+  }
+}

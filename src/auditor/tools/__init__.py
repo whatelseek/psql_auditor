@@ -31,6 +31,14 @@ from auditor.tools.mcp_client import (
     reconnect_mcp_session,
 )
 from auditor.tools.ssh import get_ssh_tools, ssh_read_file, ssh_run
+from auditor.tools.ssh_policy import (
+    is_approved_ssh_command,
+    is_approved_ssh_read_path,
+    is_readonly_ssh_command,
+    readonly_ssh_denial_reason,
+    ssh_command_denial_reason,
+    ssh_read_path_denial_reason,
+)
 from auditor.tools.winrm import get_winrm_tools, winrm_read_file, winrm_run
 
 __all__ = [
@@ -47,6 +55,12 @@ __all__ = [
     "get_ssh_tools",
     "ssh_run",
     "ssh_read_file",
+    "is_approved_ssh_command",
+    "is_approved_ssh_read_path",
+    "is_readonly_ssh_command",
+    "readonly_ssh_denial_reason",
+    "ssh_command_denial_reason",
+    "ssh_read_path_denial_reason",
     "get_winrm_tools",
     "winrm_run",
     "winrm_read_file",

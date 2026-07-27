@@ -82,6 +82,12 @@ from auditor.domain.result_identity import (
     result_id_of,
     validate_result_identity,
 )
+from auditor.domain.tool_result import (
+    ToolProvenance,
+    ToolResult,
+    ToolResultStatus,
+    ToolTargetRef,
+)
 
 __all__ = [
     "AUDIT_JOB_TRANSITIONS",
@@ -152,4 +158,8 @@ __all__ = [
     "InventoryVersion",
     "TechnologyDetection",
     "ValidationIssue",
+    "ToolProvenance",
+    "ToolResult",
+    "ToolResultStatus",
+    "ToolTargetRef",
 ]

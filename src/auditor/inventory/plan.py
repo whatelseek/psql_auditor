@@ -16,6 +16,7 @@ from auditor.domain.audit_plan import (
 )
 from auditor.domain.inventory import ClientInventory, TechnologyDetection
 from auditor.inventory.select_frameworks import select_frameworks_for_inventory
+from auditor.tool_registry import get_tool_registry
 
 
 def _utc_now() -> str:
@@ -25,6 +26,14 @@ def _utc_now() -> str:
 def _plan_id(client_id: str, inventory_version_id: str) -> str:
     digest = hashlib.sha256(f"{client_id}:{inventory_version_id}".encode()).hexdigest()[:12]
     return f"plan-{digest}"
+
+
+def _tool_snapshot_hashes() -> dict[str, str]:
+    """Pin tool-catalog and capability-policy hashes for the audit plan/run."""
+    try:
+        return get_tool_registry().snapshot_hashes()
+    except Exception:  # noqa: BLE001 — plan generation must not fail closed on tools
+        return {"tool_catalog_hash": "", "capability_policy_hash": ""}
 
 
 def generate_audit_plan(
@@ -171,6 +180,7 @@ def generate_audit_plan(
         discovery_result_hash=discovery_result_hash,
         effective_facts_hash=effective_facts_hash,
         preflight_revision_id=preflight_revision_id,
+        **_tool_snapshot_hashes(),
         status="draft",
         targets=tuple(targets),
         framework_decisions=tuple(decisions),
@@ -333,6 +343,19 @@ def assert_plan_matches_preflight(
                 "generation; re-run inventory analyze / audit plan --refresh",
                 code="plan_stale",
             )
+
+
+def assert_plan_matches_tool_registry(plan: AuditPlan) -> None:
+    """Reject confirm/start when tool catalog or capability policy hashes diverged."""
+    from auditor.tool_registry import ToolSnapshotStale, assert_tool_snapshot_current
+
+    try:
+        assert_tool_snapshot_current(
+            tool_catalog_hash=plan.tool_catalog_hash,
+            capability_policy_hash=plan.capability_policy_hash,
+        )
+    except ToolSnapshotStale as exc:
+        raise PlanConfirmationRejected(str(exc), code=exc.code) from exc
 
 
 def plan_confirmation_prompt(plan: AuditPlan) -> str:

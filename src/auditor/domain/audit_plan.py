@@ -91,6 +91,8 @@ class AuditPlan(BaseModel):
     discovery_result_hash: StrictStr = ""
     effective_facts_hash: StrictStr = ""
     preflight_revision_id: StrictStr = ""
+    tool_catalog_hash: StrictStr = ""
+    capability_policy_hash: StrictStr = ""
     status: PlanStatus = "draft"
     targets: tuple[AuditPlanTarget, ...] = ()
     framework_decisions: tuple[FrameworkSelectionDecision, ...] = ()

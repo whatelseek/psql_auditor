@@ -111,10 +111,24 @@ class AuditRegistry:
             arid = require_audit_run_id(audit_run_id, context="AuditRegistry.create_run")
         else:
             arid = new_audit_run_id()
+        scope_data = dict(scope or {})
+        # Pin tool-catalog / capability-policy hashes for the run (INPUT-004).
+        if "tool_catalog_hash" not in scope_data or "capability_policy_hash" not in scope_data:
+            try:
+                from auditor.tool_registry import get_tool_registry
+
+                hashes = get_tool_registry().snapshot_hashes()
+                scope_data.setdefault("tool_catalog_hash", hashes.get("tool_catalog_hash", ""))
+                scope_data.setdefault(
+                    "capability_policy_hash", hashes.get("capability_policy_hash", "")
+                )
+            except Exception:  # noqa: BLE001
+                scope_data.setdefault("tool_catalog_hash", "")
+                scope_data.setdefault("capability_policy_hash", "")
         run = AuditRun(
             audit_run_id=arid,
             client_id=cid,
-            scope=dict(scope or {}),
+            scope=scope_data,
             evidence_run_id=evidence_run_id,
             base_thread_id=base_thread_id,
             results_session_number=results_session_number,

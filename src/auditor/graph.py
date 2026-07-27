@@ -62,8 +62,8 @@ from auditor.intake import (
 from auditor.llm import build_chat_model
 from auditor.memory.playbook_store import PlaybookMemory
 from auditor.task_registry import TaskRegistry
+from auditor.tool_registry import get_tool_registry
 from auditor.tools.mcp_client import PostgresMcpPool, build_mcp_tools
-from auditor.tools.ssh import get_ssh_tools
 from auditor.tools.winrm import get_winrm_tools
 from auditor.workflows import assessment as _wf_assessment
 from auditor.workflows import builder as _wf_builder
@@ -102,15 +102,29 @@ __all__ = [
 ]
 
 
+def _registry_ssh_tools() -> list:
+    """SSH tools authorized by the tool registry + capability policy (INPUT-004).
+
+    Fail-closed: when the registry/policy authorizes no SSH tools, return an
+    empty list. Never fall back to unbound legacy helpers in production.
+    """
+    registry = get_tool_registry()
+    return registry.bindable_langchain_tools(transports=("ssh",))
+
+
 def _all_tools(mcp_pool: PostgresMcpPool | None = None) -> list:
-    """Collect LangChain tools for evidence gathering."""
+    """Collect LangChain tools for evidence gathering.
+
+    SSH tools are bound only when authorized by the tool registry. WinRM and
+    MCP remain on the transitional path until their TOOL-* migrations.
+    """
     pool = mcp_pool or PostgresMcpPool()
-    return [*get_ssh_tools(), *get_winrm_tools(), *build_mcp_tools(pool)]
+    return [*_registry_ssh_tools(), *get_winrm_tools(), *build_mcp_tools(pool)]
 
 
 def _host_tools() -> list:
-    """Remote host tools (SSH + WinRM) for discovery / host_facts."""
-    return [*get_ssh_tools(), *get_winrm_tools()]
+    """Remote host tools (registry SSH + transitional WinRM) for discovery."""
+    return [*_registry_ssh_tools(), *get_winrm_tools()]
 
 
 class AuditorGraph:

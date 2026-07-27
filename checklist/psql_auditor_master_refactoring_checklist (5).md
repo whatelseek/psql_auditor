@@ -12,13 +12,13 @@ Total tasks: **77**
 | Status | Count |
 | --- | ---: |
 | Complete `[x]` | **10 / 77 (13.0%)** |
-| Partially complete `[~]` | **6 / 77 (7.8%)** |
-| Open `[ ]` | **61 / 77 (79.2%)** |
+| Partially complete `[~]` | **11 / 77 (14.3%)** |
+| Open `[ ]` | **56 / 77 (72.7%)** |
 | Not fully complete | **67 / 77 (87.0%)** |
 
 Completed: `AUD-001`, `AUD-002`, `AUD-003`, `CORE-001`, `CORE-002`, `CORE-003`, `CORE-004`, `CORE-005`, `INPUT-001`, `INPUT-003`.
 
-Partially complete: `CORE-006`, `INPUT-002`, `INPUT-005`, `FLOW-007`, `OPS-004`, `DOC-001`.
+Partially complete: `CORE-006`, `INPUT-002`, `INPUT-004`, `INPUT-005`, `TOOL-001`, `FLOW-007`, `EVID-001`, `EVID-002`, `EVID-003`, `OPS-004`, `DOC-001`.
 
 ## Product architecture decision
 
@@ -43,16 +43,26 @@ PR #37 was merged as
 [`eb2ef61`](https://github.com/whatelseek/psql_auditor/commit/eb2ef6130ac17e3f2d7142095045c316ed9a6cbd).
 `INPUT-001` and `INPUT-003` remain independently accepted. The Markdown
 framework registry is accepted for POC, so `INPUT-002` is `[~]`; two production
-hardening findings remain in backlog. `INPUT-005` remains `[~]`. Registered tool
-adapters `TOOL-001`…`TOOL-005` remain open.
+hardening findings remain in backlog. `INPUT-005` remains `[~]`.
+
+POC tool-registry vertical slice (this revision): `INPUT-004`, `TOOL-001`,
+`EVID-001`, `EVID-002`, and `EVID-003` are `[~]` — SSH is registered through a
+validated `ToolRegistry` with capability policy, normalized `ToolResult`,
+strict allow-list policy, path restrictions, secret redaction, fail-closed
+binding, and provenance-bearing evidence. Independent-review hardening landed
+in this PR (no legacy SSH fallback; stale tool/policy hash rejection; duplicate
+IDs non-executable; non-zero SSH exit → error). WinRM/HTTP/TCP/SNMP adapters
+(`TOOL-002`…`TOOL-005`) remain open. Do not mark `[x]` without independent
+acceptance.
 
 | Check | Verified result |
 | --- | --- |
-| Format / lint | Passed on PR #37 |
-| Type check | Passed, 89 files |
-| Unit tests | 460 passed |
+| Format | Passed |
+| Lint | Passed |
+| Type check | Passed, 92 files |
+| Unit tests | 481 passed |
 | Integration tests | 8 passed |
-| Full suite | 468 passed |
+| Full suite | 489 passed |
 | Defect map | `validate-defect-map: OK` (77/77) |
 
 ## Quality assessment
@@ -180,7 +190,19 @@ The Markdown source remains authoritative.
 - stable normalized inventory identity and secret-free persisted payloads;
 - independently accepted on the PR #35 review base carried into merged PR #36.
 
-- [ ] `INPUT-004` — Introduce an administrator-managed MCP/tool registry and capability policy.
+- [~] `INPUT-004` — Introduce an administrator-managed MCP/tool registry and capability policy.
+
+POC partial evidence (independent acceptance still required — do not mark `[x]`):
+
+- versioned tool manifests under `tools/catalog/*.json` with capability,
+  risk, schemas, timeout/output limits, and credential-source declarations;
+- capability policy snapshot `tools/policies/poc_audit_v1.json`;
+- `ToolRegistry` fail-closed validation: invalid tools remain visible but are
+  not bound to the LLM (`src/auditor/tool_registry.py`);
+- SSH registered through the registry; WinRM/MCP remain transitional;
+- each `AuditPlan` / `AuditRun` pins `tool_catalog_hash` and
+  `capability_policy_hash`;
+- tests: `tests/test_tool_registry.py`.
 
 Current temporary extension paths:
 
@@ -213,11 +235,24 @@ agent chooses among these tools through `INPUT-004`; deterministic code enforces
 scope, authorization, read-only policy, timeouts, credential handling,
 sanitation, and provenance.
 
-- [ ] `TOOL-001` — Implement a registered SSH execution adapter.
+- [~] `TOOL-001` — Implement a registered SSH execution adapter.
 - [ ] `TOOL-002` — Implement a registered WinRM PowerShell adapter.
 - [ ] `TOOL-003` — Implement a registered HTTP/HTTPS request adapter.
 - [ ] `TOOL-004` — Implement a registered TCP connectivity adapter.
 - [ ] `TOOL-005` — Implement a registered SNMP GET/WALK adapter.
+
+`TOOL-001` POC partial evidence (do not mark `[x]` without independent acceptance):
+
+- manifests `tools/catalog/ssh_run.json` and `ssh_read_file.json`;
+- adapters `invoke_ssh_run` / `invoke_ssh_read_file` resolve target/credentials
+  only from the active inventory/run context (`effective_settings`);
+- normalized `ToolResult` with secret-free target + provenance;
+- strict command allow-list (no shell composition/interpreters); approved-path
+  gate for `ssh_read_file`; stdout/stderr secret scan/redaction;
+- fail-closed registry binding (no legacy SSH fallback); stale tool/policy hash
+  rejection on confirm/start/invoke; non-zero exit → `ToolResult.status=error`;
+- LangChain wrappers remain compatible with existing SSH audit behavior;
+- tests: `tests/test_tool_registry.py`.
 
 Common acceptance criteria:
 
@@ -317,9 +352,20 @@ Additional `INPUT-005` acceptance criteria:
 - [ ] `FLOW-005` — Add timeouts, retries, and backpressure.
 - [ ] `FLOW-006` — Implement correct resume and cancellation.
 - [~] `FLOW-007` — Remove the process-wide graph singleton.
-- [ ] `EVID-001` — Normalize tool output.
-- [ ] `EVID-002` — Enforce read-only behavior and safe invocation.
-- [ ] `EVID-003` — Preserve provenance for every evidence item.
+- [~] `EVID-001` — Normalize tool output.
+- [~] `EVID-002` — Enforce read-only behavior and safe invocation.
+- [~] `EVID-003` — Preserve provenance for every evidence item.
+
+POC partial evidence for `EVID-001`…`EVID-003` (SSH slice; do not mark `[x]`):
+
+- `ToolResult` schema (`src/auditor/domain/tool_result.py`) with status, output,
+  error, tool identity, target, timestamps, and provenance;
+- SSH read-only deny-list (`src/auditor/tools/ssh_policy.py`) plus timeout and
+  bounded output;
+- evidence sidecars write `tool_result.v1` with client/run/framework/requirement
+  provenance and catalog/policy hashes (`EvidenceStore.write_tool_result`);
+- credentials never appear in arguments/logs/evidence (redaction).
+
 - [ ] `EVID-004` — Replace fragile JSON parsing with structured output.
 - [ ] `EVID-005` — Introduce evidence sufficiency and confidence.
 - [ ] `EVID-006` — Protect immutable framework fields.
@@ -386,8 +432,14 @@ Additional `INPUT-005` acceptance criteria:
 ## Current blockers
 
 - `INPUT-002`: complete the two deferred production-hardening parser findings; `AGENT-001`: finish governed runtime integration.
-- `INPUT-004`: implement the unified tool registry, capability policy, and immutable per-run catalog snapshot.
-- `TOOL-001`…`TOOL-005`: extract protocol adapters from hardcoded discovery and add SSH, WinRM, HTTP, TCP, and SNMP tools.
+- `INPUT-004`: complete MCP registration under the unified registry, richer
+  capability policies, and independent acceptance of the catalog snapshot.
+- `TOOL-001`: independent acceptance of the registered SSH adapter; migrate
+  discovery collectors off the hardcoded path.
+- `TOOL-002`…`TOOL-005`: extract protocol adapters from hardcoded discovery and
+  add WinRM, HTTP, TCP, and SNMP tools.
+- `EVID-001`…`EVID-003`: extend normalized ToolResult + provenance beyond SSH
+  (WinRM/MCP) and complete independent acceptance.
 - `INPUT-005`: migrate to generic tool-driven discovery, complete YAML/JSON execution integration, and pass independent acceptance.
 - `FLOW-007`: remove deprecated process-wide graph getters after independent review.
 - `DOC-001`: synchronize architecture, tool, and evidence-layout documentation.
