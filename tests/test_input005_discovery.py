@@ -44,6 +44,7 @@ from auditor.inventory.preflight import (
 from auditor.inventory.service import (
     analyze_client_inventory,
     confirm_audit_plan,
+    plan_to_audit_request_payload,
     start_confirmed_audit,
 )
 
@@ -67,35 +68,50 @@ def _linux_transport(*, with_postgres: bool = False, port_only: bool = False) ->
         "hostname": CommandResult("hostname", 0, "db-01\n"),
         "cat /etc/os-release": CommandResult("cat /etc/os-release", 0, os_release),
         "uname -a": CommandResult("uname -a", 0, "Linux db-01 6.8.0 x86_64 GNU/Linux\n"),
-        "ss -lntup || netstat -lntup": CommandResult("ss", 0, ports),
+        "ss -lntup": CommandResult("ss", 0, ports),
+        "netstat -lntup": CommandResult("netstat", 1, ""),
         "systemctl list-units --type=service --state=running --no-pager": CommandResult(
             "systemctl",
+            0,
+            "UNIT LOAD ACTIVE SUB DESCRIPTION\nsshd.service loaded active running OpenSSH\n",
+        ),
+        "systemctl list-units --type=service --all --no-pager": CommandResult(
+            "systemctl all",
             0,
             "UNIT LOAD ACTIVE SUB DESCRIPTION\nsshd.service loaded active running OpenSSH\n",
         ),
         "command -v psql": CommandResult("command -v psql", 1, ""),
         "command -v postgres": CommandResult("command -v postgres", 1, ""),
         "ps -ef": CommandResult("ps -ef", 0, "root 1 0 0 00:00 ? 00:00:00 /sbin/init\n"),
-        "ps -ef | grep '[p]ostgres'": CommandResult("ps grep", 0, ""),
-        "systemctl list-units --type=service --all | grep -i postgres": CommandResult(
-            "systemctl grep", 0, ""
-        ),
-        "dpkg-query -W 2>/dev/null | grep -i postgres || rpm -qa 2>/dev/null | grep -i postgres": (
-            CommandResult("pkg", 0, "")
-        ),
+        "psql --version": CommandResult("psql --version", 1, ""),
+        "postgres --version": CommandResult("postgres --version", 1, ""),
+        "dpkg-query -W postgresql": CommandResult("dpkg", 1, ""),
+        "rpm -q postgresql": CommandResult("rpm", 1, ""),
     }
     if with_postgres:
-        responses["ps -ef | grep '[p]ostgres'"] = CommandResult(
-            "ps grep",
+        responses["ps -ef"] = CommandResult(
+            "ps -ef",
             0,
+            "root 1 0 0 00:00 ? 00:00:00 /sbin/init\n"
             "postgres 100 1 0 00:00 ? 00:00:01 /usr/lib/postgresql/16/bin/postgres\n",
         )
-        responses["systemctl list-units --type=service --all | grep -i postgres"] = CommandResult(
-            "systemctl grep",
+        responses["systemctl list-units --type=service --all --no-pager"] = CommandResult(
+            "systemctl all",
             0,
+            "UNIT LOAD ACTIVE SUB DESCRIPTION\n"
+            "sshd.service loaded active running OpenSSH\n"
+            "postgresql.service loaded active running PostgreSQL\n",
+        )
+        responses["systemctl list-units --type=service --state=running --no-pager"] = CommandResult(
+            "systemctl",
+            0,
+            "UNIT LOAD ACTIVE SUB DESCRIPTION\n"
+            "sshd.service loaded active running OpenSSH\n"
             "postgresql.service loaded active running PostgreSQL\n",
         )
         responses["command -v psql"] = CommandResult("command -v psql", 0, "/usr/bin/psql\n")
+        responses["psql --version"] = CommandResult("psql --version", 0, "psql (PostgreSQL) 16.2\n")
+        responses["dpkg-query -W postgresql"] = CommandResult("dpkg", 0, "postgresql\t16.2\n")
     return FakeShellTransport(responses=responses)
 
 
@@ -421,8 +437,13 @@ def test_partial_command_failure_preserves_facts(tmp_path: Path):
 """,
     )
     transport = _linux_transport()
-    transport.responses["ss -lntup || netstat -lntup"] = CommandResult(
+    transport.responses["ss -lntup"] = CommandResult(
         "ss",
+        error="command timeout",
+        error_code="command_timeout",
+    )
+    transport.responses["netstat -lntup"] = CommandResult(
+        "netstat",
         error="command timeout",
         error_code="command_timeout",
     )
@@ -938,3 +959,121 @@ def test_discovery_result_hash_ignores_volatile_output(tmp_path: Path):
     )
     assert rev1.discovery_result_hash == rev2.discovery_result_hash
     assert asdict(a)["collected_at"] != asdict(b)["collected_at"]
+
+
+def test_tool_driven_discovery_five_linux_hosts_postgres_on_two(tmp_path: Path):
+    """Acceptance: 5 Linux hosts, PG on 2, postgres_cis only for those 2."""
+    from auditor.inventory.tool_discovery import select_discovery_tools
+
+    root = tmp_path / "inventory"
+    client = root / "FiveLinux"
+    hosts_md = "\n".join(f"| host-{i:02d} | 10.0.5.{i} | SSH |" for i in range(1, 6))
+    creds_md = "\n".join(f"| SSH | 10.0.5.{i} | 22 | audit | {CANARY}{i} |" for i in range(1, 6))
+    _write_md(
+        client,
+        f"""# Inventory
+
+## In-scope hosts
+
+| Host | IP | Access |
+|---|---|---|
+{hosts_md}
+
+## Credentials & Access
+
+| Access | Host / URL | Port | Username | Password / Token |
+|---|---|---:|---|---|
+{creds_md}
+""",
+    )
+
+    tools = select_discovery_tools()
+    assert {t.id for t in tools} >= {"ssh_run"}
+    assert all(t.transport == "ssh" for t in tools)
+
+    def _factory(cred, settings):
+        host = str(cred.host)
+        with_pg = host.endswith(".2") or host.endswith(".4")
+        return _linux_transport(with_postgres=with_pg)
+
+    artifacts = tmp_path / "artifacts"
+    collector = SshDiscoveryCollector(
+        inventory_dir=root,
+        client_name="FiveLinux",
+        artifacts_root=artifacts,
+        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+        transport_factory=_factory,
+    )
+    audit_tool_calls: list[str] = []
+
+    with (
+        patch("auditor.inventory.collectors._tcp_reachable", return_value=True),
+        patch(
+            "auditor.workflows.tool_execution.execute_tool_calls",
+            side_effect=lambda *a, **k: audit_tool_calls.append("audit") or [],
+        ),
+    ):
+        inventory, plan = analyze_client_inventory(
+            root, "FiveLinux", agents_dir=AGENTS, discoverer=collector, artifacts_root=artifacts
+        )
+
+    assert plan.summary.total_hosts == 5
+    assert plan.summary.linux_hosts == 5
+    assert plan.summary.postgresql_instances == 2
+    assert plan.framework_hash.startswith("fw-")
+    assert plan.tool_catalog_hash.startswith("tool-")
+    assert plan.capability_policy_hash.startswith("pol-")
+    assert plan.discovery_result_hash
+    assert plan.inventory_content_hash
+    assert plan.status == "draft"
+
+    selected = [d for d in plan.framework_decisions if d.status == "selected"]
+    pg_selected = [d for d in selected if d.framework_id == "postgres_cis"]
+    assert len(pg_selected) == 2
+    assert {d.target_id for d in pg_selected} == {"host-02/postgresql", "host-04/postgresql"}
+    assert sum(1 for d in selected if d.framework_id == "ubuntu_cis_24_l2") == 5
+
+    # Plan lists all targets and selected frameworks for operator confirmation.
+    target_ids = {t.target_id for t in plan.targets}
+    assert "host-02/postgresql" in target_ids
+    assert "host-04/postgresql" in target_ids
+    assert not any(
+        t.target_id.startswith("host-01/") and "postgresql" in t.target_id for t in plan.targets
+    )
+    assert not any(
+        t.target_id.startswith("host-03/") and "postgresql" in t.target_id for t in plan.targets
+    )
+    assert not any(
+        t.target_id.startswith("host-05/") and "postgresql" in t.target_id for t in plan.targets
+    )
+
+    snapshots = list(artifacts.rglob("capability_snapshot.json"))
+    assert len(snapshots) == 5
+    pg_hosts = set()
+    for path in snapshots:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        snap = payload["snapshot"]
+        assert snap["os_family"] == "linux"
+        assert snap["ssh_access"] is True
+        assert "ssh_run" in snap["tool_ids"]
+        if snap["postgresql_present"]:
+            pg_hosts.add(snap["host_id"])
+            assert snap["postgresql_version"].startswith("16")
+    assert pg_hosts == {"host-02", "host-04"}
+
+    # No audit tools execute before plan confirmation.
+    assert audit_tool_calls == []
+    from auditor.inventory.plan import ensure_plan_confirmed
+
+    with pytest.raises(PlanConfirmationRejected):
+        ensure_plan_confirmed(plan)
+    with pytest.raises(PlanConfirmationRejected):
+        plan_to_audit_request_payload(
+            plan, inventory=inventory, client_id="five", client_slug="FiveLinux"
+        )
+
+    confirmed = confirm_audit_plan(plan, action="approve", inventory=inventory)
+    assert confirmed.status == "confirmed"
+    assert audit_tool_calls == []
+    # After confirmation the plan is executable, but this test never starts the run.
+    ensure_plan_confirmed(confirmed)

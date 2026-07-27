@@ -78,8 +78,11 @@ artifacts — only `secret_ref` / `has_secret`.
 ## Discovery workflow (INPUT-005)
 
 `inventory analyze` and `audit plan --refresh` use the production
-`CompositeDiscoveryCollector` by default (`SshDiscoveryCollector` +
-`WinrmDiscoveryCollector`).
+`CompositeDiscoveryCollector` by default. SSH discovery is **tool-driven**:
+`SshDiscoveryCollector` selects authorized tools from `ToolRegistry`
+(`ssh_run` / `ssh_read_file` in the POC) and executes allow-listed probes via
+`invoke_ssh_run`. WinRM discovery remains transitional
+(`WinrmDiscoveryCollector`).
 
 Disable discovery explicitly:
 
@@ -106,22 +109,31 @@ If effective discovery facts changed, the plan is rejected as `plan_stale`.
 
 ### SSH read-only commands (Linux/Unix)
 
+Allow-listed atomic probes (no shell composition). Executed only through the
+registered `ssh_run` adapter:
+
 ```text
 hostname
 cat /etc/os-release
 uname -a
-ss -lntup || netstat -lntup
+ss -lntup
+netstat -lntup
 systemctl list-units --type=service --state=running --no-pager
+systemctl list-units --type=service --all --no-pager
 command -v psql
 command -v postgres
 ps -ef
-ps -ef | grep '[p]ostgres'
-systemctl list-units --type=service --all | grep -i postgres
-dpkg-query -W | grep -i postgres || rpm -qa | grep -i postgres
+psql --version
+postgres --version
+dpkg-query -W postgresql
+rpm -q postgresql
 ```
 
 Never used: `sudo`, package install, config changes, service restarts, file
 modification, or destructive commands.
+
+Per-host results are persisted as `HostCapabilitySnapshot`
+(`capability_snapshot.json`) alongside sanitized discovery evidence.
 
 ### WinRM read-only commands (Windows)
 
@@ -139,8 +151,8 @@ Never modifies services, registry, firewall, local policies, or system config.
 ### Collected facts
 
 hostname, os_name, os_family, os_version, running_services, listening_ports,
-installed PostgreSQL packages, PostgreSQL processes/services, connection
-transport. Each discovered fact carries:
+installed PostgreSQL packages, PostgreSQL processes/services/version, SSH
+access, connection transport. Each discovered fact carries:
 
 `source=discovered`, `collector=ssh|winrm`, `confidence=high|medium|low`,
 `evidence_ref`, `collected_at`.

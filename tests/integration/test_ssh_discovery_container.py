@@ -41,20 +41,30 @@ def _command_output(command: str) -> str:
         return 'NAME="Ubuntu"\nPRETTY_NAME="Ubuntu 24.04 LTS"\nVERSION_ID="24.04"\n'
     if command.startswith("uname"):
         return "Linux ssh-integ-01 6.8.0 x86_64 GNU/Linux\n"
-    if "ss -lntup" in command or "netstat" in command:
+    if command in {"ss -lntup", "netstat -lntup"}:
         return "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\nLISTEN 0 128 0.0.0.0:5432 0.0.0.0:*\n"
     if "systemctl list-units --type=service --state=running" in command:
-        return "sshd.service loaded active running OpenSSH server\n"
+        return (
+            "sshd.service loaded active running OpenSSH server\n"
+            "postgresql.service loaded active running PostgreSQL Cluster\n"
+        )
+    if "systemctl list-units --type=service --all" in command:
+        return (
+            "sshd.service loaded active running OpenSSH server\n"
+            "postgresql.service loaded active running PostgreSQL Cluster\n"
+        )
     if command == "command -v psql":
         return "/usr/bin/psql\n"
     if command == "command -v postgres":
         return "/usr/lib/postgresql/16/bin/postgres\n"
-    if command == "ps -ef | grep '[p]ostgres'":
-        return "postgres 100 1 0 00:00 ? 00:00:01 postgres\n"
-    if "grep -i postgres" in command and "systemctl" in command:
-        return "postgresql.service loaded active running PostgreSQL Cluster\n"
-    if "dpkg-query" in command or "rpm -qa" in command:
-        return "postgresql-16\n"
+    if command == "psql --version":
+        return "psql (PostgreSQL) 16.2\n"
+    if command == "postgres --version":
+        return "postgres (PostgreSQL) 16.2\n"
+    if command == "dpkg-query -W postgresql":
+        return "postgresql\t16.2\n"
+    if command == "rpm -q postgresql":
+        return ""
     if command == "ps -ef":
         return (
             "root 1 0 0 00:00 ? 00:00:00 /sbin/init\npostgres 100 1 0 00:00 ? 00:00:01 postgres\n"

@@ -50,19 +50,25 @@ POC tool-registry vertical slice (this revision): `INPUT-004`, `TOOL-001`,
 validated `ToolRegistry` with capability policy, normalized `ToolResult`,
 strict allow-list policy, path restrictions, secret redaction, fail-closed
 binding, and provenance-bearing evidence. Independent-review hardening landed
-in this PR (no legacy SSH fallback; stale tool/policy hash rejection; duplicate
-IDs non-executable; non-zero SSH exit → error). WinRM/HTTP/TCP/SNMP adapters
-(`TOOL-002`…`TOOL-005`) remain open. Do not mark `[x]` without independent
-acceptance.
+in PR #39 (no legacy SSH fallback; stale tool/policy hash rejection; duplicate
+IDs non-executable; non-zero SSH exit → error).
+
+Tool-driven discovery POC (this revision): `INPUT-005` remains `[~]`. SSH
+discovery now selects registered tools via `ToolRegistry`, executes
+allow-listed probes through `ssh_run`, persists `HostCapabilitySnapshot`, and
+pins inventory / discovery / framework / tool-catalog / policy hashes on the
+deterministic `AuditPlan`. Operator confirmation is still required before audit
+execution. WinRM/HTTP/TCP/SNMP adapters (`TOOL-002`…`TOOL-005`) remain open.
+Do not mark `[x]` without independent acceptance.
 
 | Check | Verified result |
 | --- | --- |
 | Format | Passed |
 | Lint | Passed |
-| Type check | Passed, 92 files |
-| Unit tests | 481 passed |
+| Type check | Passed, 94 files |
+| Unit tests | 482 passed |
 | Integration tests | 8 passed |
-| Full suite | 489 passed |
+| Full suite | 490 passed |
 | Defect map | `validate-defect-map: OK` (77/77) |
 
 ## Quality assessment
@@ -251,8 +257,10 @@ sanitation, and provenance.
   gate for `ssh_read_file`; stdout/stderr secret scan/redaction;
 - fail-closed registry binding (no legacy SSH fallback); stale tool/policy hash
   rejection on confirm/start/invoke; non-zero exit → `ToolResult.status=error`;
+- SSH discovery collectors invoke adapters only through the registry
+  (`RegistrySshTransport` / `invoke_ssh_run`);
 - LangChain wrappers remain compatible with existing SSH audit behavior;
-- tests: `tests/test_tool_registry.py`.
+- tests: `tests/test_tool_registry.py`, `tests/test_input005_discovery.py`.
 
 Common acceptance criteria:
 
@@ -288,16 +296,19 @@ unregistered transport, bypass policy, or execute hidden arbitrary code.
   discovery/effective-facts hashes diverge;
 - `CREDENTIALS.md` / `credentials.md` / `connection.md` runtime credential
   resolution + secret redaction; `needs_discovery` for IP/port-only hosts;
-- transitional `SshDiscoveryCollector` / `WinrmDiscoveryCollector` /
-  `CompositeDiscoveryCollector` implementation landed in PR #36; these collectors
-  are not the target extensibility boundary and must be migrated to registered
-  `TOOL-001` / `TOOL-002` adapters plus a generic discovery workflow;
-- current SSH/WinRM discovery commands are read-oriented and PostgreSQL is
-  confirmed only with strong evidence, but final invocation policy belongs to
-  `INPUT-004`, `EVID-002`, and the protocol tool tasks;
+- **tool-driven SSH discovery POC**: `SshDiscoveryCollector` selects authorized
+  tools via `ToolRegistry` (`select_discovery_tools` / `ssh_run` only in this
+  PR), executes allow-listed atomic probes through `invoke_ssh_run`, and
+  persists per-host `HostCapabilitySnapshot` (OS/version, SSH access, running
+  services, listening ports, PostgreSQL presence/version);
+- WinRM remains transitional (`WinrmDiscoveryCollector`); HTTP/TCP/SNMP not added;
+- current SSH discovery commands are read-oriented and PostgreSQL is
+  confirmed only with strong evidence;
 - typed discovery errors, per-host timeout/retry, one-host failure isolation;
 - sanitized discovery evidence under `artifacts/<slug>/preflight/…` with
   secret scanning; deterministic preflight revisions;
+- plan pins inventory, discovery/effective-facts, `framework_hash`,
+  `tool_catalog_hash`, and `capability_policy_hash`;
 - CLI sync `start_confirmed_audit` / API `await astart_confirmed_audit` →
   `AuditRequest` → `arun_request` (confirmed start does not silently re-run
   discovery; `--refresh-discovery` optional);
@@ -440,7 +451,8 @@ POC partial evidence for `EVID-001`…`EVID-003` (SSH slice; do not mark `[x]`):
   add WinRM, HTTP, TCP, and SNMP tools.
 - `EVID-001`…`EVID-003`: extend normalized ToolResult + provenance beyond SSH
   (WinRM/MCP) and complete independent acceptance.
-- `INPUT-005`: migrate to generic tool-driven discovery, complete YAML/JSON execution integration, and pass independent acceptance.
+- `INPUT-005`: complete YAML/JSON execution integration, extend tool-driven
+  discovery beyond SSH, and pass independent acceptance.
 - `FLOW-007`: remove deprecated process-wide graph getters after independent review.
 - `DOC-001`: synchronize architecture, tool, and evidence-layout documentation.
 - `CI-001`: complete workflow/report/review E2E and migration coverage.

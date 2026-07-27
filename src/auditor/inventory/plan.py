@@ -6,6 +6,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from auditor.domain.audit_plan import (
     AuditPlan,
@@ -34,6 +35,19 @@ def _tool_snapshot_hashes() -> dict[str, str]:
         return get_tool_registry().snapshot_hashes()
     except Exception:  # noqa: BLE001 — plan generation must not fail closed on tools
         return {"tool_catalog_hash": "", "capability_policy_hash": ""}
+
+
+def _framework_selection_hash(decisions: list[Any] | tuple[Any, ...]) -> str:
+    """Deterministic hash of selected framework identities on the plan."""
+    rows = sorted(
+        f"{getattr(d, 'framework_id', '')}@"
+        f"{getattr(d, 'framework_version', '')}:"
+        f"{getattr(d, 'target_id', '')}"
+        for d in decisions
+        if getattr(d, "status", "") == "selected"
+    )
+    digest = hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"fw-{digest[:12]}"
 
 
 def generate_audit_plan(
@@ -180,6 +194,7 @@ def generate_audit_plan(
         discovery_result_hash=discovery_result_hash,
         effective_facts_hash=effective_facts_hash,
         preflight_revision_id=preflight_revision_id,
+        framework_hash=_framework_selection_hash(decisions),
         **_tool_snapshot_hashes(),
         status="draft",
         targets=tuple(targets),

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-COLLECTOR_VERSION = "1.0.0"
+COLLECTOR_VERSION = "1.1.0"
 
 # Defense-in-depth patterns — never persist secrets or secret references.
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
