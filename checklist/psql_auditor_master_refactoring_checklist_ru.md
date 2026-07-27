@@ -228,23 +228,15 @@ secret-safe invocation, неизменяемый snapshot каталога на 
 создать незарегистрированный transport, обойти policy или выполнить скрытый код.
 
 Частичные доказательства `INPUT-005`: типизированный `AuditPlan` с обязательным
-подтверждением; stale-plan при расхождении inventory **или** discovery/effective
-facts; runtime-резолв `CREDENTIALS.md` / `credentials.md` / `connection.md` без
+подтверждением; stale-plan (`audit_plan_stale`) при расхождении inventory /
+discovery / framework / tool / policy; runtime-резолв credentials без
 персистенции секретов; **tool-driven SSH discovery POC** —
-`SshDiscoveryCollector` выбирает authorized tools через `ToolRegistry`
-(`ssh_run` / `ssh_read_file` в этом PR), выполняет allow-listed atomic probes
-через `invoke_ssh_run`, сохраняет `HostCapabilitySnapshot` (OS/version, SSH
-access, running services, listening ports, PostgreSQL presence/version);
-WinRM остаётся transitional; HTTP/TCP/SNMP не добавлены; PostgreSQL только по
-сильным признакам (порт 5432 сам по себе не выбирает `postgres_cis`);
-типизированные ошибки discovery, timeout/retry, изоляция сбоя одного хоста;
-санитизированные evidence + детерминированные preflight-ревизии; план
-фиксирует inventory, discovery/effective-facts, `framework_hash`,
-`tool_catalog_hash`, `capability_policy_hash`; `audit start --confirm` не
-перезапускает discovery молча (`--refresh-discovery` опционально); docs
-`docs/inventory-driven-audit.md` + RU manual; тесты
-`tests/test_input005_discovery.py`,
-`tests/integration/test_ssh_discovery_container.py`.
+`SshDiscoveryCollector` через `ToolRegistry`/`ssh_run`; `HostCapabilitySnapshot`
+v1; статусы технологий confirmed/suspected/absent/unknown/unsupported;
+решения фреймворков selected/not_applicable/requires_operator_decision/
+unsupported/blocked; Cisco network_device → unsupported + `cisco.cli.read`;
+discovery не стартует при validation errors; PostgreSQL только по сильным
+признакам; jobs только после confirmation; docs/tests обновлены.
 Независимая приёмка обязательна — не помечать `[x]` автоматически.
 
 Дополнительные критерии `INPUT-005`:
