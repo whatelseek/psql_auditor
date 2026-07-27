@@ -319,6 +319,18 @@ unregistered transport, bypass policy, or execute hidden arbitrary code.
 - plan pins inventory, discovery/effective-facts, `framework_hash`,
   `tool_catalog_hash`, and `capability_policy_hash`; stale confirm/start →
   `audit_plan_stale`;
+- immutable `plan_revision_id` derived from inventory version/hash, preflight
+  revision, discovery/effective facts, framework, tool catalog, and capability
+  policy hashes;
+- effective (reconciled) inventory is persisted and reloaded for confirm/start
+  validation (not the raw source-only inventory);
+- client-level frameworks expand to explicit per-host plan targets so plan
+  identity matches AuditJob fan-out;
+- SSH discovery no longer uses a direct `_tcp_reachable` probe — the registered
+  SSH adapter classifies connection failures;
+- `HostCapabilitySnapshot.technologies` come from the same
+  `detect_technologies` path used for framework selection (port-only →
+  suspected; unsupported Cisco snapshots persisted);
 - CLI sync `start_confirmed_audit` / API `await astart_confirmed_audit` →
   `AuditRequest` → `arun_request` (confirmed start does not silently re-run
   discovery; `--refresh-discovery` optional); no assessment jobs before confirm;

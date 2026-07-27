@@ -13,7 +13,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from auditor.domain.host_capability import HostCapabilitySnapshot
 from auditor.inventory.discovery_evidence import assert_no_secrets, utc_now
@@ -269,12 +269,17 @@ def build_host_capability_snapshot(
     technologies: list[SnapshotTechnology] = []
     if postgresql_present or postgresql_status:
         status = postgresql_status or ("confirmed" if postgresql_present else "absent")
+        evidence = ["discovery"]
+        if status == "suspected":
+            evidence = ["port=5432"]
+        elif status == "absent":
+            evidence = ["no_postgresql_signal"]
         technologies.append(
             SnapshotTechnology(
                 technology_id="postgresql",
                 status=status,
                 version=postgresql_version,
-                evidence=["discovery"],
+                evidence=evidence,
             )
         )
     elif os_family and not error_code:
@@ -365,3 +370,157 @@ def persist_host_capability_snapshot(
     assert_no_secrets(text, known_secrets=known_secrets or [])
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def technologies_from_detections(
+    detections: list[Any],
+    host_id: str,
+) -> list[Any]:
+    """Map deterministic TechnologyDetection rows for one host into snapshot techs."""
+    from auditor.domain.host_capability import SnapshotTechnology
+
+    techs: list[SnapshotTechnology] = []
+    for det in detections:
+        target = getattr(det, "target_id", "") or ""
+        if target != host_id and not target.startswith(f"{host_id}/"):
+            continue
+        techs.append(
+            SnapshotTechnology(
+                technology_id=str(getattr(det, "technology_id", "")),
+                status=str(getattr(det, "status", "unknown")),
+                version="",
+                evidence=list(getattr(det, "evidence", ()) or ()),
+            )
+        )
+    return techs
+
+
+def sync_capability_snapshots_from_detections(
+    inventory: Any,
+    detections: list[Any],
+    *,
+    artifacts_root: Path | str,
+) -> list[Path]:
+    """Rewrite HostCapabilitySnapshot.technologies from detect_technologies output.
+
+    Ensures snapshot technology statuses match framework-selection evidence
+    (port-only → suspected, strong evidence → confirmed, none → absent).
+    """
+    from auditor.domain.host_capability import (
+        SnapshotAccessMethod,
+        SnapshotOsInfo,
+        SnapshotTechnology,
+    )
+    from auditor.domain.inventory import ClientInventory
+
+    if not isinstance(inventory, ClientInventory):
+        return []
+
+    root = Path(artifacts_root)
+    written: list[Path] = []
+    version_id = inventory.version.version_id
+    for host in inventory.hosts:
+        snap_path = root / inventory.client_id / "preflight" / version_id / host.host_id
+        snap_path.mkdir(parents=True, exist_ok=True)
+        path = snap_path / "capability_snapshot.json"
+        techs = technologies_from_detections(detections, host.host_id)
+
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                data = {}
+            snapshot = HostCapabilitySnapshot(
+                schema=str(data.get("schema") or "host_capability_snapshot.v1"),
+                client_id=str(data.get("client_id") or inventory.client_id),
+                host_id=host.host_id,
+                inventory_version_id=str(data.get("inventory_version_id") or version_id),
+                asset_type=str(data.get("asset_type") or host.asset_type or "server"),
+                platform=str(data.get("platform") or host.os_family or host.vendor or ""),
+                os=SnapshotOsInfo(
+                    family=str((data.get("os") or {}).get("family") or host.os_family or ""),
+                    distribution=str((data.get("os") or {}).get("distribution") or ""),
+                    version=str((data.get("os") or {}).get("version") or ""),
+                ),
+                access={
+                    name: SnapshotAccessMethod(
+                        available=bool((method or {}).get("available")),
+                        status=str((method or {}).get("status") or "unavailable"),
+                    )
+                    for name, method in (data.get("access") or {}).items()
+                },
+                technologies=techs,
+                listening_ports=list(data.get("listening_ports") or []),
+                running_services=list(data.get("running_services") or []),
+                tool_catalog_hash=str(data.get("tool_catalog_hash") or ""),
+                capability_policy_hash=str(data.get("capability_policy_hash") or ""),
+                evidence_refs=list(data.get("evidence_refs") or []),
+                tool_ids=tuple(data.get("tool_ids") or ()),
+                collector=str(data.get("collector") or ""),
+                confidence=str(data.get("confidence") or "low"),
+                collected_at=str(data.get("collected_at") or utc_now()),
+                limitations=list(data.get("limitations") or []),
+                error=str(data.get("error") or ""),
+                error_code=str(data.get("error_code") or ""),
+                os_name=str(data.get("os_name") or host.os_name or ""),
+                os_family=str(data.get("os_family") or host.os_family or ""),
+                os_version=str(data.get("os_version") or ""),
+                ssh_access=bool(data.get("ssh_access")),
+                postgresql_present=any(
+                    isinstance(t, SnapshotTechnology)
+                    and t.technology_id == "postgresql"
+                    and t.status == "confirmed"
+                    for t in techs
+                ),
+                transport=str(data.get("transport") or ""),
+            )
+        else:
+            vendor = (host.vendor or "").lower()
+            snapshot = HostCapabilitySnapshot(
+                client_id=inventory.client_id,
+                host_id=host.host_id,
+                inventory_version_id=version_id,
+                asset_type=host.asset_type or "server",
+                platform=host.os_family or host.vendor or "",
+                os=SnapshotOsInfo(family=host.os_family or ""),
+                access={
+                    "ssh": SnapshotAccessMethod(
+                        available=False,
+                        status="unavailable",
+                    )
+                },
+                technologies=techs,
+                collector="unsupported" if host.is_unsupported_network_device else "inventory",
+                confidence="low" if host.is_unsupported_network_device else "medium",
+                collected_at=utc_now(),
+                limitations=(
+                    [f"missing:{vendor or 'cisco'}.cli.read"]
+                    if host.is_unsupported_network_device
+                    else []
+                ),
+                error=(
+                    f"unsupported asset_type={host.asset_type or 'network_device'} "
+                    f"vendor={host.vendor or 'unknown'}"
+                    if host.is_unsupported_network_device
+                    else ""
+                ),
+                error_code="unsupported_transport" if host.is_unsupported_network_device else "",
+                os_name=host.os_name,
+                os_family=host.os_family,
+            )
+            try:
+                hashes = get_tool_registry().snapshot_hashes()
+                snapshot.tool_catalog_hash = hashes.get("tool_catalog_hash", "")
+                snapshot.capability_policy_hash = hashes.get("capability_policy_hash", "")
+            except Exception:  # noqa: BLE001
+                pass
+
+        written.append(
+            persist_host_capability_snapshot(
+                snapshot,
+                artifacts_root=root,
+                client_slug=inventory.client_id,
+                inventory_version_id=version_id,
+            )
+        )
+    return written

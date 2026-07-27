@@ -229,14 +229,16 @@ secret-safe invocation, неизменяемый snapshot каталога на 
 
 Частичные доказательства `INPUT-005`: типизированный `AuditPlan` с обязательным
 подтверждением; stale-plan (`audit_plan_stale`) при расхождении inventory /
-discovery / framework / tool / policy; runtime-резолв credentials без
-персистенции секретов; **tool-driven SSH discovery POC** —
-`SshDiscoveryCollector` через `ToolRegistry`/`ssh_run`; `HostCapabilitySnapshot`
-v1; статусы технологий confirmed/suspected/absent/unknown/unsupported;
-решения фреймворков selected/not_applicable/requires_operator_decision/
-unsupported/blocked; Cisco network_device → unsupported + `cisco.cli.read`;
-discovery не стартует при validation errors; PostgreSQL только по сильным
-признакам; jobs только после confirmation; docs/tests обновлены.
+discovery / framework / tool / policy; immutable `plan_revision_id`;
+персистенция и reload effective inventory для confirm/start; runtime-резолв
+credentials без персистенции секретов; **tool-driven SSH discovery POC** —
+`SshDiscoveryCollector` через `ToolRegistry`/`ssh_run` без `_tcp_reachable`;
+`HostCapabilitySnapshot` v1 с technologies из `detect_technologies`
+(port-only → suspected; Cisco unsupported snapshot); статусы технологий
+confirmed/suspected/absent/unknown/unsupported; решения фреймворков
+selected/not_applicable/requires_operator_decision/unsupported/blocked;
+client-level frameworks → явные per-host targets; discovery не стартует при
+validation errors; jobs только после confirmation; docs/tests обновлены.
 Независимая приёмка обязательна — не помечать `[x]` автоматически.
 
 Дополнительные критерии `INPUT-005`:

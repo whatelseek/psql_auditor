@@ -168,10 +168,9 @@ def test_ssh_host_without_declared_os_detected_as_linux(tmp_path: Path):
         defaults=DiscoveryHostSettings(connection_timeout=0.05, command_timeout=1, retry_count=0),
         transport_factory=lambda cred, settings: transport,
     )
-    with patch("auditor.inventory.collectors._tcp_reachable", return_value=True):
-        inventory, plan = analyze_client_inventory(
-            root, "DiscOs", agents_dir=AGENTS, discoverer=collector
-        )
+    inventory, plan = analyze_client_inventory(
+        root, "DiscOs", agents_dir=AGENTS, discoverer=collector
+    )
     assert inventory.hosts[0].os_family == "linux"
     selected = {d.framework_id for d in plan.framework_decisions if d.status == "selected"}
     assert "ubuntu_cis_24_l2" in selected
@@ -206,10 +205,9 @@ def test_ssh_postgres_process_selects_postgres_cis(tmp_path: Path):
         defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
         transport_factory=lambda cred, settings: _linux_transport(with_postgres=True),
     )
-    with patch("auditor.inventory.collectors._tcp_reachable", return_value=True):
-        inventory, plan = analyze_client_inventory(
-            root, "DiscPg", agents_dir=AGENTS, discoverer=collector
-        )
+    inventory, plan = analyze_client_inventory(
+        root, "DiscPg", agents_dir=AGENTS, discoverer=collector
+    )
     assert any(s.name == "postgresql" for s in inventory.hosts[0].services)
     selected = {d.framework_id for d in plan.framework_decisions if d.status == "selected"}
     assert "postgres_cis" in selected
@@ -238,18 +236,34 @@ def test_port_5432_alone_does_not_select_postgres_cis(tmp_path: Path):
     collector = SshDiscoveryCollector(
         inventory_dir=root,
         client_name="PortOnly",
+        artifacts_root=tmp_path / "artifacts",
         defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
         transport_factory=lambda cred, settings: _linux_transport(port_only=True),
     )
-    with patch("auditor.inventory.collectors._tcp_reachable", return_value=True):
-        _inventory, plan = analyze_client_inventory(
-            root, "PortOnly", agents_dir=AGENTS, discoverer=collector
-        )
+    inventory, plan = analyze_client_inventory(
+        root,
+        "PortOnly",
+        agents_dir=AGENTS,
+        discoverer=collector,
+        artifacts_root=tmp_path / "artifacts",
+    )
     pg = [d for d in plan.framework_decisions if "postgres" in d.framework_id]
     assert pg and all(d.status == "requires_operator_decision" for d in pg)
     assert not postgres_confirmed(
         processes=[], services=[], packages=[], binaries=[], listening_ports=[5432]
     )
+    pg_dets = [
+        d
+        for d in plan.technology_detections
+        if d.technology_id == "postgresql" and d.target_id.startswith("host-01")
+    ]
+    assert pg_dets and all(d.status == "suspected" for d in pg_dets)
+    snaps = list((tmp_path / "artifacts").rglob("capability_snapshot.json"))
+    assert snaps
+    snap = json.loads(snaps[0].read_text(encoding="utf-8"))
+    pg_techs = [t for t in snap.get("technologies") or [] if t["technology_id"] == "postgresql"]
+    assert pg_techs and all(t["status"] == "suspected" for t in pg_techs)
+    assert inventory.hosts[0].os_family == "linux"
 
 
 def test_winrm_host_detected_as_windows_server(tmp_path: Path):
@@ -367,10 +381,9 @@ def test_auth_failure_on_one_host_does_not_stop_others(tmp_path: Path):
         defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
         ssh_transport_factory=factory,
     )
-    with patch("auditor.inventory.collectors._tcp_reachable", return_value=True):
-        inventory, plan = analyze_client_inventory(
-            root, "Multi", agents_dir=AGENTS, discoverer=collector
-        )
+    inventory, plan = analyze_client_inventory(
+        root, "Multi", agents_dir=AGENTS, discoverer=collector
+    )
     by_id = {h.host_id: h for h in inventory.hosts}
     assert by_id["host-02"].os_family == "linux"
     assert any(
@@ -408,10 +421,9 @@ def test_connection_timeout_stored_as_typed_issue(tmp_path: Path):
             connect_error=DiscoveryTransportError("timed out", code="connection_timeout")
         ),
     )
-    with patch("auditor.inventory.collectors._tcp_reachable", return_value=True):
-        inventory, _plan = analyze_client_inventory(
-            root, "Timeout", agents_dir=AGENTS, discoverer=collector
-        )
+    inventory, _plan = analyze_client_inventory(
+        root, "Timeout", agents_dir=AGENTS, discoverer=collector
+    )
     assert any(i.code == "connection_timeout" for i in inventory.issues)
     assert len(inventory.hosts) == 1
 
@@ -453,10 +465,9 @@ def test_partial_command_failure_preserves_facts(tmp_path: Path):
         defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
         transport_factory=lambda cred, settings: transport,
     )
-    with patch("auditor.inventory.collectors._tcp_reachable", return_value=True):
-        inventory, plan = analyze_client_inventory(
-            root, "Partial", agents_dir=AGENTS, discoverer=collector
-        )
+    inventory, plan = analyze_client_inventory(
+        root, "Partial", agents_dir=AGENTS, discoverer=collector
+    )
     assert inventory.hosts[0].os_family == "linux"
     assert any(i.code == "partial_discovery" for i in inventory.issues)
     selected = {d.framework_id for d in plan.framework_decisions if d.status == "selected"}
@@ -503,10 +514,9 @@ def test_credentials_absent_from_dumps_and_evidence(tmp_path: Path):
         defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
         transport_factory=lambda cred, settings: transport,
     )
-    with patch("auditor.inventory.collectors._tcp_reachable", return_value=True):
-        inventory, plan = analyze_client_inventory(
-            root, "Secrets", agents_dir=AGENTS, discoverer=collector
-        )
+    inventory, plan = analyze_client_inventory(
+        root, "Secrets", agents_dir=AGENTS, discoverer=collector
+    )
     blob = json.dumps(inventory.model_dump()) + json.dumps(plan.model_dump())
     assert CANARY not in blob
     assert SECRET_REF not in blob or SECRET_REF not in json.dumps(plan.model_dump())
@@ -614,23 +624,18 @@ def test_repeated_analysis_deterministic(tmp_path: Path):
         defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
         transport_factory=factory,
     )
-    with patch("auditor.inventory.collectors._tcp_reachable", return_value=True):
-        with patch(
-            "auditor.inventory.discovery_evidence.utc_now", return_value="2026-01-01T00:00:00Z"
-        ):
-            with patch(
-                "auditor.inventory.collectors.utc_now", return_value="2026-01-01T00:00:00Z"
-            ):
-                with patch("auditor.inventory.plan._utc_now", return_value="2026-01-01T00:00:00Z"):
-                    with patch(
-                        "auditor.inventory.preflight._utc_now", return_value="2026-01-01T00:00:00Z"
-                    ):
-                        inv1, plan1 = analyze_client_inventory(
-                            root, "Det", agents_dir=AGENTS, discoverer=c1
-                        )
-                        inv2, plan2 = analyze_client_inventory(
-                            root, "Det", agents_dir=AGENTS, discoverer=c2
-                        )
+    with patch("auditor.inventory.discovery_evidence.utc_now", return_value="2026-01-01T00:00:00Z"):
+        with patch("auditor.inventory.collectors.utc_now", return_value="2026-01-01T00:00:00Z"):
+            with patch("auditor.inventory.plan._utc_now", return_value="2026-01-01T00:00:00Z"):
+                with patch(
+                    "auditor.inventory.preflight._utc_now", return_value="2026-01-01T00:00:00Z"
+                ):
+                    inv1, plan1 = analyze_client_inventory(
+                        root, "Det", agents_dir=AGENTS, discoverer=c1
+                    )
+                    inv2, plan2 = analyze_client_inventory(
+                        root, "Det", agents_dir=AGENTS, discoverer=c2
+                    )
     assert plan1.discovery_result_hash == plan2.discovery_result_hash
     assert plan1.effective_facts_hash == plan2.effective_facts_hash
     assert plan1.preflight_revision_id == plan2.preflight_revision_id
@@ -657,43 +662,41 @@ def test_changed_discovery_creates_new_preflight_revision(tmp_path: Path):
 | SSH | 10.0.0.94 | 22 | audit | {CANARY} |
 """,
     )
-    with patch("auditor.inventory.collectors._tcp_reachable", return_value=True):
-        with patch(
-            "auditor.inventory.discovery_evidence.utc_now", return_value="2026-01-01T00:00:00Z"
-        ):
-            with patch("auditor.inventory.plan._utc_now", return_value="2026-01-01T00:00:00Z"):
-                with patch(
-                    "auditor.inventory.preflight._utc_now", return_value="2026-01-01T00:00:00Z"
-                ):
-                    artifacts = tmp_path / "artifacts"
-                    _i1, plan1 = analyze_client_inventory(
-                        root,
-                        "Rev",
-                        agents_dir=AGENTS,
+    with patch("auditor.inventory.discovery_evidence.utc_now", return_value="2026-01-01T00:00:00Z"):
+        with patch("auditor.inventory.plan._utc_now", return_value="2026-01-01T00:00:00Z"):
+            with patch("auditor.inventory.preflight._utc_now", return_value="2026-01-01T00:00:00Z"):
+                artifacts = tmp_path / "artifacts"
+                _i1, plan1 = analyze_client_inventory(
+                    root,
+                    "Rev",
+                    agents_dir=AGENTS,
+                    artifacts_root=artifacts,
+                    discoverer=SshDiscoveryCollector(
+                        inventory_dir=root,
+                        client_name="Rev",
                         artifacts_root=artifacts,
-                        discoverer=SshDiscoveryCollector(
-                            inventory_dir=root,
-                            client_name="Rev",
-                            artifacts_root=artifacts,
-                            defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
-                            transport_factory=lambda c, s: _linux_transport(),
-                        ),
-                    )
-                    _i2, plan2 = analyze_client_inventory(
-                        root,
-                        "Rev",
-                        agents_dir=AGENTS,
+                        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+                        transport_factory=lambda c, s: _linux_transport(),
+                    ),
+                )
+                _i2, plan2 = analyze_client_inventory(
+                    root,
+                    "Rev",
+                    agents_dir=AGENTS,
+                    artifacts_root=artifacts,
+                    discoverer=SshDiscoveryCollector(
+                        inventory_dir=root,
+                        client_name="Rev",
                         artifacts_root=artifacts,
-                        discoverer=SshDiscoveryCollector(
-                            inventory_dir=root,
-                            client_name="Rev",
-                            artifacts_root=artifacts,
-                            defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
-                            transport_factory=lambda c, s: _linux_transport(with_postgres=True),
-                        ),
-                    )
+                        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+                        transport_factory=lambda c, s: _linux_transport(with_postgres=True),
+                    ),
+                )
     assert plan1.effective_facts_hash != plan2.effective_facts_hash
     assert plan1.preflight_revision_id != plan2.preflight_revision_id
+    assert plan1.plan_revision_id != plan2.plan_revision_id
+    assert plan1.plan_revision_id.startswith("prev-")
+    assert plan2.plan_revision_id.startswith("prev-")
     latest = load_latest_preflight(tmp_path / "artifacts", "Rev")
     assert latest is not None, list((tmp_path / "artifacts").rglob("*"))
     assert latest.effective_facts_hash == plan2.effective_facts_hash
@@ -845,48 +848,43 @@ def test_discovery_change_after_confirmation_makes_plan_stale(tmp_path: Path):
         hitl_enabled=False,
         archive_enabled=False,
     )
-    with patch("auditor.inventory.collectors._tcp_reachable", return_value=True):
-        with patch(
-            "auditor.inventory.discovery_evidence.utc_now", return_value="2026-01-01T00:00:00Z"
-        ):
-            with patch("auditor.inventory.plan._utc_now", return_value="2026-01-01T00:00:00Z"):
-                with patch(
-                    "auditor.inventory.preflight._utc_now", return_value="2026-01-01T00:00:00Z"
-                ):
-                    inventory, plan = analyze_client_inventory(
-                        root,
-                        "StaleDisc",
-                        agents_dir=AGENTS,
-                        artifacts_root=evidence,
-                        discoverer=SshDiscoveryCollector(
-                            inventory_dir=root,
-                            client_name="StaleDisc",
-                            artifacts_root=evidence,
-                            defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
-                            transport_factory=lambda c, s: _linux_transport(),
-                        ),
-                    )
-                    plan = confirm_audit_plan(
-                        plan,
-                        action="approve",
-                        inventory=inventory,
+    with patch("auditor.inventory.discovery_evidence.utc_now", return_value="2026-01-01T00:00:00Z"):
+        with patch("auditor.inventory.plan._utc_now", return_value="2026-01-01T00:00:00Z"):
+            with patch("auditor.inventory.preflight._utc_now", return_value="2026-01-01T00:00:00Z"):
+                inventory, plan = analyze_client_inventory(
+                    root,
+                    "StaleDisc",
+                    agents_dir=AGENTS,
+                    artifacts_root=evidence,
+                    discoverer=SshDiscoveryCollector(
                         inventory_dir=root,
                         client_name="StaleDisc",
-                    )
-                    # Simulate a later analyze that changes effective facts.
-                    analyze_client_inventory(
-                        root,
-                        "StaleDisc",
-                        agents_dir=AGENTS,
                         artifacts_root=evidence,
-                        discoverer=SshDiscoveryCollector(
-                            inventory_dir=root,
-                            client_name="StaleDisc",
-                            artifacts_root=evidence,
-                            defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
-                            transport_factory=lambda c, s: _linux_transport(with_postgres=True),
-                        ),
-                    )
+                        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+                        transport_factory=lambda c, s: _linux_transport(),
+                    ),
+                )
+                plan = confirm_audit_plan(
+                    plan,
+                    action="approve",
+                    inventory=inventory,
+                    inventory_dir=root,
+                    client_name="StaleDisc",
+                )
+                # Simulate a later analyze that changes effective facts.
+                analyze_client_inventory(
+                    root,
+                    "StaleDisc",
+                    agents_dir=AGENTS,
+                    artifacts_root=evidence,
+                    discoverer=SshDiscoveryCollector(
+                        inventory_dir=root,
+                        client_name="StaleDisc",
+                        artifacts_root=evidence,
+                        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+                        transport_factory=lambda c, s: _linux_transport(with_postgres=True),
+                    ),
+                )
 
     async def _executor(request):
         return {"audit_run_id": "should-not", "audit_run_status": "running"}
@@ -1009,12 +1007,9 @@ def test_tool_driven_discovery_five_linux_hosts_postgres_on_two(tmp_path: Path):
     )
     audit_tool_calls: list[str] = []
 
-    with (
-        patch("auditor.inventory.collectors._tcp_reachable", return_value=True),
-        patch(
-            "auditor.workflows.tool_execution.execute_tool_calls",
-            side_effect=lambda *a, **k: audit_tool_calls.append("audit") or [],
-        ),
+    with patch(
+        "auditor.workflows.tool_execution.execute_tool_calls",
+        side_effect=lambda *a, **k: audit_tool_calls.append("audit") or [],
     ):
         inventory, plan = analyze_client_inventory(
             root, "FiveLinux", agents_dir=AGENTS, discoverer=collector, artifacts_root=artifacts
@@ -1126,14 +1121,13 @@ def test_acceptance_five_linux_two_postgres_one_cisco_unsupported(tmp_path: Path
         transport_factory=_factory,
     )
 
-    with patch("auditor.inventory.collectors._tcp_reachable", return_value=True):
-        inventory, plan = analyze_client_inventory(
-            root,
-            "Accept005",
-            agents_dir=AGENTS,
-            discoverer=collector,
-            artifacts_root=artifacts,
-        )
+    inventory, plan = analyze_client_inventory(
+        root,
+        "Accept005",
+        agents_dir=AGENTS,
+        discoverer=collector,
+        artifacts_root=artifacts,
+    )
 
     assert plan.status == "draft"
     assert plan.summary.linux_hosts == 5
@@ -1145,6 +1139,19 @@ def test_acceptance_five_linux_two_postgres_one_cisco_unsupported(tmp_path: Path
     unsupported = [d for d in plan.framework_decisions if d.status == "unsupported"]
     assert any(d.target_id == "core-sw-01" for d in unsupported)
     assert any("cisco.cli.read" in d.missing_capabilities for d in unsupported)
+
+    cisco_snaps = [
+        p for p in artifacts.rglob("capability_snapshot.json") if p.parent.name == "core-sw-01"
+    ]
+    assert len(cisco_snaps) == 1
+    cisco_snap = json.loads(cisco_snaps[0].read_text(encoding="utf-8"))
+    assert cisco_snap["schema"] == "host_capability_snapshot.v1"
+    assert cisco_snap["asset_type"] in {"network_device", "network"}
+    assert any(
+        t["technology_id"] == "network_device" and t["status"] == "unsupported"
+        for t in cisco_snap.get("technologies") or []
+    )
+    assert any("cisco.cli.read" in lim for lim in cisco_snap.get("limitations") or [])
 
     # No assessment jobs / audit request before confirmation.
     with pytest.raises(PlanConfirmationRejected):
@@ -1186,3 +1193,284 @@ def test_acceptance_five_linux_two_postgres_one_cisco_unsupported(tmp_path: Path
     assert len(jobs_after) >= 7  # 5 linux OS + 2 postgres (+ optional host_facts)
     assert not any(j["host"] == "10.0.8.50" for j in jobs_after)
     assert sum(1 for j in jobs_after if j["framework_id"] == "postgres_cis") == 2
+
+
+@pytest.mark.asyncio
+async def test_e2e_api_analyze_confirm_start_with_discovery(tmp_path: Path):
+    """API analyze → confirm → start validates against effective inventory."""
+    import httpx
+
+    from auditor.api.app import create_app
+    from auditor.application_runtime import ApplicationRuntime
+    from auditor.audit_registry import get_audit_registry
+    from auditor.domain.audit_models import AuditJobType, new_audit_run_id
+    from auditor.inventory.service import load_effective_inventory, persist_plan
+
+    root = tmp_path / "inventory"
+    client_dir = root / "ApiE2E"
+    _write_md(
+        client_dir,
+        f"""# Inventory
+
+## In-scope hosts
+
+| Host | IP | Access |
+|---|---|---|
+| host-01 | 10.0.9.1 | SSH |
+| host-02 | 10.0.9.2 | SSH |
+
+## Credentials & Access
+
+| Access | Host / URL | Port | Username | Password / Token |
+|---|---|---:|---|---|
+| SSH | 10.0.9.1 | 22 | audit | {CANARY} |
+| SSH | 10.0.9.2 | 22 | audit | {CANARY} |
+""",
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    settings = Settings(
+        _env_file=None,
+        evidence_dir=evidence,
+        inventory_dir=root,
+        agents_dir=AGENTS,
+        intake_enabled=False,
+        hitl_enabled=False,
+        archive_enabled=False,
+    )
+
+    def _factory(cred, settings_):
+        return _linux_transport(with_postgres=str(cred.host).endswith(".2"))
+
+    collector = SshDiscoveryCollector(
+        inventory_dir=root,
+        client_name="ApiE2E",
+        artifacts_root=evidence,
+        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+        transport_factory=_factory,
+    )
+    inventory, plan = analyze_client_inventory(
+        root,
+        "ApiE2E",
+        agents_dir=AGENTS,
+        discoverer=collector,
+        artifacts_root=evidence,
+        persist_dir=root / "ApiE2E" / ".audit_plans",
+    )
+    persist_plan(plan, root / "ApiE2E" / ".audit_plans" / "latest.json")
+    effective = load_effective_inventory(root, "ApiE2E")
+    assert effective is not None
+    assert any(
+        s.name == "postgresql"
+        for h in effective.hosts
+        for s in h.services
+        if h.host_id == "host-02"
+    )
+    assert plan.plan_revision_id.startswith("prev-")
+
+    created_jobs: list[tuple[str, str]] = []
+
+    class _FakeGraph:
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        async def arun_request(self, request, operator_context: str = ""):
+            run_id = new_audit_run_id()
+            registry = get_audit_registry(self.settings.evidence_dir)
+            registry.create_run(client_id=request.client_id, audit_run_id=run_id)
+            for target in request.targets:
+                for fw in target.frameworks:
+                    registry.create_job(
+                        audit_run_id=run_id,
+                        logical_task_id=f"{target.inventory_target_ref}:{fw.framework_id}",
+                        job_type=AuditJobType.ASSESS_FRAMEWORK,
+                        framework_id=fw.framework_id,
+                        host_id=target.inventory_target_ref,
+                    )
+                    created_jobs.append((target.inventory_target_ref, fw.framework_id))
+            return {
+                "audit_run_id": run_id,
+                "evidence_run_id": "ev_api_e2e",
+                "audit_run_status": "running",
+                "awaiting_hitl": False,
+            }
+
+    async def _runtime_factory():
+        runtime = ApplicationRuntime(
+            settings,
+            graph_factory=lambda rt: _FakeGraph(rt.settings),  # type: ignore[arg-type, return-value]
+            shutdown_timeout=0.5,
+        )
+        await runtime.start()
+        return runtime
+
+    app = create_app(settings=settings, runtime_factory=_runtime_factory)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/audit-plans/{plan.plan_id}/confirm",
+                json={"action": "approve", "start": True, "note": "api-e2e"},
+            )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["audit_run_id"]
+    confirmed = body["plan"]
+    assert confirmed["status"] == "confirmed"
+    assert confirmed["plan_revision_id"] == plan.plan_revision_id
+
+    host_addr = {h.host_id: (h.address or h.host_id) for h in inventory.hosts}
+    expected = {(host_addr[t.host_id], t.framework_id) for t in plan.targets if not t.excluded}
+    assert set(created_jobs) == expected
+
+
+def test_e2e_cli_analyze_confirm_start_with_discovery(tmp_path: Path):
+    """CLI analyze → confirm → start path with discovery + AuditJob identity."""
+    from auditor.audit_registry import get_audit_registry
+    from auditor.domain.audit_models import AuditJobType, new_audit_run_id
+    from auditor.inventory.service import load_effective_inventory, persist_plan
+
+    root = tmp_path / "inventory"
+    client_dir = root / "CliE2E"
+    _write_md(
+        client_dir,
+        f"""# Inventory
+
+## In-scope hosts
+
+| Host | IP | Access |
+|---|---|---|
+| host-01 | 10.0.10.1 | SSH |
+| host-02 | 10.0.10.2 | SSH |
+
+## Credentials & Access
+
+| Access | Host / URL | Port | Username | Password / Token |
+|---|---|---:|---|---|
+| SSH | 10.0.10.1 | 22 | audit | {CANARY} |
+| SSH | 10.0.10.2 | 22 | audit | {CANARY} |
+""",
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    settings = Settings(
+        _env_file=None,
+        evidence_dir=evidence,
+        inventory_dir=root,
+        agents_dir=AGENTS,
+        intake_enabled=False,
+        hitl_enabled=False,
+        archive_enabled=False,
+    )
+    plans = root / "CliE2E" / ".audit_plans"
+    collector = SshDiscoveryCollector(
+        inventory_dir=root,
+        client_name="CliE2E",
+        artifacts_root=evidence,
+        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+        transport_factory=lambda c, s: _linux_transport(with_postgres=str(c.host).endswith(".2")),
+    )
+    inventory, plan = analyze_client_inventory(
+        root,
+        "CliE2E",
+        agents_dir=AGENTS,
+        discoverer=collector,
+        artifacts_root=evidence,
+        persist_dir=plans,
+    )
+    persist_plan(plan, plans / "latest.json")
+    assert load_effective_inventory(root, "CliE2E") is not None
+    assert plan.plan_revision_id.startswith("prev-")
+
+    created: list[tuple[str, str]] = []
+
+    async def _executor(request):
+        run_id = new_audit_run_id()
+        registry = get_audit_registry(settings.evidence_dir)
+        registry.create_run(client_id=request.client_id, audit_run_id=run_id)
+        for target in request.targets:
+            for fw in target.frameworks:
+                registry.create_job(
+                    audit_run_id=run_id,
+                    logical_task_id=f"{target.inventory_target_ref}:{fw.framework_id}",
+                    job_type=AuditJobType.ASSESS_FRAMEWORK,
+                    framework_id=fw.framework_id,
+                    host_id=target.inventory_target_ref,
+                )
+                created.append((target.inventory_target_ref, fw.framework_id))
+        return {"audit_run_id": run_id, "audit_run_status": "running"}
+
+    started = start_confirmed_audit(
+        root,
+        "CliE2E",
+        plan,
+        settings=settings,
+        agents_dir=AGENTS,
+        note="cli-e2e",
+        executor=_executor,
+    )
+    assert started["status"] == "started"
+    assert started["plan"].status == "confirmed"
+    host_addr = {h.host_id: (h.address or h.host_id) for h in inventory.hosts}
+    expected = {(host_addr[t.host_id], t.framework_id) for t in plan.targets if not t.excluded}
+    assert set(created) == expected
+    jobs = get_audit_registry(settings.evidence_dir).list_jobs(started["audit_run_id"])
+    job_pairs = {(j.host_id, j.framework_id) for j in jobs}
+    assert job_pairs == expected
+
+
+def test_same_inventory_changed_discovery_new_plan_revision(tmp_path: Path):
+    """Same source inventory with different discovery facts → new plan_revision_id."""
+    root = tmp_path / "inventory"
+    client = root / "RevPlan"
+    _write_md(
+        client,
+        f"""# Inventory
+
+## In-scope hosts
+
+| Host | IP | Access |
+|---|---|---|
+| host-01 | 10.0.11.1 | SSH |
+
+## Credentials & Access
+
+| Access | Host / URL | Port | Username | Password / Token |
+|---|---|---:|---|---|
+| SSH | 10.0.11.1 | 22 | audit | {CANARY} |
+""",
+    )
+    artifacts = tmp_path / "artifacts"
+    with patch("auditor.inventory.discovery_evidence.utc_now", return_value="2026-01-01T00:00:00Z"):
+        with patch("auditor.inventory.plan._utc_now", return_value="2026-01-01T00:00:00Z"):
+            with patch("auditor.inventory.preflight._utc_now", return_value="2026-01-01T00:00:00Z"):
+                _i1, plan1 = analyze_client_inventory(
+                    root,
+                    "RevPlan",
+                    agents_dir=AGENTS,
+                    artifacts_root=artifacts,
+                    discoverer=SshDiscoveryCollector(
+                        inventory_dir=root,
+                        client_name="RevPlan",
+                        artifacts_root=artifacts,
+                        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+                        transport_factory=lambda c, s: _linux_transport(),
+                    ),
+                )
+                _i2, plan2 = analyze_client_inventory(
+                    root,
+                    "RevPlan",
+                    agents_dir=AGENTS,
+                    artifacts_root=artifacts,
+                    discoverer=SshDiscoveryCollector(
+                        inventory_dir=root,
+                        client_name="RevPlan",
+                        artifacts_root=artifacts,
+                        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+                        transport_factory=lambda c, s: _linux_transport(with_postgres=True),
+                    ),
+                )
+    assert plan1.inventory_content_hash == plan2.inventory_content_hash
+    assert plan1.inventory_version_id == plan2.inventory_version_id
+    assert plan1.discovery_result_hash != plan2.discovery_result_hash
+    assert plan1.plan_revision_id != plan2.plan_revision_id

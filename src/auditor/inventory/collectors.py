@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import socket
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -573,14 +572,6 @@ def _match_credential(
     return None
 
 
-def _tcp_reachable(host: str, port: int, timeout: float) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
 def _sanitize_command_results(
     results: list[CommandResult],
     *,
@@ -668,22 +659,27 @@ class SshDiscoveryCollector:
         for host in inventory.hosts:
             if getattr(host, "is_unsupported_network_device", False):
                 # Unsupported network devices are recorded without SSH probing.
-                results.append(
-                    DiscoveredHostFacts(
-                        host_id=host.host_id,
-                        transport="",
-                        collector="unsupported",
-                        collected_at=utc_now(),
-                        error=(
-                            f"unsupported asset_type={host.asset_type or 'network_device'} "
-                            f"vendor={host.vendor or 'unknown'}"
-                        ),
-                        error_code=ERROR_UNSUPPORTED_TRANSPORT,
-                        limitations=["unsupported_asset", "missing:cisco.cli.read"],
-                        confidence="low",
-                        discovery_tool_ids=discovery_tool_ids,
-                    )
+                # Persist a capability snapshot so missing capabilities remain auditable.
+                vendor = (host.vendor or "cisco").lower()
+                facts = DiscoveredHostFacts(
+                    host_id=host.host_id,
+                    transport="",
+                    collector="unsupported",
+                    collected_at=utc_now(),
+                    error=(
+                        f"unsupported asset_type={host.asset_type or 'network_device'} "
+                        f"vendor={host.vendor or 'unknown'}"
+                    ),
+                    error_code=ERROR_UNSUPPORTED_TRANSPORT,
+                    limitations=[
+                        "unsupported_asset",
+                        f"missing:{vendor}.cli.read",
+                    ],
+                    confidence="low",
+                    discovery_tool_ids=discovery_tool_ids,
                 )
+                self._persist_unsupported(facts, host, inventory)
+                results.append(facts)
                 continue
             if "ssh" not in host.connection_types and host.os_family == "windows":
                 continue
@@ -749,26 +745,8 @@ class SshDiscoveryCollector:
             self._persist(facts, inventory, known_secrets)
             return facts
 
-        # Optional reachability probe.
-        try:
-            port = int(cred.port or "22")
-        except ValueError:
-            port = 22
-        if not _tcp_reachable(cred.host, port, settings.connection_timeout):
-            facts = DiscoveredHostFacts(
-                host_id=host.host_id,
-                transport="ssh",
-                collector="ssh",
-                collected_at=collected_at,
-                error=f"host unreachable: {cred.host}:{port}",
-                error_code=ERROR_HOST_UNREACHABLE,
-                limitations=["host_unreachable"],
-                confidence="low",
-                discovery_tool_ids=tool_ids,
-            )
-            self._persist(facts, inventory, known_secrets)
-            return facts
-
+        # Connection failures are classified by the registered SSH adapter
+        # (invoke_ssh_run / RegistrySshTransport) — no direct TCP probe.
         command_results: list[CommandResult] = []
         by_cmd: dict[str, CommandResult] = {}
         connect_error: DiscoveredHostFacts | None = None
@@ -1005,7 +983,11 @@ class SshDiscoveryCollector:
                 postgresql_status=(
                     "confirmed"
                     if "postgresql" in facts.services
-                    else ("unknown" if facts.error_code else "absent")
+                    else (
+                        "suspected"
+                        if 5432 in facts.listening_ports and not facts.error_code
+                        else ("unknown" if facts.error_code else "absent")
+                    )
                 ),
                 transport="ssh",
                 tool_ids=tuple(facts.discovery_tool_ids),
@@ -1026,6 +1008,99 @@ class SshDiscoveryCollector:
             )
         except Exception:  # noqa: BLE001
             logger.exception("failed to persist HostCapabilitySnapshot for %s", facts.host_id)
+
+    def _persist_unsupported(
+        self,
+        facts: DiscoveredHostFacts,
+        host: InventoryHost,
+        inventory: ClientInventory,
+    ) -> None:
+        """Persist evidence + capability snapshot for unsupported assets (e.g. Cisco)."""
+        if self.artifacts_root is None:
+            return
+        vendor = (host.vendor or "cisco").lower()
+        evidence = HostDiscoveryEvidence(
+            host_id=facts.host_id,
+            transport="",
+            collector="unsupported",
+            collector_version=self.collector_version,
+            collected_at=facts.collected_at,
+            facts={
+                "asset_type": host.asset_type or "network_device",
+                "vendor": host.vendor or vendor,
+                "confidence": facts.confidence,
+                "source": "inventory",
+                "collector": "unsupported",
+                "discovery_tool_ids": list(facts.discovery_tool_ids),
+            },
+            commands=[],
+            error_code=facts.error_code,
+            error=facts.error,
+            limitations=list(facts.limitations),
+        )
+        try:
+            persist_host_evidence(
+                evidence,
+                artifacts_root=self.artifacts_root,
+                client_slug=inventory.client_id,
+                inventory_version_id=inventory.version.version_id,
+                known_secrets=[],
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "failed to persist unsupported discovery evidence for %s", facts.host_id
+            )
+
+        try:
+            from auditor.domain.host_capability import SnapshotTechnology
+            from auditor.inventory.tool_discovery import (
+                build_host_capability_snapshot,
+                persist_host_capability_snapshot,
+            )
+
+            missing_cap = f"{vendor}.cli.read"
+            snapshot = build_host_capability_snapshot(
+                host_id=facts.host_id,
+                client_id=inventory.client_id,
+                inventory_version_id=inventory.version.version_id,
+                asset_type=host.asset_type or "network_device",
+                os_name="",
+                os_family="",
+                os_version="",
+                ssh_access=False,
+                ssh_status="unavailable",
+                transport="",
+                tool_ids=tuple(facts.discovery_tool_ids),
+                collector="unsupported",
+                confidence=facts.confidence,
+                collected_at=facts.collected_at,
+                limitations=list(facts.limitations),
+                error=facts.error,
+                error_code=facts.error_code,
+            )
+            snapshot.technologies = [
+                SnapshotTechnology(
+                    technology_id="network_device",
+                    status="unsupported",
+                    evidence=[
+                        f"asset_type={host.asset_type or 'network_device'}",
+                        f"vendor={host.vendor or vendor}",
+                        f"missing={missing_cap}",
+                    ],
+                )
+            ]
+            snapshot.platform = host.vendor or vendor or "network_device"
+            persist_host_capability_snapshot(
+                snapshot,
+                artifacts_root=self.artifacts_root,
+                client_slug=inventory.client_id,
+                inventory_version_id=inventory.version.version_id,
+                known_secrets=[],
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "failed to persist unsupported HostCapabilitySnapshot for %s", facts.host_id
+            )
 
 
 def _default_ssh_transport(

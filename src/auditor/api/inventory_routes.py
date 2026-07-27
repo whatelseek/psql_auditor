@@ -18,9 +18,9 @@ from auditor.inventory.service import (
     analyze_client_inventory,
     astart_confirmed_audit,
     confirm_audit_plan,
-    load_client_inventory,
     load_plan,
     plan_to_audit_request_payload,
+    resolve_effective_inventory,
     validate_client_inventory,
 )
 
@@ -132,7 +132,7 @@ async def confirm_plan(plan_id: str, body: ConfirmBody, request: Request) -> dic
         raise HTTPException(status_code=404, detail=f"plan {plan_id!r} not found")
 
     try:
-        inventory = load_client_inventory(settings.inventory_dir, client_name)
+        inventory = resolve_effective_inventory(settings.inventory_dir, client_name)
         if body.action == "approve" and body.start:
             started = await astart_confirmed_audit(
                 settings.inventory_dir,

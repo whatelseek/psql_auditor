@@ -181,7 +181,7 @@ def test_automatic_framework_selection_and_plan(tmp_path: Path):
     assert plan.summary.linux_hosts == 4
     assert plan.summary.windows_hosts == 1
     assert plan.summary.postgresql_instances == 2
-    assert plan.summary.total_audit_target_instances == 8
+    assert plan.summary.total_audit_target_instances == 12
     selected = [d for d in plan.framework_decisions if d.status == "selected"]
     selected_ids = {d.framework_id for d in selected}
     assert "ubuntu_cis_24_l2" in selected_ids
@@ -190,7 +190,9 @@ def test_automatic_framework_selection_and_plan(tmp_path: Path):
     assert "host_facts" in selected_ids
     host_ids = {t.host_id for t in plan.targets if not t.target_id.startswith("client:")}
     assert host_ids == {"host-01", "host-02", "host-03", "host-04", "host-05"}
+    assert sum(1 for t in plan.targets if t.framework_id == "host_facts") == 5
     assert inventory.version.version_id == plan.inventory_version_id
+    assert plan.plan_revision_id.startswith("prev-")
 
 
 def test_plan_confirmation_required_and_rejection(tmp_path: Path):

@@ -55,6 +55,34 @@ def framework_selection_hash(decisions: list[Any] | tuple[Any, ...]) -> str:
     return _framework_selection_hash(decisions)
 
 
+def _plan_revision_id(
+    *,
+    inventory_version_id: str,
+    inventory_content_hash: str,
+    preflight_revision_id: str,
+    discovery_result_hash: str,
+    effective_facts_hash: str,
+    framework_hash: str,
+    tool_catalog_hash: str,
+    capability_policy_hash: str,
+) -> str:
+    """Immutable plan revision identity from all pinned plan inputs."""
+    payload = {
+        "inventory_version_id": inventory_version_id,
+        "inventory_content_hash": inventory_content_hash,
+        "preflight_revision_id": preflight_revision_id,
+        "discovery_result_hash": discovery_result_hash,
+        "effective_facts_hash": effective_facts_hash,
+        "framework_hash": framework_hash,
+        "tool_catalog_hash": tool_catalog_hash,
+        "capability_policy_hash": capability_policy_hash,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"prev-{digest[:16]}"
+
+
 def generate_audit_plan(
     inventory: ClientInventory,
     detections: list[TechnologyDetection],
@@ -67,34 +95,36 @@ def generate_audit_plan(
     """Build a draft audit plan from inventory + technology detections.
 
     Plan generation is idempotent for the same inventory version: the plan id
-    is derived from ``client_id`` + ``inventory_version_id``.
+    is derived from ``client_id`` + ``inventory_version_id``. Client-level
+    frameworks are expanded into explicit per-host targets before confirmation
+    so plan targets match execution jobs 1:1.
     """
     decisions = select_frameworks_for_inventory(inventory, detections, agents_dir=agents_dir)
     host_by_id = {h.host_id: h for h in inventory.hosts}
+    executable_hosts = [
+        h for h in inventory.hosts_without_errors() if not h.is_unsupported_network_device
+    ]
 
     targets: list[AuditPlanTarget] = []
     for decision in decisions:
         if decision.status != "selected":
             continue
         if decision.target_id.startswith("client:"):
-            # Client-level infrastructure — attach to first valid host as scope
-            # marker is retained via target_id for reporting; skip host-less
-            # execution rows when no hosts exist.
-            if not inventory.hosts_without_errors():
-                continue
-            # Represent general assessment once against the client namespace.
-            targets.append(
-                AuditPlanTarget(
-                    target_id=decision.target_id,
-                    host_id=inventory.client_id,
-                    service="infrastructure",
-                    framework_id=decision.framework_id,
-                    framework_version=decision.framework_version,
-                    connection_methods=(),
-                    expected_evidence_sources=("inventory", "questionnaire"),
-                    limitations=(),
+            # Expand client-level frameworks into explicit per-host targets so the
+            # confirmed plan identity matches AuditJob fan-out exactly.
+            for host in executable_hosts:
+                targets.append(
+                    AuditPlanTarget(
+                        target_id=f"{host.host_id}/{decision.framework_id}",
+                        host_id=host.host_id,
+                        service="infrastructure",
+                        framework_id=decision.framework_id,
+                        framework_version=decision.framework_version,
+                        connection_methods=tuple(host.connection_types),
+                        expected_evidence_sources=("inventory", "questionnaire"),
+                        limitations=(),
+                    )
                 )
-            )
             continue
 
         host_id = decision.target_id.split("/", 1)[0]
@@ -196,16 +226,29 @@ def generate_audit_plan(
         potentially_destructive=False,
     )
 
+    tool_hashes = _tool_snapshot_hashes()
+    framework_hash = _framework_selection_hash(decisions)
+    plan_revision_id = _plan_revision_id(
+        inventory_version_id=inventory.version.version_id,
+        inventory_content_hash=inventory.version.content_hash,
+        discovery_result_hash=discovery_result_hash,
+        effective_facts_hash=effective_facts_hash,
+        preflight_revision_id=preflight_revision_id,
+        framework_hash=framework_hash,
+        tool_catalog_hash=str(tool_hashes["tool_catalog_hash"]),
+        capability_policy_hash=str(tool_hashes["capability_policy_hash"]),
+    )
     return AuditPlan(
         plan_id=_plan_id(inventory.client_id, inventory.version.version_id),
+        plan_revision_id=plan_revision_id,
         client_id=inventory.client_id,
         inventory_version_id=inventory.version.version_id,
         inventory_content_hash=inventory.version.content_hash,
         discovery_result_hash=discovery_result_hash,
         effective_facts_hash=effective_facts_hash,
         preflight_revision_id=preflight_revision_id,
-        framework_hash=_framework_selection_hash(decisions),
-        **_tool_snapshot_hashes(),
+        framework_hash=framework_hash,
+        **tool_hashes,
         status="draft",
         targets=tuple(targets),
         framework_decisions=tuple(decisions),
