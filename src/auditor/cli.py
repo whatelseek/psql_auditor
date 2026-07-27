@@ -171,7 +171,7 @@ def cmd_audit_start(args: argparse.Namespace) -> int:
         )
     except PlanConfirmationRejected as exc:
         print(f"error: {exc}", file=sys.stderr)
-        if getattr(exc, "code", "") == "plan_stale":
+        if getattr(exc, "code", "") in {"plan_stale", "audit_plan_stale"}:
             print("Re-run `inventory analyze` / `audit plan --refresh`.", file=sys.stderr)
             return 4
         return 3

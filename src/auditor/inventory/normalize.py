@@ -197,9 +197,36 @@ def normalize_inventory(
 
         address = str(item.get("address") or item.get("ip") or "").strip()
         hostname = str(item.get("hostname") or host_id).strip()
+        asset_type = (
+            str(item.get("asset_type") or item.get("type") or item.get("asset") or "server").strip()
+            or "server"
+        )
+        vendor = str(item.get("vendor") or item.get("manufacturer") or "").strip()
         os_name = str(item.get("os") or item.get("os_name") or item.get("operating_system") or "")
         os_family = _os_family(os_name)
-        if not os_name:
+        # Infer network device typing from vendor/role keywords when omitted.
+        roles_preview = item.get("roles") or item.get("role") or []
+        if isinstance(roles_preview, str):
+            roles_preview = [r.strip() for r in re.split(r"[,;/]+", roles_preview) if r.strip()]
+        role_blob = " ".join(str(r).lower() for r in roles_preview)
+        note_blob = str(item.get("notes") or "").lower()
+        if asset_type.lower() == "server" and (
+            vendor.lower() in {"cisco", "juniper", "aruba"}
+            or "network" in role_blob
+            or "switch" in role_blob
+            or "router" in role_blob
+            or "cisco" in note_blob
+        ):
+            asset_type = "network_device"
+        if not vendor and "cisco" in f"{role_blob} {note_blob} {host_id}".lower():
+            vendor = "cisco"
+        if not os_name and asset_type.lower() not in {
+            "network_device",
+            "network",
+            "switch",
+            "router",
+            "firewall",
+        }:
             # IP/port/credentials-only hosts are valid; OS comes from discovery.
             issues.append(
                 ValidationIssue(
@@ -372,6 +399,8 @@ def normalize_inventory(
                 host_id=host_id,
                 hostname=hostname,
                 address=address,
+                asset_type=asset_type,
+                vendor=vendor,
                 os_family=os_family,
                 os_name=os_name,
                 roles=tuple(str(r) for r in roles_in),

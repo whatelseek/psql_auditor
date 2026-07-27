@@ -163,7 +163,7 @@ async def confirm_plan(plan_id: str, body: ConfirmBody, request: Request) -> dic
             client_name=client_name,
         )
     except PlanConfirmationRejected as exc:
-        status = 409 if getattr(exc, "code", "") == "plan_stale" else 400
+        status = 409 if getattr(exc, "code", "") in {"plan_stale", "audit_plan_stale"} else 400
         raise HTTPException(status_code=status, detail=exc.to_dict()) from exc
     except (InvalidClientNameError, InventoryLoadError, AuditRequestRejected) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

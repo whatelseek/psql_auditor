@@ -243,6 +243,11 @@ def _load_markdown(text: str, client: str) -> dict[str, Any]:
                 "roles": roles,
                 "services": services,
                 "connection": access,
+                "asset_type": row.get("assettype")
+                or row.get("type")
+                or row.get("asset")
+                or "server",
+                "vendor": row.get("vendor") or row.get("manufacturer") or "",
                 "notes": row.get("notes") or "",
             }
         )

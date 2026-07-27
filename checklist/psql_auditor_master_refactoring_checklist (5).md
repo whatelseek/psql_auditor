@@ -55,20 +55,24 @@ IDs non-executable; non-zero SSH exit → error).
 
 Tool-driven discovery POC (this revision): `INPUT-005` remains `[~]`. SSH
 discovery now selects registered tools via `ToolRegistry`, executes
-allow-listed probes through `ssh_run`, persists `HostCapabilitySnapshot`, and
-pins inventory / discovery / framework / tool-catalog / policy hashes on the
-deterministic `AuditPlan`. Operator confirmation is still required before audit
-execution. WinRM/HTTP/TCP/SNMP adapters (`TOOL-002`…`TOOL-005`) remain open.
-Do not mark `[x]` without independent acceptance.
+allow-listed probes through `ssh_run`, persists `HostCapabilitySnapshot` v1
+(OS, access, technologies, ports, services, catalog/policy hashes), classifies
+technologies as confirmed/suspected/absent/unknown/unsupported, marks
+unsupported network devices (e.g. Cisco without `cisco.cli.read`), and pins
+inventory / discovery / framework / tool-catalog / policy hashes on the
+deterministic `AuditPlan`. Operator confirmation is still required before
+`AuditRun` / `AuditJob` creation. WinRM/HTTP/TCP/SNMP adapters
+(`TOOL-002`…`TOOL-005`) remain open. Do not mark `[x]` without independent
+acceptance.
 
 | Check | Verified result |
 | --- | --- |
 | Format | Passed |
 | Lint | Passed |
 | Type check | Passed, 94 files |
-| Unit tests | 482 passed |
+| Unit tests | 483 passed |
 | Integration tests | 8 passed |
-| Full suite | 490 passed |
+| Full suite | 491 passed |
 | Defect map | `validate-defect-map: OK` (77/77) |
 
 ## Quality assessment
@@ -299,19 +303,25 @@ unregistered transport, bypass policy, or execute hidden arbitrary code.
 - **tool-driven SSH discovery POC**: `SshDiscoveryCollector` selects authorized
   tools via `ToolRegistry` (`select_discovery_tools` / `ssh_run` only in this
   PR), executes allow-listed atomic probes through `invoke_ssh_run`, and
-  persists per-host `HostCapabilitySnapshot` (OS/version, SSH access, running
-  services, listening ports, PostgreSQL presence/version);
+  persists per-host `HostCapabilitySnapshot` v1 (OS/version, SSH access,
+  technologies, running services, listening ports, catalog/policy hashes);
+- technology statuses: confirmed / suspected / absent / unknown / unsupported;
+- framework decisions: selected / not_applicable / requires_operator_decision /
+  unsupported / blocked (with reasons; Cisco → unsupported + missing
+  `cisco.cli.read`);
+- discovery is skipped when inventory validation contains errors;
 - WinRM remains transitional (`WinrmDiscoveryCollector`); HTTP/TCP/SNMP not added;
 - current SSH discovery commands are read-oriented and PostgreSQL is
-  confirmed only with strong evidence;
+  confirmed only with strong evidence (port 5432 alone → suspected);
 - typed discovery errors, per-host timeout/retry, one-host failure isolation;
 - sanitized discovery evidence under `artifacts/<slug>/preflight/…` with
   secret scanning; deterministic preflight revisions;
 - plan pins inventory, discovery/effective-facts, `framework_hash`,
-  `tool_catalog_hash`, and `capability_policy_hash`;
+  `tool_catalog_hash`, and `capability_policy_hash`; stale confirm/start →
+  `audit_plan_stale`;
 - CLI sync `start_confirmed_audit` / API `await astart_confirmed_audit` →
   `AuditRequest` → `arun_request` (confirmed start does not silently re-run
-  discovery; `--refresh-discovery` optional);
+  discovery; `--refresh-discovery` optional); no assessment jobs before confirm;
 - docs: `docs/inventory-driven-audit.md` (+ RU manual); tests:
   `tests/test_input005_discovery.py`,
   `tests/integration/test_ssh_discovery_container.py`.

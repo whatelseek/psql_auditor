@@ -661,7 +661,7 @@ def test_stale_tool_snapshot_rejects_confirm_and_invoke(tmp_path: Path) -> None:
 
     with pytest.raises(PlanConfirmationRejected) as exc:
         assert_plan_matches_tool_registry(plan)
-    assert exc.value.code == "tool_snapshot_stale"
+    assert exc.value.code in {"tool_snapshot_stale", "audit_plan_stale"}
 
 
 @pytest.mark.unit

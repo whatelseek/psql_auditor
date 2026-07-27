@@ -50,6 +50,11 @@ def _framework_selection_hash(decisions: list[Any] | tuple[Any, ...]) -> str:
     return f"fw-{digest[:12]}"
 
 
+def framework_selection_hash(decisions: list[Any] | tuple[Any, ...]) -> str:
+    """Public wrapper for framework-selection hash pinning."""
+    return _framework_selection_hash(decisions)
+
+
 def generate_audit_plan(
     inventory: ClientInventory,
     detections: list[TechnologyDetection],
@@ -148,7 +153,12 @@ def generate_audit_plan(
         *(
             f"Clarify framework selection for {d.target_id}: {d.reason}"
             for d in decisions
-            if d.status == "considered"
+            if d.status in {"requires_operator_decision", "considered"}
+        ),
+        *(
+            f"Unsupported asset {d.target_id}: {d.reason}"
+            for d in decisions
+            if d.status == "unsupported"
         ),
         *(
             f"Resolve discovery limitation on {i.host_id}: {i.message}"
@@ -333,7 +343,7 @@ def assert_plan_matches_inventory(plan: AuditPlan, inventory: ClientInventory) -
         raise PlanConfirmationRejected(
             "audit plan is stale: inventory changed since plan generation; "
             "re-run inventory analyze / audit plan to regenerate",
-            code="plan_stale",
+            code="audit_plan_stale",
         )
 
 
@@ -349,14 +359,14 @@ def assert_plan_matches_preflight(
             raise PlanConfirmationRejected(
                 "audit plan is stale: discovery results changed since plan generation; "
                 "re-run inventory analyze / audit plan --refresh",
-                code="plan_stale",
+                code="audit_plan_stale",
             )
     if plan.effective_facts_hash and effective_facts_hash:
         if plan.effective_facts_hash != effective_facts_hash:
             raise PlanConfirmationRejected(
                 "audit plan is stale: effective discovery facts changed since plan "
                 "generation; re-run inventory analyze / audit plan --refresh",
-                code="plan_stale",
+                code="audit_plan_stale",
             )
 
 
@@ -370,7 +380,23 @@ def assert_plan_matches_tool_registry(plan: AuditPlan) -> None:
             capability_policy_hash=plan.capability_policy_hash,
         )
     except ToolSnapshotStale as exc:
-        raise PlanConfirmationRejected(str(exc), code=exc.code) from exc
+        raise PlanConfirmationRejected(str(exc), code="audit_plan_stale") from exc
+
+
+def assert_plan_matches_framework_hash(
+    plan: AuditPlan,
+    *,
+    framework_hash: str = "",
+) -> None:
+    """Reject confirm/start when selected framework identities diverged."""
+    pinned = (plan.framework_hash or "").strip()
+    current = (framework_hash or "").strip()
+    if pinned and current and pinned != current:
+        raise PlanConfirmationRejected(
+            "audit plan is stale: framework selection changed since plan generation; "
+            "re-run inventory analyze / audit plan",
+            code="audit_plan_stale",
+        )
 
 
 def plan_confirmation_prompt(plan: AuditPlan) -> str:

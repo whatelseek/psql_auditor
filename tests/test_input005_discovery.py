@@ -68,8 +68,9 @@ def _linux_transport(*, with_postgres: bool = False, port_only: bool = False) ->
         "hostname": CommandResult("hostname", 0, "db-01\n"),
         "cat /etc/os-release": CommandResult("cat /etc/os-release", 0, os_release),
         "uname -a": CommandResult("uname -a", 0, "Linux db-01 6.8.0 x86_64 GNU/Linux\n"),
+        "uname -m": CommandResult("uname -m", 0, "x86_64\n"),
+        "ss -lntp": CommandResult("ss", 0, ports),
         "ss -lntup": CommandResult("ss", 0, ports),
-        "netstat -lntup": CommandResult("netstat", 1, ""),
         "systemctl list-units --type=service --state=running --no-pager": CommandResult(
             "systemctl",
             0,
@@ -85,8 +86,7 @@ def _linux_transport(*, with_postgres: bool = False, port_only: bool = False) ->
         "ps -ef": CommandResult("ps -ef", 0, "root 1 0 0 00:00 ? 00:00:00 /sbin/init\n"),
         "psql --version": CommandResult("psql --version", 1, ""),
         "postgres --version": CommandResult("postgres --version", 1, ""),
-        "dpkg-query -W postgresql": CommandResult("dpkg", 1, ""),
-        "rpm -q postgresql": CommandResult("rpm", 1, ""),
+        "systemctl is-active postgresql": CommandResult("is-active", 3, "inactive\n"),
     }
     if with_postgres:
         responses["ps -ef"] = CommandResult(
@@ -111,7 +111,7 @@ def _linux_transport(*, with_postgres: bool = False, port_only: bool = False) ->
         )
         responses["command -v psql"] = CommandResult("command -v psql", 0, "/usr/bin/psql\n")
         responses["psql --version"] = CommandResult("psql --version", 0, "psql (PostgreSQL) 16.2\n")
-        responses["dpkg-query -W postgresql"] = CommandResult("dpkg", 0, "postgresql\t16.2\n")
+        responses["systemctl is-active postgresql"] = CommandResult("is-active", 0, "active\n")
     return FakeShellTransport(responses=responses)
 
 
@@ -246,7 +246,7 @@ def test_port_5432_alone_does_not_select_postgres_cis(tmp_path: Path):
             root, "PortOnly", agents_dir=AGENTS, discoverer=collector
         )
     pg = [d for d in plan.framework_decisions if "postgres" in d.framework_id]
-    assert pg and all(d.status == "rejected" for d in pg)
+    assert pg and all(d.status == "requires_operator_decision" for d in pg)
     assert not postgres_confirmed(
         processes=[], services=[], packages=[], binaries=[], listening_ports=[5432]
     )
@@ -437,13 +437,13 @@ def test_partial_command_failure_preserves_facts(tmp_path: Path):
 """,
     )
     transport = _linux_transport()
-    transport.responses["ss -lntup"] = CommandResult(
+    transport.responses["ss -lntp"] = CommandResult(
         "ss",
         error="command timeout",
         error_code="command_timeout",
     )
-    transport.responses["netstat -lntup"] = CommandResult(
-        "netstat",
+    transport.responses["ss -lntup"] = CommandResult(
+        "ss",
         error="command timeout",
         error_code="command_timeout",
     )
@@ -618,16 +618,19 @@ def test_repeated_analysis_deterministic(tmp_path: Path):
         with patch(
             "auditor.inventory.discovery_evidence.utc_now", return_value="2026-01-01T00:00:00Z"
         ):
-            with patch("auditor.inventory.plan._utc_now", return_value="2026-01-01T00:00:00Z"):
-                with patch(
-                    "auditor.inventory.preflight._utc_now", return_value="2026-01-01T00:00:00Z"
-                ):
-                    inv1, plan1 = analyze_client_inventory(
-                        root, "Det", agents_dir=AGENTS, discoverer=c1
-                    )
-                    inv2, plan2 = analyze_client_inventory(
-                        root, "Det", agents_dir=AGENTS, discoverer=c2
-                    )
+            with patch(
+                "auditor.inventory.collectors.utc_now", return_value="2026-01-01T00:00:00Z"
+            ):
+                with patch("auditor.inventory.plan._utc_now", return_value="2026-01-01T00:00:00Z"):
+                    with patch(
+                        "auditor.inventory.preflight._utc_now", return_value="2026-01-01T00:00:00Z"
+                    ):
+                        inv1, plan1 = analyze_client_inventory(
+                            root, "Det", agents_dir=AGENTS, discoverer=c1
+                        )
+                        inv2, plan2 = analyze_client_inventory(
+                            root, "Det", agents_dir=AGENTS, discoverer=c2
+                        )
     assert plan1.discovery_result_hash == plan2.discovery_result_hash
     assert plan1.effective_facts_hash == plan2.effective_facts_hash
     assert plan1.preflight_revision_id == plan2.preflight_revision_id
@@ -1051,14 +1054,19 @@ def test_tool_driven_discovery_five_linux_hosts_postgres_on_two(tmp_path: Path):
     assert len(snapshots) == 5
     pg_hosts = set()
     for path in snapshots:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        snap = payload["snapshot"]
-        assert snap["os_family"] == "linux"
-        assert snap["ssh_access"] is True
+        snap = json.loads(path.read_text(encoding="utf-8"))
+        assert snap["schema"] == "host_capability_snapshot.v1"
+        assert snap["client_id"]
+        assert snap["inventory_version_id"]
+        assert snap["os"]["family"] == "linux"
+        assert snap["access"]["ssh"]["available"] is True
+        assert snap["tool_catalog_hash"].startswith("tool-")
+        assert snap["capability_policy_hash"].startswith("pol-")
         assert "ssh_run" in snap["tool_ids"]
-        if snap["postgresql_present"]:
-            pg_hosts.add(snap["host_id"])
-            assert snap["postgresql_version"].startswith("16")
+        for tech in snap.get("technologies") or []:
+            if tech["technology_id"] == "postgresql" and tech["status"] == "confirmed":
+                pg_hosts.add(snap["host_id"])
+                assert str(tech.get("version") or "").startswith("16")
     assert pg_hosts == {"host-02", "host-04"}
 
     # No audit tools execute before plan confirmation.
@@ -1077,3 +1085,104 @@ def test_tool_driven_discovery_five_linux_hosts_postgres_on_two(tmp_path: Path):
     assert audit_tool_calls == []
     # After confirmation the plan is executable, but this test never starts the run.
     ensure_plan_confirmed(confirmed)
+
+
+def test_acceptance_five_linux_two_postgres_one_cisco_unsupported(tmp_path: Path):
+    """Main INPUT-005 scenario: 5 Linux + PG×2 + unsupported Cisco."""
+    root = tmp_path / "inventory"
+    client = root / "Accept005"
+    hosts_md = "\n".join(f"| host-{i:02d} | 10.0.8.{i} | SSH | server | |" for i in range(1, 6))
+    creds_md = "\n".join(f"| SSH | 10.0.8.{i} | 22 | audit | {CANARY}{i} |" for i in range(1, 6))
+    _write_md(
+        client,
+        f"""# Inventory
+
+## In-scope hosts
+
+| Host | IP | Access | Type | Vendor |
+|---|---|---|---|---|
+{hosts_md}
+| core-sw-01 | 10.0.8.50 | | network_device | cisco |
+
+## Credentials & Access
+
+| Access | Host / URL | Port | Username | Password / Token |
+|---|---|---:|---|---|
+{creds_md}
+""",
+    )
+
+    def _factory(cred, settings):
+        host = str(cred.host)
+        with_pg = host.endswith(".2") or host.endswith(".4")
+        return _linux_transport(with_postgres=with_pg)
+
+    artifacts = tmp_path / "artifacts"
+    collector = SshDiscoveryCollector(
+        inventory_dir=root,
+        client_name="Accept005",
+        artifacts_root=artifacts,
+        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+        transport_factory=_factory,
+    )
+
+    with patch("auditor.inventory.collectors._tcp_reachable", return_value=True):
+        inventory, plan = analyze_client_inventory(
+            root,
+            "Accept005",
+            agents_dir=AGENTS,
+            discoverer=collector,
+            artifacts_root=artifacts,
+        )
+
+    assert plan.status == "draft"
+    assert plan.summary.linux_hosts == 5
+    assert sum(1 for h in inventory.hosts if h.is_unsupported_network_device) == 1
+
+    selected = [d for d in plan.framework_decisions if d.status == "selected"]
+    assert sum(1 for d in selected if d.framework_id == "ubuntu_cis_24_l2") == 5
+    assert sum(1 for d in selected if d.framework_id == "postgres_cis") == 2
+    unsupported = [d for d in plan.framework_decisions if d.status == "unsupported"]
+    assert any(d.target_id == "core-sw-01" for d in unsupported)
+    assert any("cisco.cli.read" in d.missing_capabilities for d in unsupported)
+
+    # No assessment jobs / audit request before confirmation.
+    with pytest.raises(PlanConfirmationRejected):
+        plan_to_audit_request_payload(
+            plan, inventory=inventory, client_id="accept005", client_slug="Accept005"
+        )
+
+    confirmed = confirm_audit_plan(plan, action="approve", inventory=inventory)
+    assert confirmed.status == "confirmed"
+
+    payload = plan_to_audit_request_payload(
+        confirmed, inventory=inventory, client_id="accept005", client_slug="Accept005"
+    )
+    # One target entry per executable host; frameworks attached per host.
+    assert len(payload["targets"]) == 5
+    fw_by_ref = {
+        t["inventory_target_ref"]: {f["framework_id"] for f in t["frameworks"]}
+        for t in payload["targets"]
+    }
+    assert "ubuntu_cis_24_l2" in fw_by_ref["10.0.8.1"]
+    assert "postgres_cis" in fw_by_ref["10.0.8.2"]
+    assert "postgres_cis" in fw_by_ref["10.0.8.4"]
+    assert "postgres_cis" not in fw_by_ref["10.0.8.1"]
+    assert "postgres_cis" not in fw_by_ref["10.0.8.3"]
+    assert "postgres_cis" not in fw_by_ref["10.0.8.5"]
+    # Cisco must not become an audit target.
+    assert "10.0.8.50" not in fw_by_ref
+    assert "core-sw-01" not in fw_by_ref
+
+    jobs_after: list[dict] = []
+    for target in payload["targets"]:
+        for fw in target["frameworks"]:
+            jobs_after.append(
+                {
+                    "host": target["inventory_target_ref"],
+                    "framework_id": fw["framework_id"],
+                }
+            )
+    assert len(jobs_after) >= 7  # 5 linux OS + 2 postgres (+ optional host_facts)
+    assert not any(j["host"] == "10.0.8.50" for j in jobs_after)
+    assert sum(1 for j in jobs_after if j["framework_id"] == "postgres_cis") == 2

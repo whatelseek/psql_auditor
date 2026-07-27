@@ -13,7 +13,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from auditor.domain.host_capability import HostCapabilitySnapshot
 from auditor.inventory.discovery_evidence import assert_no_secrets, utc_now
@@ -27,21 +27,23 @@ if TYPE_CHECKING:
 DISCOVERY_SSH_TOOL_IDS: frozenset[str] = frozenset({"ssh_run", "ssh_read_file"})
 
 # Allow-listed atomic SSH probes (must pass ``is_approved_ssh_command``).
+# INPUT-005 approved discovery set (read-only).
 SSH_DISCOVERY_COMMANDS: tuple[str, ...] = (
     "hostname",
     "cat /etc/os-release",
     "uname -a",
+    "uname -m",
+    "ss -lntp",
     "ss -lntup",
-    "netstat -lntup",
     "systemctl list-units --type=service --state=running --no-pager",
-    "systemctl list-units --type=service --all --no-pager",
     "command -v psql",
     "command -v postgres",
-    "ps -ef",
     "psql --version",
     "postgres --version",
-    "dpkg-query -W postgresql",
-    "rpm -q postgresql",
+    "systemctl is-active postgresql",
+    # Supporting probes still on the SSH allow-list (process/service evidence).
+    "ps -ef",
+    "systemctl list-units --type=service --all --no-pager",
 )
 
 
@@ -209,44 +211,131 @@ class RegistrySshTransport:
 def build_host_capability_snapshot(
     *,
     host_id: str,
+    client_id: str = "",
+    inventory_version_id: str = "",
+    asset_type: str = "server",
     os_name: str = "",
     os_family: str = "",
     os_version: str = "",
     ssh_access: bool = False,
+    ssh_status: str = "",
     running_services: list[str] | None = None,
     listening_ports: list[int] | None = None,
     postgresql_present: bool = False,
     postgresql_version: str = "",
+    postgresql_status: str = "",
     transport: str = "ssh",
     tool_ids: tuple[str, ...] | list[str] = (),
     collector: str = "ssh",
     confidence: str = "high",
     evidence_ref: str = "",
+    evidence_refs: list[str] | None = None,
     collected_at: str = "",
     limitations: list[str] | None = None,
     error: str = "",
     error_code: str = "",
+    tool_catalog_hash: str = "",
+    capability_policy_hash: str = "",
 ) -> HostCapabilitySnapshot:
     """Build a HostCapabilitySnapshot from discovery facts."""
+    from auditor.domain.host_capability import (
+        SnapshotAccessMethod,
+        SnapshotOsInfo,
+        SnapshotTechnology,
+    )
+
+    distribution = ""
+    pretty = os_name or ""
+    low = pretty.lower()
+    for token in ("ubuntu", "debian", "centos", "rhel", "rocky", "fedora", "suse", "windows"):
+        if token in low:
+            distribution = token
+            break
+    if not distribution and os_family:
+        distribution = os_family
+
+    if not ssh_status:
+        if ssh_access:
+            ssh_status = "connected"
+        elif error_code in {
+            "authentication_failed",
+            "host_unreachable",
+            "connection_timeout",
+        }:
+            ssh_status = "failed"
+        else:
+            ssh_status = "unavailable"
+
+    technologies: list[SnapshotTechnology] = []
+    if postgresql_present or postgresql_status:
+        status = postgresql_status or ("confirmed" if postgresql_present else "absent")
+        technologies.append(
+            SnapshotTechnology(
+                technology_id="postgresql",
+                status=status,
+                version=postgresql_version,
+                evidence=["discovery"],
+            )
+        )
+    elif os_family and not error_code:
+        technologies.append(
+            SnapshotTechnology(
+                technology_id="postgresql",
+                status="absent",
+                evidence=["no_postgresql_signal"],
+            )
+        )
+
+    refs = list(evidence_refs or [])
+    if evidence_ref and evidence_ref not in refs:
+        refs.append(evidence_ref)
+
+    hashes = {
+        "tool_catalog_hash": tool_catalog_hash,
+        "capability_policy_hash": capability_policy_hash,
+    }
+    if not tool_catalog_hash or not capability_policy_hash:
+        try:
+            hashes.update(get_tool_registry().snapshot_hashes())
+        except Exception:  # noqa: BLE001
+            pass
+
     return HostCapabilitySnapshot(
+        schema="host_capability_snapshot.v1",
+        client_id=client_id,
         host_id=host_id,
-        os_name=os_name,
-        os_family=os_family,
-        os_version=os_version,
-        ssh_access=ssh_access,
-        running_services=list(running_services or []),
+        inventory_version_id=inventory_version_id,
+        asset_type=asset_type or "server",
+        platform=os_family or distribution or "",
+        os=SnapshotOsInfo(
+            family=os_family or "",
+            distribution=distribution,
+            version=os_version or "",
+        ),
+        access={
+            "ssh": SnapshotAccessMethod(available=ssh_access, status=ssh_status),
+        },
+        technologies=technologies,
         listening_ports=list(listening_ports or []),
-        postgresql_present=postgresql_present,
-        postgresql_version=postgresql_version,
-        transport=transport,
+        running_services=list(running_services or []),
+        tool_catalog_hash=hashes.get("tool_catalog_hash", ""),
+        capability_policy_hash=hashes.get("capability_policy_hash", ""),
+        evidence_refs=refs,
         tool_ids=tuple(tool_ids),
         collector=collector,
         confidence=confidence,
-        evidence_ref=evidence_ref,
         collected_at=collected_at or utc_now(),
         limitations=list(limitations or []),
         error=error,
         error_code=error_code,
+        os_name=os_name,
+        os_family=os_family,
+        os_version=os_version,
+        ssh_access=ssh_access,
+        postgresql_present=postgresql_present,
+        postgresql_version=postgresql_version,
+        evidence_ref=evidence_ref,
+        transport=transport,
     )
 
 
@@ -259,16 +348,19 @@ def persist_host_capability_snapshot(
     known_secrets: list[str] | None = None,
 ) -> Path:
     """Persist a capability snapshot under the host preflight directory."""
+    # Ensure identity fields are populated for the on-disk document.
+    if not snapshot.client_id:
+        snapshot.client_id = client_slug
+    if not snapshot.inventory_version_id:
+        snapshot.inventory_version_id = inventory_version_id
+
     root = (
         Path(artifacts_root) / client_slug / "preflight" / inventory_version_id / snapshot.host_id
     )
     root.mkdir(parents=True, exist_ok=True)
     path = root / "capability_snapshot.json"
-    payload: dict[str, Any] = {
-        "schema": "host_capability_snapshot.v1",
-        "snapshot": snapshot.to_dict(),
-        "written_at": utc_now(),
-    }
+    payload = snapshot.to_dict()
+    payload["written_at"] = utc_now()
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     assert_no_secrets(text, known_secrets=known_secrets or [])
     path.write_text(text, encoding="utf-8")

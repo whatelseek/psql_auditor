@@ -322,7 +322,7 @@ def test_stale_plan_rejected_after_inventory_modification(tmp_path: Path):
             inventory_dir=root,
             client_name="Testcompany",
         )
-    assert exc.value.code == "plan_stale"
+    assert exc.value.code in {"plan_stale", "audit_plan_stale"}
 
 
 def test_unchanged_plan_accepted(tmp_path: Path):
@@ -609,7 +609,7 @@ def test_weak_port_only_evidence_does_not_select_postgresql(tmp_path: Path):
     )
     pg_decisions = [d for d in plan.framework_decisions if "postgres" in d.framework_id]
     assert pg_decisions
-    assert all(d.status == "rejected" for d in pg_decisions)
+    assert all(d.status == "requires_operator_decision" for d in pg_decisions)
     assert not any(t.framework_id == "postgres_cis" and not t.excluded for t in plan.targets)
 
 

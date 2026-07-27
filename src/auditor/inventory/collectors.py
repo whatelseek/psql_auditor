@@ -106,17 +106,17 @@ SSH_COMMANDS: tuple[str, ...] = (
     "hostname",
     "cat /etc/os-release",
     "uname -a",
+    "uname -m",
+    "ss -lntp",
     "ss -lntup",
-    "netstat -lntup",
     "systemctl list-units --type=service --state=running --no-pager",
-    "systemctl list-units --type=service --all --no-pager",
     "command -v psql",
     "command -v postgres",
-    "ps -ef",
     "psql --version",
     "postgres --version",
-    "dpkg-query -W postgresql",
-    "rpm -q postgresql",
+    "systemctl is-active postgresql",
+    "ps -ef",
+    "systemctl list-units --type=service --all --no-pager",
 )
 
 WINRM_COMMANDS: tuple[str, ...] = (
@@ -276,6 +276,10 @@ def _extract_postgres_linux(
             if re.search(r"\b(postgres|postmaster)\b", ln, re.I) and "grep" not in ln.lower():
                 processes.append(ln.strip())
 
+    active = results.get("systemctl is-active postgresql")
+    if active and active.exit_code == 0 and "active" in (active.stdout or "").lower():
+        services.append("postgresql")
+
     for cmd in (
         "systemctl list-units --type=service --all --no-pager",
         "systemctl list-units --type=service --state=running --no-pager",
@@ -290,14 +294,6 @@ def _extract_postgres_linux(
             name = parts[0].removesuffix(".service")
             if "postgres" in name.lower() and name not in services:
                 services.append(name)
-
-    for pkg_cmd in ("dpkg-query -W postgresql", "rpm -q postgresql"):
-        pkg = results.get(pkg_cmd)
-        if pkg and pkg.exit_code == 0 and pkg.stdout.strip():
-            for ln in pkg.stdout.splitlines():
-                line = ln.strip()
-                if line and line not in packages:
-                    packages.append(line)
 
     for cmd in ("command -v psql", "command -v postgres"):
         res = results.get(cmd)
@@ -670,6 +666,25 @@ class SshDiscoveryCollector:
         targets = list_client_ssh_targets(self.inventory_dir, self.client_name)
         results: list[DiscoveredHostFacts] = []
         for host in inventory.hosts:
+            if getattr(host, "is_unsupported_network_device", False):
+                # Unsupported network devices are recorded without SSH probing.
+                results.append(
+                    DiscoveredHostFacts(
+                        host_id=host.host_id,
+                        transport="",
+                        collector="unsupported",
+                        collected_at=utc_now(),
+                        error=(
+                            f"unsupported asset_type={host.asset_type or 'network_device'} "
+                            f"vendor={host.vendor or 'unknown'}"
+                        ),
+                        error_code=ERROR_UNSUPPORTED_TRANSPORT,
+                        limitations=["unsupported_asset", "missing:cisco.cli.read"],
+                        confidence="low",
+                        discovery_tool_ids=discovery_tool_ids,
+                    )
+                )
+                continue
             if "ssh" not in host.connection_types and host.os_family == "windows":
                 continue
             if "ssh" not in host.connection_types and "winrm" in host.connection_types:
@@ -819,9 +834,9 @@ class SshDiscoveryCollector:
                 limitations.append("os_release_unavailable")
 
         listening_ports: list[int] = []
-        ports_res = by_cmd.get("ss -lntup")
+        ports_res = by_cmd.get("ss -lntp")
         if not (ports_res and ports_res.stdout.strip() and not ports_res.error_code):
-            ports_res = by_cmd.get("netstat -lntup")
+            ports_res = by_cmd.get("ss -lntup")
         if ports_res and ports_res.stdout.strip() and not ports_res.error_code:
             listening_ports = _parse_listening_ports_linux(ports_res.stdout)
         elif ports_res and ports_res.error_code:
@@ -963,6 +978,13 @@ class SshDiscoveryCollector:
 
             snapshot = build_host_capability_snapshot(
                 host_id=facts.host_id,
+                client_id=inventory.client_id,
+                inventory_version_id=inventory.version.version_id,
+                asset_type=next(
+                    (h.asset_type for h in inventory.hosts if h.host_id == facts.host_id),
+                    "server",
+                )
+                or "server",
                 os_name=facts.os_name,
                 os_family=facts.os_family,
                 os_version=facts.os_version,
@@ -971,6 +993,7 @@ class SshDiscoveryCollector:
                     ERROR_AUTHENTICATION_FAILED,
                     ERROR_HOST_UNREACHABLE,
                     ERROR_CONNECTION_TIMEOUT,
+                    ERROR_UNSUPPORTED_TRANSPORT,
                 }
                 and bool(
                     facts.os_family or facts.hostname or facts.services or not facts.error_code
@@ -979,6 +1002,11 @@ class SshDiscoveryCollector:
                 listening_ports=list(facts.listening_ports),
                 postgresql_present="postgresql" in facts.services,
                 postgresql_version=facts.postgres_version,
+                postgresql_status=(
+                    "confirmed"
+                    if "postgresql" in facts.services
+                    else ("unknown" if facts.error_code else "absent")
+                ),
                 transport="ssh",
                 tool_ids=tuple(facts.discovery_tool_ids),
                 collector="ssh",

@@ -34,6 +34,7 @@ from auditor.inventory.discovery_evidence import COLLECTOR_VERSION
 from auditor.inventory.loaders import InventoryLoadError, load_raw_inventory
 from auditor.inventory.normalize import normalize_inventory
 from auditor.inventory.plan import (
+    assert_plan_matches_framework_hash,
     assert_plan_matches_inventory,
     assert_plan_matches_preflight,
     assert_plan_matches_tool_registry,
@@ -99,8 +100,14 @@ def analyze_client_inventory(
     client_name = validate_client_name(client_name)
     inventory = load_client_inventory(inventory_dir, client_name)
 
-    if discoverer is not None:
-        collector: DiscoveryCollector = discoverer
+    # Do not start discovery when inventory validation contains errors.
+    discovery_blocked = inventory.error_count > 0
+    if discovery_blocked:
+        collector: DiscoveryCollector = NoopDiscoveryCollector()
+        discoveries: list[Any] = []
+    elif discoverer is not None:
+        collector = discoverer
+        discoveries = collector.discover(inventory)
     else:
         if artifacts_root is None and discovery:
             try:
@@ -113,8 +120,7 @@ def analyze_client_inventory(
             artifacts_root=artifacts_root,
             enabled=discovery,
         )
-
-    discoveries = collector.discover(inventory)
+        discoveries = collector.discover(inventory)
     if discoveries:
         inventory = reconcile_inventory(inventory, discoveries)
 
@@ -211,6 +217,17 @@ def confirm_audit_plan(
             current = load_client_inventory(inventory_dir, client_name)
         assert_plan_matches_inventory(plan, current)
         assert_plan_matches_tool_registry(plan)
+        from auditor.inventory.plan import framework_selection_hash
+        from auditor.inventory.select_frameworks import select_frameworks_for_inventory
+
+        current_fw_hash = framework_selection_hash(
+            select_frameworks_for_inventory(
+                current,
+                detect_technologies(current),
+                agents_dir=None,
+            )
+        )
+        assert_plan_matches_framework_hash(plan, framework_hash=current_fw_hash)
         # If a newer preflight exists for the same inventory with different
         # effective facts, the plan is stale (discovery changed post-plan).
         if inventory_dir is not None and client_name is not None:
@@ -261,6 +278,19 @@ def plan_to_audit_request_payload(
     ensure_plan_confirmed(plan)
     assert_plan_matches_inventory(plan, inventory)
     assert_plan_matches_tool_registry(plan)
+    from auditor.inventory.plan import framework_selection_hash
+    from auditor.inventory.select_frameworks import select_frameworks_for_inventory
+
+    assert_plan_matches_framework_hash(
+        plan,
+        framework_hash=framework_selection_hash(
+            select_frameworks_for_inventory(
+                inventory,
+                detect_technologies(inventory),
+                agents_dir=None,
+            )
+        ),
+    )
 
     host_by_id = {h.host_id: h for h in inventory.hosts}
     by_ref: dict[str, list[dict[str, str]]] = {}

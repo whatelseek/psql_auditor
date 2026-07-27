@@ -59,9 +59,11 @@ duplicate IDs non-executable; non-zero SSH exit → error.
 
 Tool-driven discovery POC (эта ревизия): `INPUT-005` остаётся `[~]`. SSH
 discovery выбирает инструменты через `ToolRegistry`, выполняет allow-listed
-пробы через `ssh_run`, сохраняет `HostCapabilitySnapshot` и фиксирует hashes
+пробы через `ssh_run`, сохраняет `HostCapabilitySnapshot` v1, классифицирует
+технологии (confirmed/suspected/absent/unknown/unsupported), помечает
+unsupported network devices (Cisco без `cisco.cli.read`) и фиксирует hashes
 inventory / discovery / framework / tool-catalog / policy в `AuditPlan`.
-Подтверждение оператора обязательно до audit execution.
+Подтверждение оператора обязательно до создания `AuditRun` / `AuditJob`.
 `TOOL-002`…`TOOL-005` остаются открытыми. Не помечать `[x]` без независимой
 приёмки.
 
@@ -69,9 +71,9 @@ inventory / discovery / framework / tool-catalog / policy в `AuditPlan`.
 | ----------------- | --------------------------------------------------- |
 | Format / Lint     | Passed                                              |
 | Type check        | Passed, 94 files                                    |
-| Unit tests        | 482 passed                                          |
+| Unit tests        | 483 passed                                          |
 | Integration tests | 8 passed                                            |
-| Full suite        | 490 passed                                          |
+| Full suite        | 491 passed                                          |
 | Defect map        | `validate-defect-map: OK` (77/77)                   |
 
 ## Реестр задач

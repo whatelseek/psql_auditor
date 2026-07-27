@@ -39,10 +39,14 @@ def _command_output(command: str) -> str:
         return "ssh-integ-01\n"
     if command == "cat /etc/os-release":
         return 'NAME="Ubuntu"\nPRETTY_NAME="Ubuntu 24.04 LTS"\nVERSION_ID="24.04"\n'
+    if command == "uname -m":
+        return "x86_64\n"
     if command.startswith("uname"):
         return "Linux ssh-integ-01 6.8.0 x86_64 GNU/Linux\n"
-    if command in {"ss -lntup", "netstat -lntup"}:
+    if command in {"ss -lntp", "ss -lntup", "netstat -lntup"}:
         return "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\nLISTEN 0 128 0.0.0.0:5432 0.0.0.0:*\n"
+    if command == "systemctl is-active postgresql":
+        return "active\n"
     if "systemctl list-units --type=service --state=running" in command:
         return (
             "sshd.service loaded active running OpenSSH server\n"
@@ -61,10 +65,6 @@ def _command_output(command: str) -> str:
         return "psql (PostgreSQL) 16.2\n"
     if command == "postgres --version":
         return "postgres (PostgreSQL) 16.2\n"
-    if command == "dpkg-query -W postgresql":
-        return "postgresql\t16.2\n"
-    if command == "rpm -q postgresql":
-        return ""
     if command == "ps -ef":
         return (
             "root 1 0 0 00:00 ? 00:00:00 /sbin/init\npostgres 100 1 0 00:00 ? 00:00:01 postgres\n"
