@@ -5,7 +5,7 @@
   "description": "Execute a read-only shell command on an inventory SSH target.",
   "transport": "ssh",
   "adapter": "auditor.tools.ssh:invoke_ssh_run",
-  "capabilities": ["host.execute", "host.read"],
+  "capabilities": ["host.execute", "host.read", "ssh.command.read"],
   "risk": "low",
   "readonly": true,
   "inventory_access": ["ssh"],

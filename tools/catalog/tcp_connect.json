@@ -1,0 +1,36 @@
+{
+  "id": "tcp_connect",
+  "version": "1.0.0",
+  "title": "TCP connect probe",
+  "description": "Check explicitly approved TCP ports on an inventory host.",
+  "transport": "tcp",
+  "adapter": "auditor.tools.tcp_connect:invoke_tcp_connect",
+  "capabilities": ["tcp.connect"],
+  "risk": "low",
+  "readonly": true,
+  "inventory_access": ["ssh", "tcp"],
+  "credential_source": "none",
+  "blocked_operations": ["subnet_scan", "port_sweep", "target_override"],
+  "timeout_seconds": 10,
+  "max_output_bytes": 16384,
+  "enabled": true,
+  "profiles": ["poc_audit_v1"],
+  "input_schema": {
+    "type": "object",
+    "required": ["ports"],
+    "properties": {
+      "ports": {
+        "type": "array",
+        "items": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "maxItems": 20
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "status": {"type": "string"},
+      "output": {"type": "string"}
+    }
+  }
+}

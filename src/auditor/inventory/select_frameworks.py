@@ -1,4 +1,9 @@
-"""Automatic framework selection from inventory technology detections."""
+"""Automatic framework selection from inventory technology detections.
+
+Default path: declarative Markdown applicability metadata (INPUT-005 dynamic).
+Legacy hardcoded platform maps remain available only via
+``use_legacy_tech_mapping=True``.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +17,7 @@ from auditor.domain.inventory import (
 from auditor.frameworks import Framework, get_framework, list_frameworks
 from auditor.inventory.detect import detection_status_for
 
-# Maps detected technology → preferred framework family / id prefixes.
+# Deprecated: kept only for ``use_legacy_tech_mapping=True``.
 _TECH_FRAMEWORK_PREFERENCES: dict[str, tuple[str, ...]] = {
     "ubuntu": ("ubuntu_cis_24_l2", "ubuntu", "linux_os", "linux"),
     "linux": ("ubuntu_cis_24_l2", "linux_os", "linux"),
@@ -31,16 +36,30 @@ def select_frameworks_for_inventory(
     detections: list[TechnologyDetection],
     *,
     agents_dir: Path | str | None = None,
+    use_legacy_tech_mapping: bool = False,
 ) -> list[FrameworkSelectionDecision]:
     """Select audit frameworks for each host/service based on detections.
 
-    Decision statuses (INPUT-005): selected, not_applicable,
-    requires_operator_decision, unsupported, blocked.
+    By default uses declarative Markdown applicability metadata. Pass
+    ``use_legacy_tech_mapping=True`` to force the deprecated hardcoded map.
     """
+    if use_legacy_tech_mapping:
+        return _legacy_select_frameworks_for_inventory(inventory, detections, agents_dir=agents_dir)
+    from auditor.inventory.dynamic_select import select_frameworks_dynamic
+
+    return select_frameworks_dynamic(inventory, detections, agents_dir=agents_dir)
+
+
+def _legacy_select_frameworks_for_inventory(
+    inventory: ClientInventory,
+    detections: list[TechnologyDetection],
+    *,
+    agents_dir: Path | str | None = None,
+) -> list[FrameworkSelectionDecision]:
+    """Hardcoded platform→framework map (legacy / explicit opt-in only)."""
     available = {fw.id: fw for fw in list_frameworks(agents_dir)}
     decisions: list[FrameworkSelectionDecision] = []
 
-    # General infrastructure once per client.
     infra_fw = (
         get_framework("host_facts", agents_dir)
         or get_framework("it_audit", agents_dir)
@@ -186,7 +205,6 @@ def select_frameworks_for_inventory(
                 )
             )
 
-        # PostgreSQL — confirmed only; suspected requires operator decision.
         pg_status = detection_status_for(detections, "postgresql", host.host_id)
         pg_target = f"{host.host_id}/postgresql"
         fw = _pick_available(available, _TECH_FRAMEWORK_PREFERENCES["postgresql"])

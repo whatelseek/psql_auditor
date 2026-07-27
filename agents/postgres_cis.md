@@ -5,10 +5,43 @@ description: PostgreSQL CIS / hardening checklist
 domain: cybersecurity
 language: en
 family_id: postgres_cis
+type: audit
+title: PostgreSQL CIS Assessment
 detect:
   binaries: [postgres, psql]
   ports: [5432]
 version: "1.0"
+applicability:
+  all:
+    - fact: asset.type
+      operator: in
+      value: [server, database_server]
+  any:
+    - fact: technology.postgresql.status
+      operator: in
+      value: [confirmed, suspected]
+required_capabilities:
+  any_of:
+    - ssh.command.read
+    - postgresql.query.read
+required_facts:
+  - asset.type
+  - technology.postgresql.status
+discovery_hints:
+  - capability: tcp.connect
+    purpose: Detect PostgreSQL listener
+    arguments:
+      ports: [5432]
+    expected_facts: [port.5432.status]
+  - capability: ssh.command.read
+    purpose: Confirm PostgreSQL installation
+    operation_ids:
+      - detect_postgresql_binary
+      - detect_postgresql_service
+      - read_postgresql_version
+    expected_facts:
+      - technology.postgresql.status
+      - technology.postgresql.version
 ---
 # PostgreSQL Security Audit Checklist
 

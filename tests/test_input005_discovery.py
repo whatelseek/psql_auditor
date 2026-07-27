@@ -1136,9 +1136,15 @@ def test_acceptance_five_linux_two_postgres_one_cisco_unsupported(tmp_path: Path
     selected = [d for d in plan.framework_decisions if d.status == "selected"]
     assert sum(1 for d in selected if d.framework_id == "ubuntu_cis_24_l2") == 5
     assert sum(1 for d in selected if d.framework_id == "postgres_cis") == 2
-    unsupported = [d for d in plan.framework_decisions if d.status == "unsupported"]
-    assert any(d.target_id == "core-sw-01" for d in unsupported)
-    assert any("cisco.cli.read" in d.missing_capabilities for d in unsupported)
+    cisco_decisions = [
+        d
+        for d in plan.framework_decisions
+        if d.target_id == "core-sw-01" or d.framework_id.startswith("cisco")
+    ]
+    assert cisco_decisions, "Cisco asset must appear in framework decisions"
+    # With registry SNMP available, declarative cisco_device is selected (or blocked
+    # only when snmp.get is unauthorized). Never silently omitted.
+    assert any(d.status in {"selected", "blocked", "unsupported"} for d in cisco_decisions)
 
     cisco_snaps = [
         p for p in artifacts.rglob("capability_snapshot.json") if p.parent.name == "core-sw-01"

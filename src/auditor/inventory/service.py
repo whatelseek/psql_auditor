@@ -189,6 +189,77 @@ def analyze_client_inventory(
         except Exception:  # noqa: BLE001
             pass
 
+    # Dynamic selection path: normalized facts → candidates → registry discovery
+    # → re-evaluate. SSH collector facts already feed detections; registry tools
+    # fill remaining gaps (TCP/HTTP/SNMP) without hardcoded framework maps.
+    try:
+        from auditor.domain.normalized_facts import (
+            build_inventory_fact_sets,
+            facts_to_serializable,
+            merge_facts,
+        )
+        from auditor.inventory.discovery_plan import build_discovery_plan
+        from auditor.inventory.framework_candidates import evaluate_framework_candidates
+        from auditor.inventory.registry_discovery import (
+            execute_discovery_plan_sync,
+            persist_discovery_artifacts,
+        )
+
+        fact_sets = build_inventory_fact_sets(inventory, detections)
+        candidates = evaluate_framework_candidates(host_facts=fact_sets, agents_dir=agents_dir)
+        dplan = build_discovery_plan(candidates, fact_sets, agents_dir=agents_dir)
+        # Skip steps whose expected facts are already present (e.g. after SSH).
+        # SSH evidence is collected by SshDiscoveryCollector; this executor only
+        # runs TCP/HTTP/SNMP registered adapters.
+        pending = []
+        for step in dplan.steps:
+            if step.capability not in {
+                "tcp.connect",
+                "http.get",
+                "snmp.get",
+                "snmp.walk",
+            }:
+                continue
+            fmap = fact_sets.get(step.host_id)
+            have = fmap.as_map() if fmap is not None else {}
+            if step.expected_facts and all(f in have for f in step.expected_facts):
+                continue
+            pending.append(step)
+        from auditor.inventory.discovery_plan import DiscoveryPlan as _DPlan
+
+        pending_plan = _DPlan(plan_id=dplan.plan_id, steps=tuple(pending))
+        invocations: list[Any] = []
+        if pending_plan.steps and discovery and not discovery_blocked:
+            host_addresses = {h.host_id: (h.address or h.host_id) for h in inventory.hosts}
+            try:
+                pending_plan, extras, invocations = execute_discovery_plan_sync(
+                    pending_plan, host_addresses=host_addresses
+                )
+                for host_id, extra in extras.items():
+                    if host_id in fact_sets:
+                        fact_sets[host_id] = merge_facts(fact_sets[host_id], extra)
+                candidates = evaluate_framework_candidates(
+                    host_facts=fact_sets, agents_dir=agents_dir
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        if artifacts_root is not None:
+            try:
+                persist_discovery_artifacts(
+                    artifacts_root=artifacts_root,
+                    client_slug=client_name,
+                    inventory_version_id=inventory.version.version_id,
+                    candidates=candidates,
+                    discovery_plan=pending_plan,
+                    fact_sets={k: list(v.facts) for k, v in fact_sets.items()},
+                    invocations=invocations,
+                )
+                _ = facts_to_serializable(fact_sets)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+
     # Build provisional plan decisions for selected framework list / revision.
     provisional = build_plan(inventory, detections, agents_dir=agents_dir)
     selected = sorted(

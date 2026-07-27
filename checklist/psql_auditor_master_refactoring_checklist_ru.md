@@ -230,15 +230,15 @@ secret-safe invocation, неизменяемый snapshot каталога на 
 Частичные доказательства `INPUT-005`: типизированный `AuditPlan` с обязательным
 подтверждением; stale-plan (`audit_plan_stale`) при расхождении inventory /
 discovery / framework / tool / policy; immutable `plan_revision_id`;
-персистенция и reload effective inventory для confirm/start; runtime-резолв
-credentials без персистенции секретов; **tool-driven SSH discovery POC** —
-`SshDiscoveryCollector` через `ToolRegistry`/`ssh_run` без `_tcp_reachable`;
-`HostCapabilitySnapshot` v1 с technologies из `detect_technologies`
-(port-only → suspected; Cisco unsupported snapshot); статусы технологий
-confirmed/suspected/absent/unknown/unsupported; решения фреймворков
-selected/not_applicable/requires_operator_decision/unsupported/blocked;
-client-level frameworks → явные per-host targets; discovery не стартует при
-validation errors; jobs только после confirmation; docs/tests обновлены.
+персистенция и reload effective inventory для confirm/start; **динамический
+выбор фреймворков** из declarative Markdown `applicability` (typed predicates;
+без hardcoded platform→framework map; legacy только через
+`use_legacy_tech_mapping`); normalized facts + candidate evaluation +
+capability-based discovery plan через ToolRegistry; registry TCP/HTTP/SNMP
+adapters; tool-driven SSH discovery без `_tcp_reachable`;
+`HostCapabilitySnapshot` v1; Cisco framework из Markdown + snmp.get;
+jobs только после confirmation; docs/tests обновлены
+(`tests/test_input005_dynamic_selection.py`).
 Независимая приёмка обязательна — не помечать `[x]` автоматически.
 
 Дополнительные критерии `INPUT-005`:

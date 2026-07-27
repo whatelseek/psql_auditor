@@ -1,0 +1,32 @@
+{
+  "id": "snmp_walk",
+  "version": "1.0.0",
+  "title": "SNMP WALK",
+  "description": "Bounded SNMP WALK over allow-listed OID prefixes.",
+  "transport": "snmp",
+  "adapter": "auditor.tools.snmp:invoke_snmp_walk",
+  "capabilities": ["snmp.walk"],
+  "risk": "low",
+  "readonly": true,
+  "inventory_access": ["snmp"],
+  "credential_source": "inventory:snmp",
+  "blocked_operations": ["snmp_set", "unbounded_walk"],
+  "timeout_seconds": 15,
+  "max_output_bytes": 65536,
+  "enabled": true,
+  "profiles": ["poc_audit_v1"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "oid_prefix": {"type": "string"},
+      "max_rows": {"type": "integer", "minimum": 1, "maximum": 100}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "status": {"type": "string"},
+      "output": {"type": "string"}
+    }
+  }
+}

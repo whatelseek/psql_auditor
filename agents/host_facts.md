@@ -5,9 +5,24 @@ description: Host inventory facts — OS, hardware, storage, network, services, 
 domain: it
 language: en
 family_id: host_facts
+type: audit
+title: Host Facts Inventory
 detect:
   always: true
 version: "1.0"
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+    - fact: asset.type
+      operator: in
+      value: [server, database_server, workstation]
+required_capabilities:
+  any_of:
+    - ssh.command.read
+    - winrm.command.read
+required_facts:
+  - asset.id
 ---
 # Host Facts Inventory Checklist
 

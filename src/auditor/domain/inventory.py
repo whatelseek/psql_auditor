@@ -250,3 +250,7 @@ class FrameworkSelectionDecision(BaseModel):
     reason: StrictStr = Field(min_length=1)
     status: FrameworkDecisionStatus
     missing_capabilities: tuple[StrictStr, ...] = ()
+    matched_facts: tuple[StrictStr, ...] = ()
+    missing_facts: tuple[StrictStr, ...] = ()
+    evidence_refs: tuple[StrictStr, ...] = ()
+    confidence: StrictFloat = 0.0

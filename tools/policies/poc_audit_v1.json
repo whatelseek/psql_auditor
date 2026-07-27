@@ -1,11 +1,18 @@
 {
   "version": "1.0.0",
   "profile": "poc_audit_v1",
-  "description": "POC capability policy: SSH host inspection only via registered adapters.",
+  "description": "POC capability policy: registered SSH/TCP/HTTP/SNMP discovery adapters.",
   "readonly_required": true,
-  "allowed_tools": ["ssh_run", "ssh_read_file"],
+  "allowed_tools": [
+    "ssh_run",
+    "ssh_read_file",
+    "tcp_connect",
+    "http_get",
+    "snmp_get",
+    "snmp_walk"
+  ],
   "denied_tools": [],
-  "allowed_transports": ["ssh"],
+  "allowed_transports": ["ssh", "tcp", "http", "snmp"],
   "max_output_chars": 6000,
   "require_inventory_credentials": true
 }

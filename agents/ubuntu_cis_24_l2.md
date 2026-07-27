@@ -5,9 +5,36 @@ description: CIS Ubuntu Linux 24.04 LTS v1.0.0 Level 2 Server (simplified checkl
 domain: cybersecurity
 language: en
 family_id: ubuntu_cis_24_l2
+type: audit
+title: CIS Ubuntu 24.04 L2
 detect:
   os_ids: [ubuntu]
 version: "24.0"
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+  any:
+    - fact: os.distribution
+      operator: in
+      value: [ubuntu]
+    - fact: technology.ubuntu.status
+      operator: in
+      value: [confirmed, suspected]
+    - fact: technology.linux.status
+      operator: in
+      value: [confirmed, suspected]
+required_capabilities:
+  any_of:
+    - ssh.command.read
+required_facts:
+  - os.family
+discovery_hints:
+  - capability: ssh.command.read
+    purpose: Confirm Linux/Ubuntu OS identity
+    operation_ids: [read_os_release]
+    expected_facts: [os.family, os.distribution, os.version]
 ---
 # CIS Ubuntu Linux 24.04 LTS v1.0.0 (Level 2 Server)
 

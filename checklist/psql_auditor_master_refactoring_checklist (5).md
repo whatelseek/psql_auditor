@@ -322,6 +322,14 @@ unregistered transport, bypass policy, or execute hidden arbitrary code.
 - immutable `plan_revision_id` derived from inventory version/hash, preflight
   revision, discovery/effective facts, framework, tool catalog, and capability
   policy hashes;
+- **dynamic framework selection** from declarative Markdown `applicability` /
+  `required_capabilities` / `required_facts` / `discovery_hints` (typed
+  predicates; no hardcoded platform→framework map on the default path; legacy
+  map behind `use_legacy_tech_mapping=True`);
+- normalized fact namespace + framework candidate evaluation + capability-based
+  discovery plans executed only through ToolRegistry adapters;
+- registry-driven TCP (`tcp_connect`), HTTP (`http_get`), and SNMP
+  (`snmp_get` / `snmp_walk`) discovery tools with fail-closed policy;
 - effective (reconciled) inventory is persisted and reloaded for confirm/start
   validation (not the raw source-only inventory);
 - client-level frameworks expand to explicit per-host plan targets so plan
@@ -336,6 +344,7 @@ unregistered transport, bypass policy, or execute hidden arbitrary code.
   discovery; `--refresh-discovery` optional); no assessment jobs before confirm;
 - docs: `docs/inventory-driven-audit.md` (+ RU manual); tests:
   `tests/test_input005_discovery.py`,
+  `tests/test_input005_dynamic_selection.py`,
   `tests/integration/test_ssh_discovery_container.py`.
   Independent acceptance still required — do not mark `[x]` automatically.
 

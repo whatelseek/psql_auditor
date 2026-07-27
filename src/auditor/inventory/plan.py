@@ -131,6 +131,10 @@ def generate_audit_plan(
         matched = host_by_id.get(host_id)
         if matched is None:
             continue
+        # Network devices may have declarative decisions (e.g. blocked/selected
+        # cisco_device) but are not executable SSH/WinRM audit job targets.
+        if matched.is_unsupported_network_device:
+            continue
         service = ""
         if "/" in decision.target_id:
             service = decision.target_id.split("/", 1)[1]
