@@ -247,7 +247,10 @@ sanitation, and provenance.
 - adapters `invoke_ssh_run` / `invoke_ssh_read_file` resolve target/credentials
   only from the active inventory/run context (`effective_settings`);
 - normalized `ToolResult` with secret-free target + provenance;
-- read-only command gate, timeout, output limits, and secret redaction;
+- strict command allow-list (no shell composition/interpreters); approved-path
+  gate for `ssh_read_file`; stdout/stderr secret scan/redaction;
+- fail-closed registry binding (no legacy SSH fallback); stale tool/policy hash
+  rejection on confirm/start/invoke; non-zero exit → `ToolResult.status=error`;
 - LangChain wrappers remain compatible with existing SSH audit behavior;
 - tests: `tests/test_tool_registry.py`.
 

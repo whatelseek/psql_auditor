@@ -181,7 +181,10 @@ POC частичные доказательства `TOOL-001` (не помеч�
 * adapters `invoke_ssh_run` / `invoke_ssh_read_file` резолвят target/credentials
   только из active inventory/run context (`effective_settings`);
 * normalized `ToolResult` с secret-free target и provenance;
-* read-only command gate, timeout, output limits и redaction секретов;
+* strict command allow-list (без shell composition/interpreters); approved-path
+  gate для `ssh_read_file`; scan/redaction stdout/stderr;
+* fail-closed registry binding (без legacy SSH fallback); reject stale
+  tool/policy hashes на confirm/start/invoke; non-zero exit → `error`;
 * LangChain wrappers совместимы с текущим SSH audit behavior;
 * тесты: `tests/test_tool_registry.py`.
 
