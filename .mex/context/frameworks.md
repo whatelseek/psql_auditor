@@ -41,4 +41,9 @@ Status: **INPUT-002 / AGENT-001 partial** — registry exists; independent accep
 
 ## Applicability
 
-`inventory/select_frameworks.py` maps `HostCapabilitySnapshot` + inventory declarations to decisions: `selected`, `not_applicable`, `requires_operator_decision`, `unsupported`, `blocked`. Plans record those decisions with framework hashes.
+Markdown frameworks may expose **strict structured applicability metadata** in front matter (`applicability`, `required_capabilities`, `required_facts`, `discovery_hints`), parsed by `auditor.domain.applicability.parse_applicability_meta` and `auditor.inventory.framework_meta`.
+
+- Invalid structured metadata remains **catalog-visible** but **non-executable**; sanitized validation errors are attached.
+- Legacy frameworks without structured metadata keep their previous executable state.
+- Predicates consume **normalized fact values only** (INPUT005-10); they do not run eval/regex/Jinja.
+- Production framework **selection** is still the existing hardcoded path in `inventory/select_frameworks.py` until INPUT005-12/13. Plans still record `selected` / `not_applicable` / `requires_operator_decision` / `unsupported` / `blocked`.

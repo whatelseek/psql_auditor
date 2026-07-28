@@ -35,6 +35,41 @@ from auditor.language import detect_report_language
 _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n(.*)\Z", re.DOTALL)
 
 
+def read_framework_front_matter(path: Path | str) -> dict[str, object]:
+    """Public YAML front-matter reader for ``agents/*.md`` framework files.
+
+    Returns an empty mapping when front matter is absent or not a mapping.
+    Does not raise on YAML errors — callers treat that as empty metadata.
+    """
+    file_path = Path(path)
+    text_body = file_path.read_text(encoding="utf-8")
+    match = _FRONTMATTER.match(text_body)
+    if not match:
+        return {}
+    try:
+        loaded = yaml.safe_load(match.group(1)) or {}
+    except yaml.YAMLError:
+        return {}
+    if isinstance(loaded, dict):
+        return dict(loaded)
+    return {}
+
+
+def human_applicability_text(raw: object) -> str:
+    """Extract legacy human-readable applicability string from front matter.
+
+    Structured applicability mappings are intentionally ignored here — they are
+    owned by :mod:`auditor.domain.applicability`.
+    """
+    if isinstance(raw, dict):
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
 @dataclass(frozen=True, slots=True)
 class FrameworkDetect:
     """Host-matching rules from agent frontmatter ``detect:`` block.
@@ -243,9 +278,9 @@ def _parse_agent_file(path: Path) -> Framework:
         # Match FrameworkRegistry: optional frontmatter → source-hash version.
         source_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         version = f"src-{source_hash[:12]}"
-    applicability = str(
-        meta.get("applicability") or meta.get("applies_to") or meta.get("scope") or ""
-    ).strip()
+    applicability = human_applicability_text(meta.get("applicability"))
+    if not applicability:
+        applicability = human_applicability_text(meta.get("applies_to") or meta.get("scope") or "")
     discovery_guidance = str(meta.get("discovery_guidance") or meta.get("discovery") or "").strip()
 
     return Framework(

@@ -19,6 +19,7 @@ from typing import Any, Iterable, Literal
 import yaml
 
 from auditor.checklist import Checklist, Requirement, parse_checklist_markdown
+from auditor.domain.applicability import parse_applicability_meta
 from auditor.frameworks import (
     _FRONTMATTER,
     Framework,
@@ -26,6 +27,7 @@ from auditor.frameworks import (
     _default_aliases,
     _normalize_framework_language,
     _parse_detect,
+    human_applicability_text,
 )
 
 ValidationLevel = Literal["error", "warning", "information"]
@@ -397,9 +399,9 @@ def _parse_registered_framework(path: Path) -> RegisteredFramework:
     version = str(meta.get("version") or meta.get("framework_version") or "").strip()
     if not version:
         version = deterministic_framework_version(source_hash)
-    applicability = str(
-        meta.get("applicability") or meta.get("applies_to") or meta.get("scope") or ""
-    ).strip()
+    applicability = human_applicability_text(meta.get("applicability"))
+    if not applicability:
+        applicability = human_applicability_text(meta.get("applies_to") or meta.get("scope") or "")
     discovery_guidance = str(
         meta.get("discovery_guidance")
         or meta.get("discovery")
@@ -425,6 +427,25 @@ def _parse_registered_framework(path: Path) -> RegisteredFramework:
     checklist = parse_checklist_markdown(body, source_path=str(path))
     requirements = tuple(_registered_from_requirement(r) for r in checklist.requirements)
     issues = _validate_framework(framework, requirements, yaml_error=yaml_error, path=path)
+    app_meta = parse_applicability_meta(meta)
+    if app_meta.has_structured_applicability and not app_meta.metadata_valid:
+        for err in app_meta.validation_errors:
+            issues.append(
+                FrameworkValidationIssue(
+                    level="error",
+                    code="invalid_applicability_metadata",
+                    message=err,
+                    framework_id=framework.id,
+                    location=str(path),
+                )
+            )
+        framework = replace(
+            framework,
+            executable=False,
+            validation_errors=tuple(
+                dict.fromkeys([*framework.validation_errors, *app_meta.validation_errors])
+            ),
+        )
     return RegisteredFramework(
         framework=framework,
         applicability=applicability,
