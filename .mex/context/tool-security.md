@@ -30,7 +30,7 @@ last_updated: 2026-07-28
 [`ToolRegistry`](mex://class:a76e423f08f4386bde84cb33bfff24ca) in `src/auditor/tool_registry.py` + `tools/catalog/*.json`.
 
 - Catalog root is `settings.tools_dir` (`TOOLS_DIR`; default `tools`, container `/app/tools`)
-- `ApplicationRuntime.start()` always validates the registry (including constructor-injected ones) against `settings.tools_dir` + `expected_profile` before graph construction; origin path mismatches and fake registries fail closed. Startup errors expose only code/tool ID/profile/catalog path — never raw manifest/policy values.
+- `ApplicationRuntime.start()` always validates the registry (including constructor-injected ones) against `settings.tools_dir` + `expected_profile` before graph construction; origin path mismatches and fake registries fail closed. Injected registries are compared against a fresh on-disk `load_tool_registry(TOOLS_DIR)` snapshot (hashes, policy, required manifest trust fields); mismatches raise `registry_snapshot_mismatch`. Startup errors expose only code/tool ID/profile/catalog path — never raw manifest/policy values.
 - Manifests declare transport, entrypoint, limits, executability
 - Invalid tools may appear in catalog but are **not** LLM-bound
 - Plan/run pin `tool_catalog_hash` and `capability_policy_hash`; stale snapshots raise `tool_snapshot_stale`

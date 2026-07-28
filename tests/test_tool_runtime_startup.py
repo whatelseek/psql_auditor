@@ -396,7 +396,9 @@ def test_required_manifest_outside_catalog_fails(tmp_path: Path) -> None:
             tools_dir=root,
             expected_profile=POC_TOOL_PROFILE,
         )
-    assert exc_info.value.code == "manifest_outside_catalog"
+    # source_path drift is rejected by the on-disk snapshot comparison.
+    assert exc_info.value.code == "registry_snapshot_mismatch"
+    assert exc_info.value.tool_id == "ssh_run"
     assert "tool=ssh_run" in str(exc_info.value)
 
 
@@ -462,3 +464,167 @@ def test_compose_mounts_tools_readonly() -> None:
     assert "TOOLS_DIR: /app/tools" in text
     assert "./tools:/app/tools:ro" in text
     assert text.count("./tools:/app/tools:ro") == 1
+
+
+@pytest.mark.asyncio
+async def test_untouched_injected_registry_passes_snapshot(tmp_path: Path) -> None:
+    tools = _seed_valid_tools(tmp_path / "tools")
+    injected = load_tool_registry(tools, profile=POC_TOOL_PROFILE)
+    runtime = ApplicationRuntime(
+        _settings(tmp_path, tools),
+        tool_registry=injected,
+        graph_factory=lambda _rt: _FakeGraph(),
+    )
+    await runtime.start()
+    try:
+        assert runtime.tool_registry is injected
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_replaced_adapter_same_source_path_fails(tmp_path: Path) -> None:
+    root = _seed_valid_tools(tmp_path / "tools")
+    injected = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    original = injected.get("ssh_run")
+    assert original is not None
+    canary_adapter = f"auditor.tools.ssh:evil_{CANARY}"
+    injected.tools["ssh_run"] = replace(original, adapter=canary_adapter)
+
+    graph_calls: list[object] = []
+
+    def boom(_runtime: ApplicationRuntime):
+        graph_calls.append(_runtime)
+        raise AssertionError("graph must not be constructed")
+
+    runtime = ApplicationRuntime(
+        _settings(tmp_path, root),
+        tool_registry=injected,
+        graph_factory=boom,
+    )
+    with pytest.raises(RuntimeStartupError) as exc_info:
+        await runtime.start()
+    message = str(exc_info.value)
+    assert "code=registry_snapshot_mismatch" in message
+    assert "tool=ssh_run" in message
+    assert canary_adapter not in message
+    assert CANARY not in message
+    assert graph_calls == []
+
+
+@pytest.mark.asyncio
+async def test_replaced_manifest_same_source_path_fails(tmp_path: Path) -> None:
+    root = _seed_valid_tools(tmp_path / "tools")
+    injected = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    original = injected.get("ssh_run")
+    assert original is not None
+    injected.tools["ssh_run"] = replace(
+        original,
+        version="9.9.9",
+        title=f"tampered-{CANARY}",
+        description=f"desc-{CANARY}",
+    )
+    runtime = ApplicationRuntime(
+        _settings(tmp_path, root),
+        tool_registry=injected,
+    )
+    with pytest.raises(RuntimeStartupError) as exc_info:
+        await runtime.start()
+    message = str(exc_info.value)
+    assert "code=registry_snapshot_mismatch" in message
+    assert "tool=ssh_run" in message
+    assert CANARY not in message
+    assert "9.9.9" not in message
+
+
+@pytest.mark.asyncio
+async def test_replaced_policy_same_policy_path_fails(tmp_path: Path) -> None:
+    root = _seed_valid_tools(tmp_path / "tools")
+    injected = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    assert injected.policy is not None
+    injected.policy = replace(
+        injected.policy,
+        description=f"policy-{CANARY}",
+        max_output_chars=1,
+    )
+    runtime = ApplicationRuntime(
+        _settings(tmp_path, root),
+        tool_registry=injected,
+    )
+    with pytest.raises(RuntimeStartupError) as exc_info:
+        await runtime.start()
+    message = str(exc_info.value)
+    assert "code=registry_snapshot_mismatch" in message
+    assert CANARY not in message
+
+
+@pytest.mark.unit
+def test_changed_manifest_source_hash_fails(tmp_path: Path) -> None:
+    root = _seed_valid_tools(tmp_path / "tools")
+    injected = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    original = injected.get("ssh_run")
+    assert original is not None
+    injected.tools["ssh_run"] = replace(original, source_hash=f"hash-{CANARY}")
+    with pytest.raises(RuntimeToolCatalogError) as exc_info:
+        validate_runtime_tool_registry(
+            injected,
+            tools_dir=root,
+            expected_profile=POC_TOOL_PROFILE,
+        )
+    assert exc_info.value.code == "registry_snapshot_mismatch"
+    assert exc_info.value.tool_id == "ssh_run"
+    assert CANARY not in str(exc_info.value)
+
+
+@pytest.mark.unit
+def test_changed_catalog_hash_fails(tmp_path: Path) -> None:
+    root = _seed_valid_tools(tmp_path / "tools")
+    injected = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    injected.catalog_hash = f"tool-{CANARY}"
+    with pytest.raises(RuntimeToolCatalogError) as exc_info:
+        validate_runtime_tool_registry(
+            injected,
+            tools_dir=root,
+            expected_profile=POC_TOOL_PROFILE,
+        )
+    assert exc_info.value.code == "registry_snapshot_mismatch"
+    assert CANARY not in str(exc_info.value)
+    assert injected.catalog_hash not in str(exc_info.value)
+
+
+@pytest.mark.unit
+def test_changed_policy_hash_fails(tmp_path: Path) -> None:
+    root = _seed_valid_tools(tmp_path / "tools")
+    injected = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    injected.policy_hash = f"pol-{CANARY}"
+    with pytest.raises(RuntimeToolCatalogError) as exc_info:
+        validate_runtime_tool_registry(
+            injected,
+            tools_dir=root,
+            expected_profile=POC_TOOL_PROFILE,
+        )
+    assert exc_info.value.code == "registry_snapshot_mismatch"
+    assert CANARY not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_mismatch_canaries_not_in_logs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = _seed_valid_tools(tmp_path / "tools")
+    injected = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    original = injected.get("ssh_run")
+    assert original is not None
+    evil = f"auditor.evil:adapter_{CANARY}"
+    injected.tools["ssh_run"] = replace(original, adapter=evil)
+    runtime = ApplicationRuntime(
+        _settings(tmp_path, root),
+        tool_registry=injected,
+    )
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeStartupError) as exc_info:
+        await runtime.start()
+    assert "code=registry_snapshot_mismatch" in str(exc_info.value)
+    assert CANARY not in str(exc_info.value)
+    assert evil not in str(exc_info.value)
+    assert CANARY not in caplog.text
+    assert evil not in caplog.text

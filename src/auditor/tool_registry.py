@@ -858,6 +858,37 @@ def reset_tool_registry_cache() -> None:
     _CACHED.clear()
 
 
+def _required_manifest_snapshot_matches(
+    injected: ToolManifest,
+    trusted: ToolManifest,
+) -> bool:
+    """Return True when required manifest trust fields match the on-disk snapshot."""
+    if injected.id != trusted.id:
+        return False
+    if injected.version != trusted.version:
+        return False
+    if injected.adapter != trusted.adapter:
+        return False
+    if injected.transport != trusted.transport:
+        return False
+    if injected.capabilities != trusted.capabilities:
+        return False
+    if injected.readonly != trusted.readonly:
+        return False
+    if injected.enabled != trusted.enabled:
+        return False
+    if injected.profiles != trusted.profiles:
+        return False
+    if injected.source_hash != trusted.source_hash:
+        return False
+    try:
+        inj_path = Path(injected.source_path).resolve() if injected.source_path else None
+        tru_path = Path(trusted.source_path).resolve() if trusted.source_path else None
+    except OSError:
+        return False
+    return inj_path == tru_path
+
+
 def validate_runtime_tool_registry(
     registry: ToolRegistry,
     *,
@@ -869,9 +900,10 @@ def validate_runtime_tool_registry(
 
     Raises:
         RuntimeToolCatalogError: missing paths, invalid policy, unauthorized or
-            non-bindable required tools, origin mismatches, or bound-name
-            mismatches. Messages include only code, tool ID, profile, and
-            catalog path — never raw manifest/policy values or credentials.
+            non-bindable required tools, origin mismatches, snapshot mismatches
+            against the on-disk catalog, or bound-name mismatches. Messages
+            include only code, tool ID, profile, and catalog path — never raw
+            manifest/policy values or credentials.
     """
     root = Path(tools_dir) if tools_dir is not None else default_tools_dir()
     root_resolved = root.resolve()
@@ -957,6 +989,30 @@ def validate_runtime_tool_registry(
             f"capability policy invalid: code={issue_code}",
             code=issue_code,
         )
+
+    # Re-load from disk; never trust hashes/contents stored only in memory.
+    trusted_registry = load_tool_registry(root, profile=expected_profile)
+    if (
+        registry.catalog_hash != trusted_registry.catalog_hash
+        or registry.policy_hash != trusted_registry.policy_hash
+        or registry.policy != trusted_registry.policy
+    ):
+        _fail(
+            "tool registry snapshot mismatch: code=registry_snapshot_mismatch",
+            code="registry_snapshot_mismatch",
+        )
+
+    for tool_id in required_tool_ids:
+        trusted_manifest = trusted_registry.get(tool_id)
+        injected_manifest = registry.get(tool_id)
+        if trusted_manifest is None or injected_manifest is None:
+            continue  # missing tools handled below
+        if not _required_manifest_snapshot_matches(injected_manifest, trusted_manifest):
+            _fail(
+                f"tool registry snapshot mismatch: code=registry_snapshot_mismatch tool={tool_id}",
+                code="registry_snapshot_mismatch",
+                tool_id=tool_id,
+            )
 
     for allowed_id in policy.allowed_tools:
         if registry.get(allowed_id) is None:
