@@ -804,3 +804,49 @@ def test_validate_rejects_tampered_injected_adapter(tmp_path: Path) -> None:
     assert exc_info.value.code == "registry_snapshot_mismatch"
     assert exc_info.value.tool_id == "ssh_run"
     assert "invoke_ssh_read_file" not in str(exc_info.value)
+
+
+@pytest.mark.unit
+def test_snapshot_rejects_cleared_validation_issues(tmp_path: Path) -> None:
+    """issues=() on an invalid on-disk manifest must not pass snapshot equality."""
+    from dataclasses import replace
+
+    from auditor.tool_registry import (
+        RuntimeToolCatalogError,
+        load_tool_registry,
+        validate_runtime_tool_registry,
+    )
+
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    payload = _valid_ssh_manifest("ssh_run")
+    payload["timeout_seconds"] = "not-a-number"
+    _write_manifest(catalog, "ssh_run", payload)
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": ["ssh_run", "ssh_read_file"],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 6000,
+            "require_inventory_credentials": True,
+        },
+    )
+    registry = load_tool_registry(root, profile="poc_audit_v1")
+    manifest = registry.get("ssh_run")
+    assert manifest is not None
+    assert any(i.level == "error" for i in manifest.issues)
+    registry.tools["ssh_run"] = replace(manifest, issues=(), enabled=True)
+    with pytest.raises(RuntimeToolCatalogError) as exc_info:
+        validate_runtime_tool_registry(
+            registry,
+            tools_dir=root,
+            expected_profile="poc_audit_v1",
+        )
+    assert exc_info.value.code == "registry_snapshot_mismatch"
+    assert exc_info.value.tool_id == "ssh_run"

@@ -11,7 +11,11 @@ from unittest.mock import patch
 
 import pytest
 
-from auditor.application_runtime import ApplicationRuntime, RuntimeStartupError
+from auditor.application_runtime import (
+    ApplicationRuntime,
+    RuntimeStartupError,
+    RuntimeState,
+)
 from auditor.config import Settings
 from auditor.domain.audit_request import POC_TOOL_PROFILE
 from auditor.tool_registry import (
@@ -628,3 +632,134 @@ async def test_snapshot_mismatch_canaries_not_in_logs(
     assert evil not in str(exc_info.value)
     assert CANARY not in caplog.text
     assert evil not in caplog.text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field_name", "mutated_value"),
+    [
+        ("title", "CANARY_TITLE"),
+        ("description", "CANARY_DESCRIPTION"),
+        ("risk", "CANARY_RISK"),
+        ("inventory_access", ("CANARY_INVENTORY",)),
+        ("credential_source", "CANARY_CREDENTIAL_SOURCE"),
+        ("blocked_operations", ("CANARY_BLOCKED",)),
+        ("timeout_seconds", 999999),
+        ("max_output_bytes", 999999),
+        ("input_schema", {"type": "object", "canary": "CANARY_INPUT_SCHEMA"}),
+        ("output_schema", {"type": "object", "canary": "CANARY_OUTPUT_SCHEMA"}),
+        ("issues", ()),
+    ],
+)
+def test_isolated_manifest_field_mutation_fails_snapshot(
+    tmp_path: Path,
+    field_name: str,
+    mutated_value: object,
+) -> None:
+    """Any single-field mutation of a required manifest must fail snapshot equality."""
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    payload = _valid_ssh_manifest("ssh_run")
+    if field_name == "issues":
+        # On-disk validation error so trusted.issues is non-empty; clearing is a bypass.
+        payload["timeout_seconds"] = "CANARY_INVALID_TIMEOUT"
+    _write_manifest(catalog, "ssh_run", payload)
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    _write_policy(root, POC_TOOL_PROFILE, _poc_policy())
+
+    injected = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    original = injected.get("ssh_run")
+    assert original is not None
+    if field_name == "issues":
+        assert any(i.level == "error" for i in original.issues)
+
+    injected.tools["ssh_run"] = replace(original, **{field_name: mutated_value})
+
+    with pytest.raises(RuntimeToolCatalogError) as exc_info:
+        validate_runtime_tool_registry(
+            injected,
+            tools_dir=root,
+            expected_profile=POC_TOOL_PROFILE,
+        )
+    assert exc_info.value.code == "registry_snapshot_mismatch"
+    assert exc_info.value.tool_id == "ssh_run"
+    message = str(exc_info.value)
+    assert "code=registry_snapshot_mismatch" in message
+    assert "tool=ssh_run" in message
+    assert "CANARY" not in message
+    if isinstance(mutated_value, str):
+        assert mutated_value not in message
+    elif isinstance(mutated_value, dict):
+        assert "CANARY_INPUT_SCHEMA" not in message
+        assert "CANARY_OUTPUT_SCHEMA" not in message
+
+
+@pytest.mark.asyncio
+async def test_validation_issue_removal_bypass_rejected(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Clearing error-level issues in memory must not make a bad manifest executable."""
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    payload = _valid_ssh_manifest("ssh_run")
+    payload["timeout_seconds"] = "CANARY_INVALID_TIMEOUT"
+    _write_manifest(catalog, "ssh_run", payload)
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    _write_policy(root, POC_TOOL_PROFILE, _poc_policy())
+
+    injected = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    manifest = injected.get("ssh_run")
+    assert manifest is not None
+    assert any(issue.level == "error" for issue in manifest.issues)
+    assert manifest.executable is False
+
+    injected.tools["ssh_run"] = replace(manifest, issues=(), enabled=True)
+    assert injected.tools["ssh_run"].executable is True  # in-memory only
+
+    graph_calls: list[object] = []
+
+    def boom(_runtime: ApplicationRuntime):
+        graph_calls.append(_runtime)
+        raise AssertionError("graph must not be constructed")
+
+    runtime = ApplicationRuntime(
+        _settings(tmp_path, root),
+        tool_registry=injected,
+        graph_factory=boom,
+    )
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeStartupError) as exc_info:
+        await runtime.start()
+
+    message = str(exc_info.value)
+    assert "code=registry_snapshot_mismatch" in message
+    assert "tool=ssh_run" in message
+    assert "CANARY" not in message
+    assert "CANARY_INVALID_TIMEOUT" not in message
+    assert "CANARY" not in caplog.text
+    assert graph_calls == []
+    assert runtime.graph is None
+    assert runtime.state is not RuntimeState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_untouched_injected_registry_still_starts(tmp_path: Path) -> None:
+    tools = _seed_valid_tools(tmp_path / "tools")
+    injected = load_tool_registry(tools, profile=POC_TOOL_PROFILE)
+    calls: list[object] = []
+
+    def factory(runtime: ApplicationRuntime):
+        calls.append(runtime.tool_registry)
+        return _FakeGraph()
+
+    runtime = ApplicationRuntime(
+        _settings(tmp_path, tools),
+        tool_registry=injected,
+        graph_factory=factory,
+    )
+    await runtime.start()
+    try:
+        assert runtime.tool_registry is injected
+        assert calls == [injected]
+        assert runtime.state is RuntimeState.RUNNING
+    finally:
+        await runtime.close()

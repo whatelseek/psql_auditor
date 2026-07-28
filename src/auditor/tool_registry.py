@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Literal, NoReturn
 
@@ -858,35 +858,27 @@ def reset_tool_registry_cache() -> None:
     _CACHED.clear()
 
 
+def _normalize_manifest_source_path(manifest: ToolManifest) -> ToolManifest:
+    """Return a copy with ``source_path`` resolved for snapshot equality."""
+    try:
+        source_path = str(Path(manifest.source_path).resolve()) if manifest.source_path else ""
+    except OSError:
+        source_path = manifest.source_path or ""
+    if source_path == (manifest.source_path or ""):
+        return manifest
+    return replace(manifest, source_path=source_path)
+
+
 def _required_manifest_snapshot_matches(
     injected: ToolManifest,
     trusted: ToolManifest,
 ) -> bool:
-    """Return True when required manifest trust fields match the on-disk snapshot."""
-    if injected.id != trusted.id:
-        return False
-    if injected.version != trusted.version:
-        return False
-    if injected.adapter != trusted.adapter:
-        return False
-    if injected.transport != trusted.transport:
-        return False
-    if injected.capabilities != trusted.capabilities:
-        return False
-    if injected.readonly != trusted.readonly:
-        return False
-    if injected.enabled != trusted.enabled:
-        return False
-    if injected.profiles != trusted.profiles:
-        return False
-    if injected.source_hash != trusted.source_hash:
-        return False
-    try:
-        inj_path = Path(injected.source_path).resolve() if injected.source_path else None
-        tru_path = Path(trusted.source_path).resolve() if trusted.source_path else None
-    except OSError:
-        return False
-    return inj_path == tru_path
+    """Return True when the injected manifest matches the trusted on-disk snapshot.
+
+    Compares the complete ``ToolManifest`` (every field, including ``issues`` and
+    schemas) after normalizing ``source_path`` via ``Path.resolve()``.
+    """
+    return _normalize_manifest_source_path(injected) == _normalize_manifest_source_path(trusted)
 
 
 def validate_runtime_tool_registry(
