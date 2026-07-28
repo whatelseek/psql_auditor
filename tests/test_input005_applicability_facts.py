@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 
 import pytest
+import yaml
 
 from auditor.domain.applicability import (
     ApplicabilityPredicate,
@@ -18,6 +19,7 @@ from auditor.domain.applicability import (
 )
 from auditor.domain.inventory import (
     ClientInventory,
+    FactSource,
     InventoryHost,
     InventoryService,
     InventoryVersion,
@@ -25,6 +27,7 @@ from auditor.domain.inventory import (
 )
 from auditor.domain.normalized_facts import (
     NormalizedFact,
+    _normalized_source_type,
     build_host_fact_set,
     build_inventory_fact_sets,
     facts_to_serializable,
@@ -505,7 +508,6 @@ def test_serialization_stable_and_rejects_bad_values() -> None:
 
 
 def test_secret_canaries_absent_from_errors_and_dumps(tmp_path: Path) -> None:
-    # Force an invalid parse that might echo input:
     bad = parse_applicability_meta(
         {
             "applicability": {
@@ -520,10 +522,56 @@ def test_secret_canaries_absent_from_errors_and_dumps(tmp_path: Path) -> None:
         }
     )
     blob = " ".join(bad.validation_errors)
-    assert CANARY_TOKEN not in blob or bad.metadata_valid is False
-    # sanitize should redact if present in messages
+    assert CANARY_TOKEN not in blob
     for err in bad.validation_errors:
         assert CANARY_PASSWORD not in err
+        assert CANARY_TOKEN not in err
+
+    detection = TechnologyDetection(
+        technology_id="custom_tech",
+        target_id="host-01",
+        status="confirmed",
+        confidence=1.0,
+        evidence=(CANARY_PASSWORD, CANARY_TOKEN, "os=Ubuntu", "ev-safe"),
+        source="discovered",
+    )
+    host = _host(services=())
+    fs = build_host_fact_set(
+        host,
+        inventory_version_id="inv-1",
+        detections=(detection,),
+    )
+    tech = fs.fact_by_key("technology.custom_tech.status")
+    assert tech is not None
+    assert tech.evidence_refs == ("ev-safe",)
+    dumped = tech.model_dump_json()
+    serial = json.dumps(facts_to_serializable({"host-01": fs}), sort_keys=True)
+    assert CANARY_PASSWORD not in dumped
+    assert CANARY_TOKEN not in dumped
+    assert CANARY_PASSWORD not in serial
+    assert CANARY_TOKEN not in serial
+    assert "os=Ubuntu" not in serial
+
+    with pytest.raises(Exception) as exc_info:
+        NormalizedFact(
+            fact="asset.id",
+            value="host-01",
+            confidence=1.0,
+            source_type="inventory",
+            source_ref=CANARY_PASSWORD,
+        )
+    assert CANARY_PASSWORD not in str(exc_info.value)
+
+    with pytest.raises(Exception) as exc_info2:
+        NormalizedFact(
+            fact="asset.id",
+            value="host-01",
+            confidence=1.0,
+            source_type="inventory",
+            source_ref="inventory:inv-1#host:host-01",
+            evidence_refs=(CANARY_TOKEN,),
+        )
+    assert CANARY_TOKEN not in str(exc_info2.value)
 
     _write_fw(
         tmp_path,
@@ -538,6 +586,116 @@ def test_secret_canaries_absent_from_errors_and_dumps(tmp_path: Path) -> None:
     fw, meta2 = pairs[0]
     joined = " ".join(meta2.validation_errors) + " ".join(fw.validation_errors)
     assert CANARY_PASSWORD not in joined
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"required_facts": "asset.type"},
+        {"required_capabilities": ["ssh.command.read"]},
+        {"discovery_hints": {}},
+        {"applicability": []},
+        {"applicability": 42},
+        {"applicability": True},
+    ],
+)
+def test_reserved_key_fail_closed_matrix(raw: dict[str, object], tmp_path: Path) -> None:
+    meta = parse_applicability_meta(raw)
+    assert meta.has_structured_applicability is True
+    assert meta.metadata_valid is False
+
+    body_meta = {"id": "bad_reserved", "version": "1.0", "domain": "cybersecurity", **raw}
+    _write_fw(tmp_path, "bad_reserved.md", frontmatter=yaml.safe_dump(body_meta))
+    pairs = list_frameworks_with_meta(tmp_path)
+    fw, fw_meta = next(p for p in pairs if p[0].id == "bad_reserved")
+    assert fw_meta.has_structured_applicability is True
+    assert fw_meta.metadata_valid is False
+    assert fw.executable is False
+
+
+@pytest.mark.parametrize(
+    "bad_item",
+    [123, True, {"token": "secret"}, ["nested"]],
+)
+def test_strict_string_collections_reject_non_strings(bad_item: object) -> None:
+    meta_caps = parse_applicability_meta(
+        {
+            "applicability": {"all": [{"fact": "asset.id", "operator": "exists"}]},
+            "required_capabilities": {"any_of": [bad_item]},
+        }
+    )
+    assert meta_caps.metadata_valid is False
+    joined = " ".join(meta_caps.validation_errors)
+    assert "secret" not in joined
+    assert "{'token': 'secret'}" not in joined
+    assert "['nested']" not in joined
+
+    meta_facts = parse_applicability_meta({"required_facts": [bad_item]})
+    assert meta_facts.metadata_valid is False
+    assert "secret" not in " ".join(meta_facts.validation_errors)
+
+    meta_ops = parse_applicability_meta(
+        {
+            "discovery_hints": [
+                {
+                    "capability": "ssh.command.read",
+                    "operation_ids": [bad_item],
+                    "expected_facts": ["technology.postgresql.status"],
+                }
+            ]
+        }
+    )
+    assert meta_ops.metadata_valid is False
+    assert "secret" not in " ".join(meta_ops.validation_errors)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("inventory", "inventory"),
+        ("discovered", "discovery"),
+        ("user_confirmed", "operator"),
+        ("questionnaire", "operator"),
+        ("inferred", "derived"),
+        ("previous_audit", "derived"),
+        ("unknown", "derived"),
+    ],
+)
+def test_detection_source_type_mapping(source: FactSource, expected: str) -> None:
+    assert _normalized_source_type(source) == expected
+    host = _host(services=())
+    det = TechnologyDetection(
+        technology_id="widget",
+        target_id="host-01",
+        status="confirmed",
+        confidence=0.8,
+        evidence=("ev-1",),
+        source=source,
+    )
+    fs = build_host_fact_set(host, inventory_version_id="inv-1", detections=(det,))
+    fact = fs.fact_by_key("technology.widget.status")
+    assert fact is not None
+    assert fact.source_type == expected
+
+
+def test_unknown_access_facts_absent() -> None:
+    empty = build_host_fact_set(
+        _host(connection_types=(), services=()),
+        inventory_version_id="inv-1",
+    )
+    values = empty.as_value_map()
+    assert "access.ssh.available" not in values
+    assert "access.winrm.available" not in values
+    assert "access.postgresql.available" not in values
+
+    partial = build_host_fact_set(
+        _host(connection_types=("winrm",), services=()),
+        inventory_version_id="inv-1",
+    )
+    pmap = partial.as_value_map()
+    assert pmap.get("access.winrm.available") is True
+    assert "access.ssh.available" not in pmap
+    assert "access.postgresql.available" not in pmap
 
 
 def test_integration_boundary_selection_unchanged(tmp_path: Path) -> None:

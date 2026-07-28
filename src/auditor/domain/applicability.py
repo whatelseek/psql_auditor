@@ -18,6 +18,7 @@ from pydantic import (
     Field,
     StrictStr,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -53,15 +54,95 @@ _RESULT_PRECEDENCE: dict[PredicateResult, int] = {
 }
 
 
+CAPABILITY_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)+$")
+OPERATION_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+_STRUCTURED_KEYS = frozenset(
+    {
+        "required_capabilities",
+        "required_facts",
+        "discovery_hints",
+    }
+)
+
+
+def _reject_dunder_segments(text: str, *, label: str) -> str:
+    for segment in text.split("."):
+        if (
+            not segment
+            or segment.startswith("_")
+            or segment.endswith("_")
+            or "__" in segment
+            or "/" in segment
+            or "\\" in segment
+            or ".." in segment
+        ):
+            raise ValueError(f"invalid {label}")
+    return text
+
+
 def validate_fact_key(key: str) -> str:
     """Validate a dotted fact key. Central validator for predicates and facts."""
-    text = str(key or "").strip()
+    if not isinstance(key, str):
+        raise ValueError("invalid fact key")
+    text = key.strip()
     if not FACT_KEY_PATTERN.fullmatch(text):
-        raise ValueError(f"invalid fact key: {text!r}")
-    for segment in text.split("."):
-        if not segment or segment.startswith("_") or segment.endswith("_") or "__" in segment:
-            raise ValueError(f"invalid fact key: {text!r}")
+        raise ValueError("invalid fact key")
+    return _reject_dunder_segments(text, label="fact key")
+
+
+def validate_capability_id(value: str) -> str:
+    """Validate a capability ID (same shape as fact keys)."""
+    if not isinstance(value, str):
+        raise ValueError("invalid capability id")
+    text = value.strip()
+    if not CAPABILITY_ID_PATTERN.fullmatch(text):
+        raise ValueError("invalid capability id")
+    return _reject_dunder_segments(text, label="capability id")
+
+
+def validate_operation_id(value: str) -> str:
+    """Validate a discovery operation ID."""
+    if not isinstance(value, str):
+        raise ValueError("invalid operation id")
+    text = value.strip()
+    if not OPERATION_ID_PATTERN.fullmatch(text):
+        raise ValueError("invalid operation id")
+    if text.startswith("_") or text.endswith("_") or "__" in text:
+        raise ValueError("invalid operation id")
     return text
+
+
+def _strict_string_tuple(
+    value: object,
+    *,
+    field_name: str,
+    allow_single_string: bool = False,
+    item_validator: Any | None = None,
+) -> tuple[str, ...]:
+    """Coerce a string collection without ``str()`` on arbitrary objects."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        if not allow_single_string:
+            raise ValueError(f"{field_name} must be a list of strings")
+        items: list[object] = [value]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        raise ValueError(f"{field_name} must be a list of strings")
+
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise ValueError(f"{field_name} items must be strings")
+        text = item.strip()
+        if not text:
+            raise ValueError(f"{field_name} items must be non-empty strings")
+        if item_validator is not None:
+            text = item_validator(text)
+        out.append(text)
+    return tuple(sorted(dict.fromkeys(out)))
 
 
 def _is_finite_number(value: object) -> bool:
@@ -120,7 +201,7 @@ def _norm_str(value: object) -> str:
 class ApplicabilityPredicate(BaseModel):
     """One safe comparison against a normalized fact namespace key."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     fact: StrictStr = Field(min_length=1)
     operator: ApplicabilityOperator
@@ -168,7 +249,7 @@ class ApplicabilityPredicate(BaseModel):
 class ApplicabilitySpec(BaseModel):
     """Logical groups of predicates: all / any / none."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     all: tuple[ApplicabilityPredicate, ...] = ()
     any: tuple[ApplicabilityPredicate, ...] = ()
@@ -190,21 +271,20 @@ class ApplicabilitySpec(BaseModel):
 class CapabilityRequirement(BaseModel):
     """Required tool capabilities for a framework."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     any_of: tuple[StrictStr, ...] = ()
     all_of: tuple[StrictStr, ...] = ()
 
     @field_validator("any_of", "all_of", mode="before")
     @classmethod
-    def _coerce(cls, value: Any) -> Any:
-        if value is None:
-            return ()
-        if isinstance(value, str):
-            return (value.strip(),) if value.strip() else ()
-        if isinstance(value, list):
-            return tuple(str(v).strip() for v in value if str(v).strip())
-        return value
+    def _coerce(cls, value: Any, info: ValidationInfo) -> Any:
+        return _strict_string_tuple(
+            value,
+            field_name=str(info.field_name),
+            allow_single_string=True,
+            item_validator=validate_capability_id,
+        )
 
     def is_empty(self) -> bool:
         return not (self.any_of or self.all_of)
@@ -213,35 +293,43 @@ class CapabilityRequirement(BaseModel):
 class DiscoveryHint(BaseModel):
     """Declarative discovery hint from framework front matter."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     capability: StrictStr = Field(min_length=1)
     purpose: StrictStr = ""
     operation_ids: tuple[StrictStr, ...] = ()
     expected_facts: tuple[StrictStr, ...] = ()
 
-    @field_validator("operation_ids", "expected_facts", mode="before")
+    @field_validator("capability")
     @classmethod
-    def _coerce_seq(cls, value: Any) -> Any:
-        if value is None:
-            return ()
-        if isinstance(value, str):
-            text = value.strip()
-            return (text,) if text else ()
-        if isinstance(value, list):
-            return tuple(str(v).strip() for v in value if str(v).strip())
-        return value
+    def _capability(cls, value: str) -> str:
+        return validate_capability_id(value)
 
-    @field_validator("expected_facts")
+    @field_validator("operation_ids", mode="before")
     @classmethod
-    def _validate_expected_facts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(validate_fact_key(v) for v in value)
+    def _coerce_ops(cls, value: Any) -> Any:
+        return _strict_string_tuple(
+            value,
+            field_name="operation_ids",
+            allow_single_string=True,
+            item_validator=validate_operation_id,
+        )
+
+    @field_validator("expected_facts", mode="before")
+    @classmethod
+    def _coerce_facts(cls, value: Any) -> Any:
+        return _strict_string_tuple(
+            value,
+            field_name="expected_facts",
+            allow_single_string=True,
+            item_validator=validate_fact_key,
+        )
 
 
 class FrameworkApplicabilityMeta(BaseModel):
     """Structured front-matter applicability block for one framework."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     applicability: ApplicabilitySpec = Field(default_factory=ApplicabilitySpec)
     required_capabilities: CapabilityRequirement = Field(default_factory=CapabilityRequirement)
@@ -254,31 +342,29 @@ class FrameworkApplicabilityMeta(BaseModel):
     @field_validator("required_facts", mode="before")
     @classmethod
     def _coerce_facts(cls, value: Any) -> Any:
-        if value is None:
-            return ()
-        if isinstance(value, list):
-            return tuple(value)
-        return value
-
-    @field_validator("required_facts")
-    @classmethod
-    def _validate_facts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(validate_fact_key(str(v)) for v in value)
+        return _strict_string_tuple(
+            value,
+            field_name="required_facts",
+            allow_single_string=False,
+            item_validator=validate_fact_key,
+        )
 
     @field_validator("discovery_hints", mode="before")
     @classmethod
     def _coerce_hints(cls, value: Any) -> Any:
         if value is None:
             return ()
+        if isinstance(value, tuple):
+            return value
         if isinstance(value, list):
             return tuple(value)
-        return value
+        raise ValueError("discovery_hints must be a list")
 
 
 class ApplicabilityEvaluation(BaseModel):
     """Deterministic result of evaluating an :class:`ApplicabilitySpec`."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     result: PredicateResult
     matched_fact_keys: tuple[str, ...] = ()
@@ -543,19 +629,18 @@ def evaluate_applicability(
 
 
 def _detect_structured(raw: Mapping[str, object]) -> bool:
-    app = raw.get("applicability")
-    if isinstance(app, Mapping):
+    """Presence-based structured metadata detection (fail closed)."""
+    if any(key in raw for key in _STRUCTURED_KEYS):
         return True
-    caps = raw.get("required_capabilities")
-    if isinstance(caps, Mapping):
+    if "applicability" not in raw:
+        return False
+    applicability = raw.get("applicability")
+    if isinstance(applicability, Mapping):
         return True
-    facts = raw.get("required_facts")
-    if isinstance(facts, list):
-        return True
-    hints = raw.get("discovery_hints")
-    if isinstance(hints, list):
-        return True
-    return False
+    if isinstance(applicability, str):
+        return False
+    # Non-mapping, non-string applicability (list/int/bool/...) is structured-invalid.
+    return True
 
 
 def parse_applicability_meta(
@@ -573,9 +658,6 @@ def parse_applicability_meta(
     if not _detect_structured(raw_front_matter):
         return FrameworkApplicabilityMeta(has_structured_applicability=False, metadata_valid=True)
 
-    # Reject unknown top-level keys outside the known framework front-matter set
-    # for the structured subset we parse here. Unknown keys inside the
-    # applicability objects are rejected by pydantic extra=forbid.
     try:
         app_raw = raw_front_matter.get("applicability")
         if app_raw is None:
@@ -584,7 +666,7 @@ def parse_applicability_meta(
             allowed = {"all", "any", "none"}
             unknown = set(app_raw.keys()) - allowed
             if unknown:
-                raise ValueError(f"unknown applicability fields: {sorted(unknown)}")
+                raise ValueError("unknown applicability fields")
             applicability = ApplicabilitySpec.model_validate(app_raw)
         else:
             raise ValueError("applicability must be a mapping when structured")
@@ -596,18 +678,21 @@ def parse_applicability_meta(
             allowed_c = {"any_of", "all_of"}
             unknown_c = set(caps_raw.keys()) - allowed_c
             if unknown_c:
-                raise ValueError(f"unknown required_capabilities fields: {sorted(unknown_c)}")
+                raise ValueError("unknown required_capabilities fields")
             caps = CapabilityRequirement.model_validate(caps_raw)
         else:
             raise ValueError("required_capabilities must be a mapping")
 
         facts_raw = raw_front_matter.get("required_facts")
-        if facts_raw is None:
-            required_facts: tuple[str, ...] = ()
-        elif isinstance(facts_raw, list):
-            required_facts = tuple(validate_fact_key(str(v)) for v in facts_raw)
+        if "required_facts" in raw_front_matter:
+            required_facts = _strict_string_tuple(
+                facts_raw,
+                field_name="required_facts",
+                allow_single_string=False,
+                item_validator=validate_fact_key,
+            )
         else:
-            raise ValueError("required_facts must be a list")
+            required_facts = ()
 
         hints_raw = raw_front_matter.get("discovery_hints")
         if hints_raw is None:
@@ -629,7 +714,12 @@ def parse_applicability_meta(
     except (ValidationError, ValueError, TypeError) as exc:
         if isinstance(exc, ValidationError):
             errors = tuple(
-                sorted({_sanitize_error(err.get("msg", str(exc))) for err in exc.errors()})
+                sorted(
+                    {
+                        _sanitize_error(err.get("msg", "invalid applicability metadata"))
+                        for err in exc.errors()
+                    }
+                )
             )
         else:
             errors = (_sanitize_error(str(exc)),)

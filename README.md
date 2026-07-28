@@ -1,0 +1,278 @@
+# auditor
+
+LangGraph security auditor. **You create frameworks** by dropping Markdown files into [`agents/`](agents/). The agent routes your chat request to a framework, fills a fixed report (Status / Observation / Recommendation), **writes command results under a folder per requirement**, **pauses for human-in-the-loop** when a check cannot be audited, and can **cycle to reconnect** if the MCP/SSH session dies.
+
+**Руководство пользователя (RU):** [`docs/user-manual-ru.md`](docs/user-manual-ru.md) — развёртывание, использование, добавление Markdown-фреймворков.
+
+**Docs index:** [`docs/README.md`](docs/README.md) — intent, intake, MCP, results warehouse, and more.
+**Open Terminal + frameworks:** [`docs/open-terminal-and-agents.md`](docs/open-terminal-and-agents.md) — file browser integration and adding new `agents/*.md`.
+
+## Create a framework
+
+Add `agents/<name>.md`:
+
+```markdown
+---
+id: ubuntu_cis_24_l2
+aliases: [ubuntu, linux, debian, ubuntu_cis]
+description: Ubuntu CIS host hardening
+---
+# Ubuntu CIS Benchmark
+
+## REQ-001: SSH root login disabled
+**Category:** Remote Access
+**Severity:** Critical
+**How to verify:** Read /etc/ssh/sshd_config PermitRootLogin
+**Pass criteria:** PermitRootLogin no
+```
+
+No code changes required — new files are discovered from `AGENTS_DIR`.
+
+Bundled examples: `postgres_cis`, `ubuntu_cis_24_l2`, `host_facts`, `windows_server`.
+
+**Inventory-driven launch (CLI):** place `inventory/<ClientName>/INVENTORY.md`
+(or `.yaml` / `.json`), then:
+
+```bash
+psql-auditor inventory analyze Testcompany
+psql-auditor audit plan Testcompany
+psql-auditor audit start Testcompany --confirm
+```
+
+Details: [`docs/inventory-driven-audit.md`](docs/inventory-driven-audit.md).
+
+## Graph (cyclic + HITL)
+
+```
+START → route_framework → load_framework → collect_host_facts → assess_parallel
+                                                                    │
+                              ┌─────────────────────────────────────┤
+                              │                                     ├─ session errors → reconnect_session ─┐
+                              │                                     │                                       │
+                              │◄────────────────────────────────────┴───────────────────────────────────────┘
+                              │                                     │
+                              │                                     └─ failed REQs → human_gate (interrupt)
+                              │                                               │ skip / retry (chat reply)
+                              │◄──── retry ───────────────────────────────────┤
+                              │                                               └─ no more failures → finalize → END
+```
+
+Chat **intent** selects this graph only for full audits; see
+[`docs/chat-intent.md`](docs/chat-intent.md). Pre-audit **intake** runs first when
+enabled: [`docs/pre-audit-intake.md`](docs/pre-audit-intake.md). Docs index:
+[`docs/README.md`](docs/README.md).
+
+### Human-in-the-loop (Open WebUI)
+
+Inspired by [Open WebUI ↔ LangGraph HITL pipes](https://pessini.medium.com/from-open-webui-to-langgraph-building-a-human-in-the-loop-pipe-for-real-time-ai-control-26561cca9f9c): the graph uses LangGraph ``interrupt()``; Open WebUI resumes on the next chat message.
+
+When a requirement fails after automatic session retries, the agent replies with:
+
+- which `REQ-*` could not be audited
+- **why** (SSH/MCP/tool error)
+- **recommendations**
+- ask: **skip** / **retry** (or **skip all** / **retry all**)
+
+Reply in the same chat. A marker `[AUDIT_HITL:<thread>]` ties the resume to the paused run. Set `HITL_ENABLED=false` to auto-finalize with `error` statuses instead.
+
+During long audits Open WebUI streams **live tool calls** and phase/reasoning deltas (SSH/MCP). If the chat disconnects mid-run, reply **continue** (or use `[AUDIT_CONTINUE:<thread>]`) — checkpoints live under `CHECKPOINT_PATH` (default `artifacts/.checkpoints/auditor.sqlite`) and survive agent container restarts.
+
+### Audit ZIP in chat
+
+When the audit finishes, the agent:
+
+1. Zips `artifacts/<client_name>/` (Markdown report + per-REQ command outputs)
+2. Serves it at `/v1/downloads/<run_id>_audit.zip?token=…`
+3. Uploads it to Open WebUI Files (when `OPEN_WEBUI_URL` is set)
+4. Appends a **Download ZIP** link to the chat reply
+
+Configure `PUBLIC_BASE_URL` (browser → agent) and `OPEN_WEBUI_URL` (agent → Open WebUI).
+
+## Starting an audit (Open WebUI)
+
+Operators start audits in Open WebUI. Messages are **routed by intent**
+([`docs/chat-intent.md`](docs/chat-intent.md)). A full audit then runs
+**pre-audit intake** (client → access → host→framework plan / domain)
+([`docs/pre-audit-intake.md`](docs/pre-audit-intake.md)), then assesses.
+
+→ **[`docs/starting-an-audit.md`](docs/starting-an-audit.md)**  
+→ Docs index: [`docs/README.md`](docs/README.md)  
+→ Connection secrets: [`secrets/connection.example.md`](secrets/connection.example.md)
+
+Short version:
+
+1. Open WebUI → model `auditor`
+2. Chat: `Start PostgreSQL CIS audit` (or IT audit / both)
+3. Answer intake questions; agent probes SSH / Postgres as applicable
+4. Report + **Download ZIP** (includes host facts / INVENTORY.md when relevant)
+
+Without a CMDB, scope comes from [`inventory/INVENTORY.md`](inventory/INVENTORY.example.md).
+SSH/PG credentials live only in [`secrets/connection.md`](secrets/connection.example.md).
+
+### Long-term memory (command playbooks)
+
+Procedural memory remembers **how to verify** each REQ (SSH/SQL recipes) per framework — [LangChain long-term memory](https://docs.langchain.com/oss/python/concepts/memory) style, not chat history.
+
+- Seeds: [`agents/playbooks/*.yaml`](agents/playbooks/)
+- Learned successes: `memory/learned_playbooks.json`
+- Docs: [`docs/long-term-memory.md`](docs/long-term-memory.md)
+
+### Chat examples
+
+- `Run a PostgreSQL CIS audit`
+- `Audit this Ubuntu host against CIS`
+- `Conduct IT audit`
+- `Conduct PostgreSQL and Ubuntu audit` → **two separate graphs**, merged report + ZIP
+- `Run this command: \`uptime\`` → **ad-hoc** (not a full audit)
+- `Which sessions need continue?` → results warehouse list
+
+## Stack
+
+- **LangGraph** orchestration + **LangChain** tools/models
+- DB evidence: declarative [`mcps/registry.json`](mcps/registry.json) + [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters) (`MultiServerMCPClient` stateful sessions + pool) → [antonorlov/mcp-postgres-server](https://github.com/antonorlov/mcp-postgres-server) — see [`docs/langchain-mcp.md`](docs/langchain-mcp.md) and [LangChain MCP docs](https://docs.langchain.com/oss/python/langchain/mcp)
+- Host evidence: SSH (`ssh_run` / `ssh_read_file`)
+- Models: LiteLLM · UI: Open WebUI (`/v1`)
+
+## Quick start
+
+```bash
+cp .env.example .env
+cp secrets/connection.example.md secrets/connection.md   # SSH/PG/MCP only here
+docker compose up --build
+# http://localhost:3001 → model auditor  (WEBUI_HOST_PORT)
+# http://localhost:8001/healthz          (AGENT_HOST_PORT)
+```
+
+## Fixed report cells
+
+| From your `agents/*.md` | Filled by the model |
+|-------------------------|---------------------|
+| ID, Title, Category, Severity, Pass criteria | Status, Observation, Recommendation |
+
+## Evidence on disk
+
+Each audit creates:
+
+```text
+artifacts/<client_name>/
+  meta.json
+  report.md
+  report.docx              # Word export (summary + details)
+  report.xlsx              # Excel export (Findings + Summary sheets)
+  <framework_id>/
+    REQ-001/
+      requirement.json
+      001_ssh_run.txt      # full command + stdout/stderr
+      001_ssh_run.json
+      002_mcp_query.txt
+      finding.json
+    REQ-002/
+      ...
+```
+
+After intake, the folder is named after the **client** (e.g. `TestCompany`), not a timestamp.
+Multi-framework runs (e.g. PostgreSQL + Ubuntu) share one `<run_id>` with a subfolder per framework. Configure root with `EVIDENCE_DIR` (default `artifacts`; Docker mounts `./artifacts`).
+The audit ZIP includes Markdown, Word, and Excel reports when packaging is enabled.
+
+## CIS compliance charts (Open WebUI)
+
+Bar charts of **compliance % by severity** (Overall / Critical / High / …):
+
+- Open WebUI **Tool** + auto **Filter**: [`docs/cis-compliance-charts.md`](docs/cis-compliance-charts.md)
+- Also appended in the agent report when `COMPLIANCE_CHARTS_IN_REPORT=true`
+
+## Open WebUI slash prompts
+
+Workspace prompts for auditor chat (`/list-sessions`, `/list-results`,
+`/continue-session`, `/update-report`, `/gather-req`, …). Full catalog:
+[`docs/owui-slash-commands.md`](docs/owui-slash-commands.md).
+
+Manual QA checklist (intake, live warehouse, continue, follow-up):
+[`docs/owui-test-checklist.md`](docs/owui-test-checklist.md).
+
+```bash
+python3 openwebui/install_owui_prompts.py
+```
+
+Type `/` in chat to pick a command. Use model **auditor** (or **Visualizer**
+for `/dashboard`).
+
+## Inline Visualizer v2 (Open WebUI)
+
+Vendored from [Classic298/open-webui-plugins](https://github.com/Classic298/open-webui-plugins/tree/main/inline-visualizer-v2):
+streaming HTML/SVG canvases in chat (`@@@VIZ-START` / `@@@VIZ-END`).
+
+Install from [`openwebui/inline-visualizer-v2/`](openwebui/inline-visualizer-v2/) — see [`INSTALL.md`](openwebui/inline-visualizer-v2/INSTALL.md).
+
+```bash
+python3 openwebui/install_inline_visualizer.py
+python3 scripts/owui_inline_visualizer_test.py
+```
+
+Creates workspace model **`visualizer`** (LiteLLM + tool/skill). Enable **Allow iframe same origin** (installer sets it). Not required on `auditor`.
+
+## Ad-hoc commands (Open WebUI)
+
+Ask the model to **run commands** without a full checklist audit:
+
+```text
+Run this command: `grep PermitRootLogin /etc/ssh/sshd_config`
+Execute SQL: SELECT name, setting FROM pg_settings WHERE name = 'ssl'
+```
+
+See [`docs/adhoc-commands.md`](docs/adhoc-commands.md). Toggle with `ADHOC_COMMANDS_ENABLED`.
+
+## Post-audit follow-up
+
+After an audit, revise a requirement (new logs land in the same `REQ-*` folder) and rebuild the report:
+
+```text
+Revise REQ-002 on Ubuntu
+Update the report from new evidence
+```
+
+See [`docs/post-audit-followup.md`](docs/post-audit-followup.md).
+
+## Results PostgreSQL warehouse
+
+Optionally dual-write filled checklist cells to a per-client Postgres database and
+track **numbered audit sessions** (`#1`, `#2`, …). Evidence files stay on disk.
+
+Chat uses **phrase patterns** (not free-form LLM): *which sessions need continue?*,
+*list audit sessions*, `continue session 3 for Acme`. Session list ≠ LangGraph
+checkpoint query — resume with **continue**. Details:
+[`docs/results-database.md`](docs/results-database.md) (`RESULTS_DB_*`).
+
+## Config
+
+See [`.env.example`](.env.example): `AGENTS_DIR`, `MCPS_DIR`, `PLAYBOOKS_DIR`, `MEMORY_*`, `EVIDENCE_DIR`, `HITL_ENABLED`, `ARCHIVE_ENABLED`, `COMPLIANCE_CHARTS_IN_REPORT`, `ADHOC_COMMANDS_ENABLED`, `RESULTS_DB_*`, `PUBLIC_BASE_URL`, `OPEN_WEBUI_*`, `MAX_SESSION_RETRIES`, `MAX_PARALLEL_ASSESSMENTS`, `MAX_PARALLEL_HOST_JOBS`, `LITELLM_*`, `PG_*`, `SSH_*`, `MCP_POSTGRES_*`.
+
+MCP architecture: [`docs/langchain-mcp.md`](docs/langchain-mcp.md) · add servers via [`mcps/`](mcps/).
+
+## Development
+
+Canonical local/CI quality gates (AUD-002). Historical CORE-000 numbers live in
+[`docs/baseline.md`](docs/baseline.md); developer commands are also summarized in
+[`docs/quality-gates.md`](docs/quality-gates.md).
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[dev]' -c constraints.txt
+
+# Optional / required for integration + full suite:
+export AUDITOR_TEST_DATABASE_URL='postgresql://aud002:aud002_ci_secret@127.0.0.1:5432/postgres'
+
+make format             # may modify files
+make format-check       # non-destructive
+make lint
+make typecheck
+make test-unit          # fails if zero tests collected
+make test-integration   # isolated PostgreSQL; fails if zero collected
+make test               # full suite; fails if zero collected
+make check              # all mandatory gates
+```
+
+Mandatory CI jobs invoke the same Make targets. Optional real-provider LLM tests
+require `AUDITOR_ALLOW_EXTERNAL_LLM=1` and are not part of PR CI.

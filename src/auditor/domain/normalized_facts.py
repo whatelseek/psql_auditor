@@ -26,9 +26,11 @@ from auditor.domain.applicability import (
 )
 from auditor.domain.inventory import (
     ClientInventory,
+    FactSource,
     InventoryHost,
     TechnologyDetection,
 )
+from auditor.tools.secrets import redact_secret_text
 
 FactSourceType = Literal[
     "inventory",
@@ -55,13 +57,81 @@ def _safe_segment(raw: str) -> str:
 
 
 def _dedupe_sorted(refs: Sequence[str]) -> tuple[str, ...]:
-    return tuple(sorted({str(r).strip() for r in refs if str(r).strip()}))
+    return tuple(sorted({r for r in refs if r}))
+
+
+_CANARY_MARKERS = (
+    "CANARY_PASSWORD_INPUT005_11",
+    "CANARY_TOKEN_INPUT005_11",
+)
+
+_SAFE_EVIDENCE_REF = re.compile(r"^[A-Za-z][A-Za-z0-9._:-]{0,127}$")
+
+
+def validate_provenance_ref(
+    value: str,
+    *,
+    field_name: str,
+) -> str:
+    """Validate a secret-free provenance reference string."""
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{field_name} must be non-empty")
+    if len(text) > 512:
+        raise ValueError(f"{field_name} exceeds maximum length")
+    if any(ord(ch) < 32 for ch in value):
+        raise ValueError(f"{field_name} contains forbidden control characters")
+    for marker in _CANARY_MARKERS:
+        if marker in text:
+            raise ValueError(f"{field_name} rejected by secret policy")
+    redacted = redact_secret_text(text)
+    if redacted != text:
+        raise ValueError(f"{field_name} rejected by secret policy")
+    return text
+
+
+def _safe_detection_evidence_refs(
+    evidence: Sequence[str],
+) -> tuple[str, ...]:
+    """Keep only opaque reference-shaped evidence ids; drop free-text descriptions."""
+    kept: list[str] = []
+    for item in evidence:
+        if not isinstance(item, str):
+            continue
+        candidate = item.strip()
+        if not candidate:
+            continue
+        # Legacy free-text evidence (e.g. "os=Ubuntu", "port=5432") is omitted.
+        if "=" in candidate or " " in candidate or "/" in candidate:
+            continue
+        if not _SAFE_EVIDENCE_REF.fullmatch(candidate):
+            continue
+        try:
+            kept.append(validate_provenance_ref(candidate, field_name="evidence_refs"))
+        except ValueError:
+            continue
+    return _dedupe_sorted(kept)
+
+
+def _normalized_source_type(source: FactSource) -> FactSourceType:
+    mapping: dict[FactSource, FactSourceType] = {
+        "inventory": "inventory",
+        "discovered": "discovery",
+        "user_confirmed": "operator",
+        "questionnaire": "operator",
+        "inferred": "derived",
+        "previous_audit": "derived",
+        "unknown": "derived",
+    }
+    return mapping[source]
 
 
 class NormalizedFact(BaseModel):
     """One provenance-bearing fact in the normalized host namespace."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     fact: StrictStr = Field(min_length=1)
     value: FactValue
@@ -90,21 +160,21 @@ class NormalizedFact(BaseModel):
     @field_validator("source_ref")
     @classmethod
     def _source_ref(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("source_ref must be non-empty")
-        return text
+        return validate_provenance_ref(value, field_name="source_ref")
 
     @field_validator("evidence_refs", mode="before")
     @classmethod
     def _evidence(cls, value: Any) -> Any:
         if value is None:
             return ()
-        if isinstance(value, list):
-            return _dedupe_sorted(value)
-        if isinstance(value, tuple):
-            return _dedupe_sorted(value)
-        return value
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("evidence_refs must be a list of strings")
+        validated: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("evidence_refs items must be strings")
+            validated.append(validate_provenance_ref(item, field_name="evidence_refs"))
+        return _dedupe_sorted(validated)
 
     @model_validator(mode="after")
     def _sorted_evidence(self) -> NormalizedFact:
@@ -117,7 +187,7 @@ class NormalizedFact(BaseModel):
 class FactConflict(BaseModel):
     """Same fact key observed with incompatible values."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     fact: StrictStr = Field(min_length=1)
     candidates: tuple[NormalizedFact, ...]
@@ -305,9 +375,12 @@ def build_host_fact_set(
         _add("os.name", host.os_name.strip())
 
     connections = {c.strip().lower() for c in host.connection_types if c.strip()}
-    _add("access.ssh.available", "ssh" in connections)
-    _add("access.winrm.available", "winrm" in connections)
-    _add("access.postgresql.available", "postgresql" in connections)
+    if "ssh" in connections:
+        _add("access.ssh.available", True)
+    if "winrm" in connections:
+        _add("access.winrm.available", True)
+    if "postgresql" in connections:
+        _add("access.postgresql.available", True)
 
     for service in host.services:
         seg = _safe_segment(service.name)
@@ -336,9 +409,9 @@ def build_host_fact_set(
             f"technology.{tech}.status",
             str(det.status),
             confidence=float(det.confidence),
-            source_type="discovery" if det.source == "discovered" else "inventory",
+            source_type=_normalized_source_type(det.source),
             src=_detection_source_ref(det.target_id, det.technology_id),
-            evidence=det.evidence,
+            evidence=_safe_detection_evidence_refs(det.evidence),
         )
 
     for extra in extra_facts:
