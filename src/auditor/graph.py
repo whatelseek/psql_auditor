@@ -62,7 +62,7 @@ from auditor.intake import (
 from auditor.llm import build_chat_model
 from auditor.memory.playbook_store import PlaybookMemory
 from auditor.task_registry import TaskRegistry
-from auditor.tool_registry import get_tool_registry
+from auditor.tool_registry import ToolRegistry, get_tool_registry
 from auditor.tools.mcp_client import PostgresMcpPool, build_mcp_tools
 from auditor.tools.winrm import get_winrm_tools
 from auditor.workflows import assessment as _wf_assessment
@@ -108,8 +108,6 @@ def _registry_ssh_tools(registry=None) -> list:
     Fail-closed: when the registry/policy authorizes no SSH tools, return an
     empty list. Never fall back to unbound legacy helpers in production.
     """
-    from auditor.tool_registry import ToolRegistry
-
     active: ToolRegistry = registry if registry is not None else get_tool_registry()
     return active.bindable_langchain_tools(transports=("ssh",))
 
@@ -148,7 +146,7 @@ class AuditorGraph:
         mcp_pool: PostgresMcpPool | None = None,
         results_store: Any | None = None,
         task_registry: TaskRegistry | None = None,
-        tool_registry: Any | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         """Wire settings, models, tools, memory, and compile LangGraph workflows.
 

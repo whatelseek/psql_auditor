@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,11 +17,14 @@ from auditor.domain.audit_request import POC_TOOL_PROFILE
 from auditor.tool_registry import (
     REQUIRED_POC_SSH_TOOL_IDS,
     RuntimeToolCatalogError,
+    ToolRegistry,
     get_tool_registry,
     load_tool_registry,
     reset_tool_registry_cache,
     validate_runtime_tool_registry,
 )
+
+CANARY = "CANARY_SECRET_TOKEN_do-not-leak"
 
 
 @pytest.fixture(autouse=True)
@@ -102,6 +107,11 @@ def _settings(tmp_path: Path, tools_dir: Path) -> Settings:
     )
 
 
+class _FakeGraph:
+    async def aclose_runtime_resources(self, timeout: float = 10.0) -> None:
+        return None
+
+
 @pytest.mark.asyncio
 async def test_valid_runtime_startup(tmp_path: Path) -> None:
     tools = _seed_valid_tools(tmp_path / "tools")
@@ -109,6 +119,7 @@ async def test_valid_runtime_startup(tmp_path: Path) -> None:
     await runtime.start()
     try:
         assert runtime.tool_registry is not None
+        assert isinstance(runtime.tool_registry, ToolRegistry)
         assert runtime.tool_registry.is_authorized("ssh_run")
         assert runtime.tool_registry.is_authorized("ssh_read_file")
         assert runtime.graph is not None
@@ -125,7 +136,8 @@ async def test_missing_tools_directory_fails_startup(tmp_path: Path) -> None:
     with pytest.raises(RuntimeStartupError) as exc_info:
         await runtime.start()
     message = str(exc_info.value)
-    assert "tools directory missing" in message
+    assert "code=tools_dir_missing" in message
+    assert CANARY not in message
     assert "PASSWORD" not in message
     assert "sk-" not in message
     assert "ssh_password" not in message
@@ -139,8 +151,9 @@ async def test_missing_policy_fails_startup(tmp_path: Path) -> None:
     _write_manifest(catalog, "ssh_run", _valid_ssh_manifest("ssh_run"))
     _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
     runtime = ApplicationRuntime(_settings(tmp_path, root))
-    with pytest.raises(RuntimeStartupError):
+    with pytest.raises(RuntimeStartupError) as exc_info:
         await runtime.start()
+    assert "code=policy_missing" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -164,7 +177,7 @@ async def test_unknown_allowed_tool_fails_before_graph(tmp_path: Path) -> None:
     with pytest.raises(RuntimeStartupError) as exc_info:
         await runtime.start()
     assert graph_calls == []
-    assert "missing_tool" in str(exc_info.value)
+    assert "tool=missing_tool" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -178,7 +191,8 @@ async def test_required_tool_denied_fails_startup(tmp_path: Path) -> None:
     runtime = ApplicationRuntime(_settings(tmp_path, root))
     with pytest.raises(RuntimeStartupError) as exc_info:
         await runtime.start()
-    assert "ssh_run" in str(exc_info.value)
+    assert "tool=ssh_run" in str(exc_info.value)
+    assert "code=required_tool_denied" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -193,7 +207,8 @@ async def test_non_bindable_adapter_fails_startup(tmp_path: Path) -> None:
     runtime = ApplicationRuntime(_settings(tmp_path, root))
     with pytest.raises(RuntimeStartupError) as exc_info:
         await runtime.start()
-    assert "ssh_run" in str(exc_info.value)
+    assert "tool=ssh_run" in str(exc_info.value)
+    assert "code=required_tool_not_bindable" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -213,8 +228,10 @@ async def test_bound_name_mismatch_fails_startup(tmp_path: Path) -> None:
                 registry,
                 required_tool_ids=REQUIRED_POC_SSH_TOOL_IDS,
                 tools_dir=root,
+                expected_profile=POC_TOOL_PROFILE,
             )
     assert exc_info.value.code == "bound_name_mismatch"
+    assert "different_name" not in str(exc_info.value)
     assert exc_info.value.tool_id in REQUIRED_POC_SSH_TOOL_IDS
 
     runtime = ApplicationRuntime(_settings(tmp_path, root))
@@ -227,19 +244,10 @@ async def test_bound_name_mismatch_fails_startup(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_receives_owned_registry(tmp_path: Path) -> None:
+async def test_valid_injected_registry_validated_and_passed(tmp_path: Path) -> None:
     tools = _seed_valid_tools(tmp_path / "tools")
-    fake = SimpleNamespace(
-        is_authorized=lambda _tid: True,
-        bindable_langchain_tools=lambda **_kwargs: [],
-        catalog_hash="tool-fake",
-        policy_hash="pol-fake",
-    )
+    injected = load_tool_registry(tools, profile=POC_TOOL_PROFILE)
     seen: dict[str, object] = {}
-
-    class _FakeGraph:
-        async def aclose_runtime_resources(self, timeout: float = 10.0) -> None:
-            return None
 
     def factory(runtime: ApplicationRuntime):
         seen["registry"] = runtime.tool_registry
@@ -247,15 +255,184 @@ async def test_graph_receives_owned_registry(tmp_path: Path) -> None:
 
     runtime = ApplicationRuntime(
         _settings(tmp_path, tools),
-        tool_registry=fake,  # type: ignore[arg-type]
+        tool_registry=injected,
         graph_factory=factory,
     )
     await runtime.start()
     try:
-        assert seen["registry"] is fake
-        assert runtime.tool_registry is fake
+        assert seen["registry"] is injected
+        assert runtime.tool_registry is injected
     finally:
         await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_injected_registry_fails_startup(tmp_path: Path) -> None:
+    root = tmp_path / "tools"
+    (root / "catalog").mkdir(parents=True)
+    _write_policy(
+        root,
+        POC_TOOL_PROFILE,
+        _poc_policy(allowed_tools=[]),
+    )
+    empty = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    runtime = ApplicationRuntime(
+        _settings(tmp_path, root),
+        tool_registry=empty,
+    )
+    with pytest.raises(RuntimeStartupError) as exc_info:
+        await runtime.start()
+    assert "code=required_tool_missing" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_fake_registry_object_fails_startup(tmp_path: Path) -> None:
+    tools = _seed_valid_tools(tmp_path / "tools")
+    fake = SimpleNamespace(
+        is_authorized=lambda _tid: True,
+        bindable_langchain_tools=lambda **_kwargs: [],
+        catalog_hash="tool-fake",
+        policy_hash="pol-fake",
+    )
+    runtime = ApplicationRuntime(
+        _settings(tmp_path, tools),
+        tool_registry=fake,  # type: ignore[arg-type]
+    )
+    with pytest.raises(RuntimeStartupError) as exc_info:
+        await runtime.start()
+    assert "code=invalid_registry_type" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_injected_denied_ssh_run_fails_startup(tmp_path: Path) -> None:
+    root = _seed_valid_tools(tmp_path / "tools")
+    _write_policy(root, POC_TOOL_PROFILE, _poc_policy(denied_tools=["ssh_run"]))
+    injected = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    runtime = ApplicationRuntime(
+        _settings(tmp_path, root),
+        tool_registry=injected,
+    )
+    with pytest.raises(RuntimeStartupError) as exc_info:
+        await runtime.start()
+    assert "code=required_tool_denied" in str(exc_info.value)
+    assert "tool=ssh_run" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_injected_non_bindable_tool_fails_startup(tmp_path: Path) -> None:
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    payload = _valid_ssh_manifest("ssh_run")
+    payload["adapter"] = "auditor.tools.ssh:definitely_missing_adapter"
+    _write_manifest(catalog, "ssh_run", payload)
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    _write_policy(root, POC_TOOL_PROFILE, _poc_policy())
+    injected = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    runtime = ApplicationRuntime(
+        _settings(tmp_path, root),
+        tool_registry=injected,
+    )
+    with pytest.raises(RuntimeStartupError) as exc_info:
+        await runtime.start()
+    assert "code=required_tool_not_bindable" in str(exc_info.value)
+
+
+@pytest.mark.unit
+def test_registry_from_other_tools_dir_fails(tmp_path: Path) -> None:
+    root_a = _seed_valid_tools(tmp_path / "tools_a")
+    root_b = _seed_valid_tools(tmp_path / "tools_b")
+    registry_a = load_tool_registry(root_a, profile=POC_TOOL_PROFILE)
+    with pytest.raises(RuntimeToolCatalogError) as exc_info:
+        validate_runtime_tool_registry(
+            registry_a,
+            tools_dir=root_b,
+            expected_profile=POC_TOOL_PROFILE,
+        )
+    assert exc_info.value.code == "catalog_path_mismatch"
+
+
+@pytest.mark.unit
+def test_wrong_policy_profile_fails(tmp_path: Path) -> None:
+    root = _seed_valid_tools(tmp_path / "tools")
+    registry = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    with pytest.raises(RuntimeToolCatalogError) as exc_info:
+        validate_runtime_tool_registry(
+            registry,
+            tools_dir=root,
+            expected_profile="other_profile_v1",
+        )
+    assert exc_info.value.code == "policy_profile_mismatch"
+
+
+@pytest.mark.unit
+def test_missing_policy_file_fails_validation(tmp_path: Path) -> None:
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    _write_manifest(catalog, "ssh_run", _valid_ssh_manifest("ssh_run"))
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    registry = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    with pytest.raises(RuntimeToolCatalogError) as exc_info:
+        validate_runtime_tool_registry(
+            registry,
+            tools_dir=root,
+            expected_profile=POC_TOOL_PROFILE,
+        )
+    assert exc_info.value.code == "policy_missing"
+
+
+@pytest.mark.unit
+def test_required_manifest_outside_catalog_fails(tmp_path: Path) -> None:
+    root = _seed_valid_tools(tmp_path / "tools")
+    registry = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    outside = tmp_path / "elsewhere" / "ssh_run.json"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("{}", encoding="utf-8")
+    original = registry.get("ssh_run")
+    assert original is not None
+    registry.tools["ssh_run"] = replace(original, source_path=str(outside))
+    with pytest.raises(RuntimeToolCatalogError) as exc_info:
+        validate_runtime_tool_registry(
+            registry,
+            tools_dir=root,
+            expected_profile=POC_TOOL_PROFILE,
+        )
+    assert exc_info.value.code == "manifest_outside_catalog"
+    assert "tool=ssh_run" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_secret_canaries_not_leaked_in_errors_or_logs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    payload = _valid_ssh_manifest("ssh_run")
+    payload["timeout_seconds"] = CANARY  # becomes validation issue message
+    payload["description"] = f"leak-{CANARY}"
+    _write_manifest(catalog, "ssh_run", payload)
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    policy = _poc_policy()
+    policy["description"] = f"policy-{CANARY}"
+    _write_policy(root, POC_TOOL_PROFILE, policy)
+
+    registry = load_tool_registry(root, profile=POC_TOOL_PROFILE)
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeToolCatalogError) as catalog_exc:
+        validate_runtime_tool_registry(
+            registry,
+            tools_dir=root,
+            expected_profile=POC_TOOL_PROFILE,
+        )
+    assert CANARY not in str(catalog_exc.value)
+    assert CANARY not in catalog_exc.value.catalog_path
+    assert CANARY not in (catalog_exc.value.policy_profile or "")
+    assert CANARY not in caplog.text
+
+    runtime = ApplicationRuntime(_settings(tmp_path, root))
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeStartupError) as start_exc:
+        await runtime.start()
+    assert CANARY not in str(start_exc.value)
+    assert CANARY not in caplog.text
+    assert "code=" in str(start_exc.value)
 
 
 @pytest.mark.unit
@@ -273,22 +450,15 @@ def test_registry_path_isolation(tmp_path: Path) -> None:
     registry_b = get_tool_registry(tools_dir=root_b, profile=POC_TOOL_PROFILE)
     assert registry_a is not registry_b
     assert registry_a.catalog_hash != registry_b.catalog_hash
-
-    again_a = get_tool_registry(tools_dir=root_a, profile=POC_TOOL_PROFILE)
-    assert again_a is registry_a
-    again_b = get_tool_registry(tools_dir=root_b, profile=POC_TOOL_PROFILE)
-    assert again_b is registry_b
+    assert get_tool_registry(tools_dir=root_a, profile=POC_TOOL_PROFILE) is registry_a
+    assert get_tool_registry(tools_dir=root_b, profile=POC_TOOL_PROFILE) is registry_b
 
 
 @pytest.mark.unit
 def test_compose_mounts_tools_readonly() -> None:
-    """Assert agent service declares TOOLS_DIR and a read-only tools mount.
-
-    Parses ``docker-compose.yml`` directly so CI unit jobs do not require Docker.
-    """
+    """Assert agent service declares TOOLS_DIR and a read-only tools mount."""
     compose_path = Path(__file__).resolve().parents[1] / "docker-compose.yml"
     text = compose_path.read_text(encoding="utf-8")
     assert "TOOLS_DIR: /app/tools" in text
     assert "./tools:/app/tools:ro" in text
-    # Open WebUI / Open Terminal must not mount the catalog.
     assert text.count("./tools:/app/tools:ro") == 1

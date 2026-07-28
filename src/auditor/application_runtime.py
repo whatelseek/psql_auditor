@@ -121,16 +121,17 @@ class ApplicationRuntime:
                 )
 
                 if self.tool_registry is None:
-                    registry = load_tool_registry(
+                    self.tool_registry = load_tool_registry(
                         self.settings.tools_dir,
                         profile=POC_TOOL_PROFILE,
                     )
-                    validate_runtime_tool_registry(
-                        registry,
-                        required_tool_ids=REQUIRED_POC_SSH_TOOL_IDS,
-                        tools_dir=self.settings.tools_dir,
-                    )
-                    self.tool_registry = registry
+
+                validate_runtime_tool_registry(
+                    self.tool_registry,
+                    required_tool_ids=REQUIRED_POC_SSH_TOOL_IDS,
+                    tools_dir=self.settings.tools_dir,
+                    expected_profile=POC_TOOL_PROFILE,
+                )
 
                 if self._graph_factory is not None:
                     self.graph = self._graph_factory(self)
@@ -145,12 +146,29 @@ class ApplicationRuntime:
                 self.state = RuntimeState.RUNNING
                 return self
             except Exception as exc:
-                logger.exception("application runtime startup failed")
+                from auditor.tool_registry import RuntimeToolCatalogError
+
+                if isinstance(exc, RuntimeToolCatalogError):
+                    logger.error(
+                        "application runtime startup failed: code=%s tool=%s profile=%s",
+                        exc.code,
+                        exc.tool_id or "-",
+                        exc.policy_profile or "-",
+                    )
+                    detail = f"code={exc.code}"
+                    if exc.tool_id:
+                        detail = f"{detail} tool={exc.tool_id}"
+                    if exc.policy_profile:
+                        detail = f"{detail} profile={exc.policy_profile}"
+                    startup_message = f"application runtime startup failed: {detail}"
+                else:
+                    logger.exception("application runtime startup failed")
+                    startup_message = "application runtime startup failed"
                 try:
                     await self._close_unlocked(reason="startup_failure")
                 except RuntimeShutdownTimeoutError:
                     logger.warning("startup failure cleanup timed out; runtime left CLOSING")
-                raise RuntimeStartupError(f"application runtime startup failed: {exc}") from exc
+                raise RuntimeStartupError(startup_message) from exc
 
     async def close(self) -> None:
         """Idempotent shutdown of all owned resources.

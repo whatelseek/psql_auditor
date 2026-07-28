@@ -863,64 +863,105 @@ def validate_runtime_tool_registry(
     *,
     required_tool_ids: tuple[str, ...] = REQUIRED_POC_SSH_TOOL_IDS,
     tools_dir: Path | str | None = None,
+    expected_profile: str = POC_TOOL_PROFILE,
 ) -> None:
     """Fail closed when the active catalog/policy cannot support runtime tools.
 
     Raises:
         RuntimeToolCatalogError: missing paths, invalid policy, unauthorized or
-            non-bindable required tools, or bound-name mismatches. Messages must
-            never include credentials, tokens, inventory contents, or tool inputs.
+            non-bindable required tools, origin mismatches, or bound-name
+            mismatches. Messages include only code, tool ID, profile, and
+            catalog path — never raw manifest/policy values or credentials.
     """
-    if tools_dir is not None:
-        root = Path(tools_dir)
-    elif registry.catalog_dir is not None:
-        root = Path(registry.catalog_dir).parent
-    else:
-        root = default_tools_dir()
-
-    catalog_dir = root / "catalog"
-    catalog_path = str(registry.catalog_dir or catalog_dir)
-    policy = registry.policy
-    profile = policy.profile if policy is not None else ""
+    root = Path(tools_dir) if tools_dir is not None else default_tools_dir()
+    root_resolved = root.resolve()
+    expected_catalog = (root_resolved / "catalog").resolve()
+    expected_policy_path = (root_resolved / "policies" / f"{expected_profile}.json").resolve()
+    catalog_path = str(expected_catalog)
 
     def _fail(
         message: str,
         *,
         code: str,
         tool_id: str = "",
+        policy_profile: str = expected_profile,
     ) -> NoReturn:
         raise RuntimeToolCatalogError(
             message,
             code=code,
             tool_id=tool_id,
             catalog_path=catalog_path,
-            policy_profile=profile,
+            policy_profile=policy_profile,
+        )
+
+    if not isinstance(registry, ToolRegistry):
+        _fail(
+            "tool registry is not a ToolRegistry instance",
+            code="invalid_registry_type",
         )
 
     if not root.is_dir():
-        _fail(f"tools directory missing: {root}", code="tools_dir_missing")
-    if not catalog_dir.is_dir():
-        _fail(f"tool catalog directory missing: {catalog_dir}", code="catalog_dir_missing")
+        _fail(
+            "tools directory missing: code=tools_dir_missing",
+            code="tools_dir_missing",
+        )
+    if not expected_catalog.is_dir():
+        _fail(
+            "tool catalog directory missing: code=catalog_dir_missing",
+            code="catalog_dir_missing",
+        )
 
+    if registry.catalog_dir is None or registry.catalog_dir.resolve() != expected_catalog:
+        _fail(
+            "tool registry catalog path does not match configured TOOLS_DIR",
+            code="catalog_path_mismatch",
+        )
+
+    policy = registry.policy
     if policy is None:
-        _fail("capability policy is missing", code="policy_missing")
+        _fail(
+            "capability policy is missing: code=policy_missing",
+            code="policy_missing",
+        )
+
+    if policy.profile != expected_profile:
+        _fail(
+            "capability policy profile mismatch: "
+            f"code=policy_profile_mismatch profile={expected_profile}",
+            code="policy_profile_mismatch",
+            policy_profile=expected_profile,
+        )
+
+    if not expected_policy_path.is_file():
+        _fail(
+            "capability policy file missing: code=policy_missing",
+            code="policy_missing",
+        )
+
+    if registry.policy_path is None or registry.policy_path.resolve() != expected_policy_path:
+        _fail(
+            "tool registry policy path does not match configured TOOLS_DIR",
+            code="policy_path_mismatch",
+        )
 
     if any(i.code == "policy_missing" for i in policy.issues):
-        policy_file = root / "policies" / f"{policy.profile}.json"
-        _fail(f"capability policy file missing: {policy_file}", code="policy_missing")
+        _fail(
+            "capability policy file missing: code=policy_missing",
+            code="policy_missing",
+        )
 
     policy_errors = [i for i in policy.issues if i.level == "error"]
     if policy_errors:
-        issue = policy_errors[0]
+        issue_code = policy_errors[0].code or "policy_invalid"
         _fail(
-            f"capability policy invalid ({issue.code}): {issue.message}",
-            code=issue.code or "policy_invalid",
+            f"capability policy invalid: code={issue_code}",
+            code=issue_code,
         )
 
     for allowed_id in policy.allowed_tools:
         if registry.get(allowed_id) is None:
             _fail(
-                f"capability policy allows unknown tool {allowed_id!r}",
+                f"capability policy allows unknown tool: tool={allowed_id}",
                 code="unknown_allowed_tool",
                 tool_id=allowed_id,
             )
@@ -929,41 +970,62 @@ def validate_runtime_tool_registry(
         manifest = registry.get(tool_id)
         if manifest is None:
             _fail(
-                f"required tool manifest missing: {tool_id!r}",
+                f"required tool manifest missing: tool={tool_id}",
                 code="required_tool_missing",
+                tool_id=tool_id,
+            )
+        source = (manifest.source_path or "").strip()
+        if not source:
+            _fail(
+                f"required tool manifest outside configured catalog: tool={tool_id}",
+                code="manifest_outside_catalog",
+                tool_id=tool_id,
+            )
+        try:
+            manifest_parent = Path(source).resolve().parent
+        except OSError:
+            _fail(
+                f"required tool manifest outside configured catalog: tool={tool_id}",
+                code="manifest_outside_catalog",
+                tool_id=tool_id,
+            )
+        if manifest_parent != expected_catalog:
+            _fail(
+                f"required tool manifest outside configured catalog: tool={tool_id}",
+                code="manifest_outside_catalog",
                 tool_id=tool_id,
             )
         if not manifest.enabled:
             _fail(
-                f"required tool is disabled: {tool_id!r}",
+                f"required tool is disabled: tool={tool_id}",
                 code="required_tool_disabled",
                 tool_id=tool_id,
             )
         if not manifest.executable:
-            err = next(
-                (i.message for i in manifest.issues if i.level == "error"),
-                "validation errors",
+            issue_code = next(
+                (i.code for i in manifest.issues if i.level == "error"),
+                "required_tool_invalid",
             )
             _fail(
-                f"required tool manifest invalid: {tool_id!r} ({err})",
+                f"required tool manifest is invalid: tool={tool_id} code={issue_code}",
                 code="required_tool_invalid",
                 tool_id=tool_id,
             )
         if tool_id in policy.denied_tools:
             _fail(
-                f"required tool denied by capability policy: {tool_id!r}",
+                f"required tool denied by capability policy: tool={tool_id}",
                 code="required_tool_denied",
                 tool_id=tool_id,
             )
         if policy.allowed_transports and manifest.transport not in policy.allowed_transports:
             _fail(
-                f"required tool transport {manifest.transport!r} denied for {tool_id!r}",
+                f"required tool transport denied: tool={tool_id}",
                 code="required_transport_denied",
                 tool_id=tool_id,
             )
         if not registry.is_authorized(tool_id):
             _fail(
-                f"required tool is not authorized: {tool_id!r}",
+                f"required tool is not authorized: tool={tool_id}",
                 code="required_tool_unauthorized",
                 tool_id=tool_id,
             )
@@ -971,14 +1033,14 @@ def validate_runtime_tool_registry(
         bound = _resolve_langchain_tool(manifest)
         if bound is None:
             _fail(
-                f"required tool cannot be bound as a LangChain tool: {tool_id!r}",
+                f"required tool cannot be bound as a LangChain tool: tool={tool_id}",
                 code="required_tool_not_bindable",
                 tool_id=tool_id,
             )
         bound_name = getattr(bound, "name", None)
         if bound_name != tool_id:
             _fail(
-                f"bound tool name {bound_name!r} does not match manifest id {tool_id!r}",
+                f"bound tool name mismatch: tool={tool_id}",
                 code="bound_name_mismatch",
                 tool_id=tool_id,
             )
