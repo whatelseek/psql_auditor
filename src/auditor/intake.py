@@ -1034,17 +1034,27 @@ def apply_scope_exclusions(
 
 
 def format_intake_assistant_message(prompt: str, thread_id: str) -> str:
-    """Обернуть промпт шага intake скрытым маркером resume-потока.
+    """Wrap intake step prompt with a durable resume marker for chat UIs.
+
+    Open WebUI often strips markdown-reference comments (``[//]: # (…)``),
+    which dropped the resume marker and restarted intake from step 1.
+    Use the same visible ``[AUDIT_INTAKE:…]`` form as HITL, plus an HTML
+    comment backup that ``resolve_pause_resume`` also recognizes.
 
     Args:
-        prompt: Markdown вопроса из :func:`prompts_for_language`.
-        thread_id: Id потока LangGraph для resume.
+        prompt: Markdown question from :func:`prompts_for_language`.
+        thread_id: LangGraph thread id for resume.
 
     Returns:
-        Сообщение ассистента без служебного текста для оператора.
+        Assistant message with prompt and resume markers.
     """
-    # Use markdown comment style that OWUI typically does not render.
-    return f"{prompt.strip()}\n\n[//]: # (AUDIT_INTAKE:{thread_id})\n"
+    return (
+        f"{prompt.strip()}\n\n"
+        f"---\n"
+        f"[AUDIT_INTAKE:{thread_id}]\n"
+        f"<!-- AUDIT_INTAKE:{thread_id} -->\n"
+        f"_Reply in this chat to continue pre-audit intake._\n"
+    )
 
 
 def intake_interrupt_payload(*, step: str, prompt: str, **extra: Any) -> dict[str, Any]:

@@ -347,6 +347,32 @@ class EvidenceStore:
 
         self.run_id = new_id
         self.root = new_root
+        # Rebind to a new audit-run path must not keep a copied source
+        # ownership.json (intake may rebind ephemeral → nested across resumes).
+        if expect_cid and expect_arid:
+            from auditor.run_scope import OwnershipManifest, write_ownership_manifest
+
+            own_path = new_root / OWNERSHIP_MANIFEST_NAME
+            if own_path.is_file():
+                try:
+                    existing = read_ownership_manifest(new_root)
+                except OwnershipManifestError:
+                    existing = None
+                if (
+                    existing is None
+                    or existing.client_id != expect_cid
+                    or existing.audit_run_id != expect_arid
+                ):
+                    own_path.unlink(missing_ok=True)
+                    write_ownership_manifest(
+                        new_root,
+                        OwnershipManifest(client_id=expect_cid, audit_run_id=expect_arid),
+                    )
+            else:
+                write_ownership_manifest(
+                    new_root,
+                    OwnershipManifest(client_id=expect_cid, audit_run_id=expect_arid),
+                )
         self.seed_counters_from_disk()
         return self.run_id
 

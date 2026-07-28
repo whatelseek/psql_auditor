@@ -312,6 +312,32 @@ async def _stream_responses_audit(
         }
     )
 
+    user_text = _latest_user_text(body.messages)
+    paused = resolve_pause_resume(body.messages)
+    if _is_open_webui_side_request(user_text):
+        preamble = ""
+    elif paused and paused[0] == "intake":
+        preamble = f"Continuing pre-audit intake (`{paused[1]}`)…\n\n"
+    elif paused and paused[0] == "hitl":
+        preamble = f"Resuming paused audit (`{paused[1]}`)…\n\n"
+    elif paused and paused[0] == "continue":
+        preamble = f"Continuing interrupted audit (`{paused[1]}`)…\n\n"
+    elif runtime.settings.intake_enabled:
+        preamble = "Starting pre-audit intake…\n\n"
+    else:
+        preamble = ""
+    if preamble:
+        yield _sse_responses_event(
+            {
+                "type": "response.output_text.delta",
+                "item_id": message_id,
+                "output_index": 0,
+                "content_index": 0,
+                "delta": preamble,
+                "sequence_number": _next(),
+            }
+        )
+
     sink = ProgressSink()
 
     async def _runner() -> dict[str, Any]:
@@ -633,6 +659,35 @@ async def download_archive(
     )
 
 
+
+def _is_open_webui_side_request(text: str) -> bool:
+    """Return True for OWUI auxiliary prompts that must not start an audit.
+
+    Open WebUI sometimes calls the same model endpoint to generate chat tags /
+    titles. Those prompts were previously classified as ``audit`` and started a
+    second pre-audit intake in parallel with the operator conversation.
+    """
+    raw = (text or "").strip().lower()
+    if not raw:
+        return False
+    needles = (
+        "generate 1-3 broad tags",
+        "categorizing the main themes of the chat history",
+        "<chat_history>",
+        "generate a concise",
+        "chat title",
+        "### task:\ngenerate 1-3 broad tags",
+    )
+    return any(n in raw for n in needles)
+
+
+def _open_webui_side_request_reply(text: str) -> str:
+    """Minimal reply that satisfies OWUI tag/title helpers without intake."""
+    raw = (text or "").lower()
+    if "tag" in raw or "themes of the chat" in raw:
+        return '{"tags": ["General"]}'
+    return "General"
+
 async def _run_or_resume(
     runtime: ApplicationRuntime,
     auditor,
@@ -690,6 +745,16 @@ async def _run_or_resume_once(
 ) -> dict[str, Any]:
     """Single attempt of :func:`_run_or_resume` (no checkpointer retry)."""
     user_text = _latest_user_text(body.messages)
+
+    # OWUI tag/title helpers share /v1/responses — never start intake for them.
+    if _is_open_webui_side_request(user_text):
+        reply = _open_webui_side_request_reply(user_text)
+        return {
+            "report": reply,
+            "messages": [AIMessage(content=reply)],
+            "awaiting_hitl": False,
+            "awaiting_intake": False,
+        }
 
     # Explicit ``continue session N for Client`` must win over stale
     # ``[AUDIT_INTAKE|/HITL]`` markers still present in Open WebUI history —

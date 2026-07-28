@@ -12,7 +12,7 @@ from langgraph.types import interrupt
 from auditor.access_probe import probe_access_endpoints, probe_access_services
 from auditor.audit_registry import get_audit_registry
 from auditor.client_registry import get_client_registry
-from auditor.evidence_store import client_artifacts_id
+from auditor.evidence_store import EvidenceStore, client_artifacts_id
 from auditor.frameworks import get_framework, prefer_framework_ids, select_frameworks_for_host
 from auditor.host_facts import resolve_client_inventory
 from auditor.intake import (
@@ -34,6 +34,7 @@ from auditor.intake import (
     resolve_yes_no,
 )
 from auditor.legacy_compat import assert_client_owns_run, require_audit_run_id
+from auditor.progress import emit_phase
 from auditor.prompts import (
     INTAKE_INTERPRET_AUDIT_TYPE_PROMPT,
     INTAKE_INTERPRET_AUDIT_TYPE_SYSTEM,
@@ -49,6 +50,74 @@ from auditor.secrets_file import list_client_access_endpoints, read_client_crede
 from auditor.state import AuditorState
 from auditor.workflows.helpers import _extract_json
 from auditor.workflows.protocols import AuditRuntime
+
+
+def _open_evidence_store(runtime: AuditRuntime, run_id: str) -> EvidenceStore | None:
+    """Return a cached or newly opened evidence store for ``run_id``."""
+    rid = (run_id or "").strip()
+    if not rid:
+        return None
+    existing = runtime._evidence_by_run.get(rid)
+    if existing is not None:
+        return existing
+    try:
+        store = EvidenceStore.open_existing(runtime.settings.evidence_dir, rid)
+    except Exception:  # noqa: BLE001
+        try:
+            store = EvidenceStore(runtime.settings.evidence_dir, run_id=rid)
+        except Exception:  # noqa: BLE001
+            return None
+    runtime._evidence_by_run[store.run_id] = store
+    return store
+
+
+def resolve_intake_evidence_store(
+    runtime: AuditRuntime,
+    state: AuditorState,
+    *,
+    thread_id: str = "",
+    intake: dict[str, Any] | None = None,
+) -> EvidenceStore | None:
+    """Resolve the rebound client evidence store across intake resumes.
+
+    LangGraph restarts ``intake_gate`` from the top on every resume. Local
+    mutations to ``state["evidence_run_id"]`` after ``rebind_run_id`` are not
+    checkpointed until the node returns, so mid-intake resumes often still
+    point at the temporary run folder. Prefer ``artifacts_run_id`` / AuditRun
+    registry lookup by intake thread so discovery/plan progress is not lost.
+    """
+    bag = dict(intake or state.get("intake") or {})
+    candidates: list[str] = []
+    for key in ("artifacts_run_id", "evidence_run_id"):
+        val = str(bag.get(key) or state.get(key) or "").strip()
+        if val and val not in candidates:
+            candidates.append(val)
+
+    tid = (thread_id or str(state.get("thread_id") or "")).strip()
+    if tid:
+        from auditor.audit_registry import get_audit_registry
+
+        registry = get_audit_registry(runtime.settings.evidence_dir)
+        for hint in (tid, tid.removesuffix(":intake"), f"{tid.removesuffix(':intake')}:intake"):
+            if not hint:
+                continue
+            prior = registry.find_run_by_base_thread(hint)
+            if prior is None:
+                continue
+            evid = str(prior.evidence_run_id or "").strip()
+            if evid and evid not in candidates:
+                candidates.insert(0, evid)
+            break
+
+    for rid in candidates:
+        store = _open_evidence_store(runtime, rid)
+        if store is not None:
+            # Keep in-node state aligned so later persist/load hit the same root.
+            state["evidence_run_id"] = store.run_id
+            state["evidence_run_dir"] = str(store.root)
+            return store
+
+    return runtime._store_from_state(state)
 
 
 async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
@@ -92,6 +161,12 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
                 intake.get("audit_run_id") or state.get("audit_run_id") or ""
             ).strip()
             registry = get_audit_registry(runtime.settings.evidence_dir)
+            if not audit_run_id and thread_hint:
+                # LangGraph re-runs this node on every resume; reuse the run
+                # already allocated for this intake thread.
+                prior = registry.find_run_by_base_thread(thread_hint)
+                if prior is not None and prior.client_id == client.client_id:
+                    audit_run_id = prior.audit_run_id
             if not audit_run_id:
                 arun = registry.create_run(
                     client_id=client.client_id,
@@ -227,7 +302,12 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
     )
     intake["has_cmdb"] = False
     intake["cmdb_probe"] = {}
-    intake["inventory_scope"] = scope
+    # Never persist raw INVENTORY.md (credentials) into intake/meta.
+    intake["inventory_scope"] = (
+        f"Inventory file present at `{inv_path}`."
+        if found and inv_path
+        else str(scope or "")
+    )
     intake["inventory_found"] = found
     intake["inventory_path"] = str(inv_path) if inv_path else ""
     runtime._persist_intake_progress(state, intake, thread_id=thread_hint)
@@ -290,6 +370,11 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
 
     # 2b) Probe endpoints + discover hosts once (skipped on exclude resume).
     if intake.get("has_access") and not intake.get("discovery_complete"):
+        emit_phase(
+            "Running pre-audit access probes and host discovery (host_facts)…"
+            if not lang.code.startswith("ru")
+            else "Запускаю предаудит: проверка доступа и discovery (host_facts)…"
+        )
         slug = str(intake.get("client_slug") or "").strip()
         try:
             creds = read_client_credentials(runtime.settings.inventory_dir, slug) if slug else {}
@@ -651,10 +736,76 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
         # Use the broad default and continue automatically.
         intake["audit_types"] = "both"
 
-    store = runtime._store_from_state(state)
+    # Defensive: if a host→framework plan exists, never hand off without confirm.
+    # (Resume can lose proposed_jobs when the wrong evidence store is read.)
+    if (
+        "selected_jobs" not in intake
+        and list(intake.get("proposed_jobs") or [])
+        and any((row.get("frameworks") or []) for row in (intake.get("proposed_jobs") or []))
+    ):
+        working_jobs = [dict(r) for r in (intake.get("proposed_jobs") or [])]
+        plan_md = format_proposed_jobs_markdown(working_jobs)
+        scope_prompt = f"{prompts.scope}\n\n{plan_md}"
+        while "selected_jobs" not in intake:
+            raw = interrupt(intake_interrupt_payload(step="scope", prompt=scope_prompt))
+            reply = str(raw or "").strip()
+            payload = await runtime._intake_llm_json(
+                INTAKE_INTERPRET_SCOPE_SYSTEM,
+                INTAKE_INTERPRET_SCOPE_PROMPT.format(
+                    reply=reply or "(empty)",
+                    plan=plan_md,
+                ),
+            )
+            selected = resolve_scope_decision(reply, working_jobs, payload)
+            if selected:
+                intake["selected_jobs"] = selected
+                intake["audit_types"] = "both"
+                break
+            hint = (
+                "\n\n_Reply **confirm** to run the plan above._"
+                if lang.code == "en"
+                else "\n\n_Ответьте **подтвердить**, чтобы запустить план выше._"
+            )
+            scope_prompt = f"{prompts.scope}{hint}\n\n{plan_md}"
+
+    # Production handoff requires confirmed selected_jobs.
+    can_handoff = bool(list(intake.get("selected_jobs") or []))
+    if not can_handoff and list(intake.get("proposed_jobs") or []):
+        # Last-resort scope interrupt (should usually have asked already).
+        working_jobs = [dict(r) for r in (intake.get("proposed_jobs") or [])]
+        plan_md = format_proposed_jobs_markdown(working_jobs)
+        scope_prompt = f"{prompts.scope}\n\n{plan_md}"
+        while "selected_jobs" not in intake:
+            raw = interrupt(intake_interrupt_payload(step="scope", prompt=scope_prompt))
+            selected = resolve_scope_decision(
+                str(raw or "").strip(),
+                working_jobs,
+                await runtime._intake_llm_json(
+                    INTAKE_INTERPRET_SCOPE_SYSTEM,
+                    INTAKE_INTERPRET_SCOPE_PROMPT.format(
+                        reply=str(raw or "").strip() or "(empty)",
+                        plan=plan_md,
+                    ),
+                ),
+            )
+            if selected:
+                intake["selected_jobs"] = selected
+                intake["audit_types"] = "both"
+                can_handoff = True
+                break
+            hint = (
+                "\n\n_Reply **confirm** to run the plan above._"
+                if lang.code == "en"
+                else "\n\n_Ответьте **подтвердить**, чтобы запустить план выше._"
+            )
+            scope_prompt = f"{prompts.scope}{hint}\n\n{plan_md}"
+
+    store = resolve_intake_evidence_store(
+        runtime, state, thread_id=thread_hint, intake=intake
+    )
     if store is not None:
         store.write_run_meta(
-            intake_complete=True,
+            intake_complete=can_handoff,
             intake=intake,
             client_name=intake.get("client_name"),
             has_cmdb=intake.get("has_cmdb"),
@@ -674,7 +825,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
         )
 
     out: dict[str, Any] = {
-        "intake_complete": True,
+        "intake_complete": can_handoff,
         "intake": intake,
         "client_name": str(intake.get("client_name") or ""),
         "has_cmdb": bool(intake.get("has_cmdb")),
@@ -801,7 +952,9 @@ def persist_intake_progress(
     Мержит в существующий dict ``intake``, чтобы частичная запись не стёрла
     ранние ключи (например совместимые поля inventory-only).
     """
-    store = runtime._store_from_state(state)
+    store = resolve_intake_evidence_store(
+        runtime, state, thread_id=thread_id, intake=intake
+    )
     if store is None:
         return
     tid = thread_id or str(state.get("thread_id") or "")
@@ -834,22 +987,29 @@ def load_intake_progress(
     for expensive discovery so SSH is not repeated.
     """
     intake: dict[str, Any] = dict(state.get("intake") or {})
-    store = runtime._store_from_state(state)
+    tid = thread_id or str(state.get("thread_id") or "")
+    store = resolve_intake_evidence_store(
+        runtime, state, thread_id=tid, intake=intake
+    )
     if store is None:
         return intake
     meta = store.read_run_meta()
     if meta.get("intake_complete"):
         return intake
-    tid = thread_id or str(state.get("thread_id") or "")
     saved_tid = str(meta.get("intake_checkpoint_thread") or "")
     if tid and saved_tid and saved_tid != tid:
         return intake
     saved = meta.get("intake")
     if not isinstance(saved, dict):
         return intake
-    # Discovery / plan outputs only — not client/access/scope answers.
+    # Discovery / plan outputs + durable run identity. Never restore
+    # questionnaire answers (client_name / access / scope) — skipping those
+    # interrupt() calls would mis-assign Command(resume=…) by call order.
     keep_keys = (
         "artifacts_run_id",
+        "client_id",
+        "audit_run_id",
+        "client_slug",
         "discovery_complete",
         "proposed_jobs",
         "host_access_rows",

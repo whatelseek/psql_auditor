@@ -700,3 +700,25 @@ def test_create_and_save_run_accept_generated_and_explicit_arun_ids(tmp_path: Pa
     again = registry.get_run(RUN_ALPHA_PREVIOUS_ID)
     assert again is not None
     assert again.base_thread_id == "t-core001-gap"
+
+
+def test_find_run_by_base_thread_reuses_earliest(tmp_path: Path):
+    from auditor.audit_registry import get_audit_registry
+    from auditor.client_registry import get_client_registry
+
+    client = get_client_registry(tmp_path).ensure_client(display_name="Acme", slug="acme")
+    reg = get_audit_registry(tmp_path)
+    first = reg.create_run(
+        client_id=client.client_id,
+        evidence_run_id="",
+        base_thread_id="audit-abc:intake",
+    )
+    second = reg.create_run(
+        client_id=client.client_id,
+        evidence_run_id="acme/" + first.audit_run_id,
+        base_thread_id="audit-abc:intake",
+    )
+    found = reg.find_run_by_base_thread("audit-abc:intake")
+    assert found is not None
+    # Prefer the row that already has evidence bound.
+    assert found.audit_run_id == second.audit_run_id

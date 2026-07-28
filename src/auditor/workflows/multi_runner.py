@@ -1472,18 +1472,61 @@ async def arun(
             thread_id=intake_tid,
             store=shared,
         )
-        if intake_result.get("awaiting_hitl"):
+        if intake_result.get("awaiting_hitl") or intake_result.get("awaiting_intake"):
             return intake_result
-        # Intake finished in one shot (should be rare without interrupts)
+        # Intake finished in one shot (rare without interrupts)
         snap = await runtime.intake_graph.aget_state({"configurable": {"thread_id": intake_tid}})
         intake = (snap.values or {}).get("intake") or {}
+        if not isinstance(intake, dict):
+            intake = {}
+        # Prefer intake blob from the graph result when state is sparse.
+        result_intake = intake_result.get("intake")
+        if isinstance(result_intake, dict):
+            merged = dict(result_intake)
+            merged.update({k: v for k, v in intake.items() if v not in (None, "", [], {})})
+            intake = merged
         runtime._forget_multi_session(intake_tid)
-        return await runtime._start_frameworks_after_intake(
-            user_text=user_text,
-            base_thread=base_thread,
-            run_id=run_id,
-            intake=intake if isinstance(intake, dict) else {},
-        )
+        if not list(intake.get("selected_jobs") or []):
+            from langchain_core.messages import AIMessage
+
+            msg = (
+                "Pre-audit finished host discovery, but the host→framework plan "
+                "was not confirmed. Reply **confirm** in this chat to start the audit, "
+                "or describe what to exclude."
+            )
+            # Keep intake pause marker so the next turn resumes the same thread.
+            from auditor.intake import format_intake_assistant_message
+
+            report = format_intake_assistant_message(msg, intake_tid)
+            return {
+                "report": report,
+                "messages": [AIMessage(content=report, name="auditor")],
+                "awaiting_hitl": True,
+                "awaiting_intake": True,
+                "intake_complete": False,
+                "thread_id": intake_tid,
+                "evidence_run_id": str(
+                    intake.get("artifacts_run_id") or shared.run_id or run_id
+                ),
+            }
+        try:
+            return await runtime._start_frameworks_after_intake(
+                user_text=user_text,
+                base_thread=base_thread,
+                run_id=str(intake.get("artifacts_run_id") or run_id),
+                intake=intake,
+            )
+        except AuditRequestRejected as exc:
+            from langchain_core.messages import AIMessage
+
+            msg = exc.operator_message()
+            return {
+                "report": msg,
+                "messages": [AIMessage(content=msg, name="auditor")],
+                "awaiting_hitl": False,
+                "awaiting_intake": False,
+                "error": exc.code,
+            }
 
     raise AuditRequestRejected(
         issues=[

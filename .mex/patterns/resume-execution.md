@@ -25,10 +25,12 @@ last_updated: 2026-07-28
 2. Pass the same `thread_id` / audit run markers the interrupt emitted.
 3. Multi-host: use `_continue_multi_after_resume` paths — do not restart sibling hosts blindly.
 4. Prefer `acontinue` for disconnect mid-run without HITL decision.
+5. Intake (`:intake` threads): resume on the process `intake_graph` (same saver as `arun_intake`). Pre-identity `audit-{hex}:intake` is allowed when a multi-session entry or interrupted checkpoint exists; HITL still requires `client_id` + `audit_run_id`.
 
 ## Gotchas
 - Renaming graph nodes breaks checkpoint compatibility.
 - Process restart is OK if sqlite checkpoint path is durable; memory checkpointer is not.
+- Do not switch intake resume onto a scoped checkpointer lease before `intake_complete` — checkpoints were written pre-identity on the process saver.
 
 ## Verify
 - [ ] Interrupt → resume smoke test for your change

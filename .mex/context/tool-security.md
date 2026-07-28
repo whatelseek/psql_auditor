@@ -42,7 +42,13 @@ last_updated: 2026-07-28
 
 ## SSH policy
 
-`tools/ssh_policy.py`: approved command allow-list, approved read paths, no shell composition. Timeouts and output limits. Stdout/stderr secret redaction (`tools/secrets.py`). Non-zero exit → error ToolResult.
+Command allow-list lives in `tools/policies/<profile>.json`:
+
+- `ssh_allowed_commands` — exact command strings
+- `ssh_allowed_command_patterns` — regexes (`fullmatch`)
+- `ssh_allow_all_commands` — PoC/lab only: approve any non-empty command (skips allow-list **and** shell-composition gates). Default `false`. PoC profile sets `true`.
+
+`tools/ssh_policy.py` enforces those (falls back to builtins only when both allow-list keys are omitted), plus approved read paths, no shell composition (unless allow-all), timeouts, and stdout/stderr redaction (`tools/secrets.py`). Empty lists deny-all when allow-all is off. Restart the agent after editing policy (registry is loaded at startup). Non-zero exit → error ToolResult. Path allow-lists for `ssh_read_file` are unchanged by the PoC flag.
 
 ## WinRM / other transports
 

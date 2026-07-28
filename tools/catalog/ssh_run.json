@@ -2,13 +2,18 @@
   "id": "ssh_run",
   "version": "1.0.0",
   "title": "SSH run command",
-  "description": "Execute a read-only shell command on an inventory SSH target.",
+  "description": "Execute one allow-listed read-only shell command on an inventory SSH target. Approved families: hostname/hostnamectl/uname; cat /etc/os-release|/proc/{meminfo,cpuinfo,version}; id/whoami/who -b/uptime; df/free/lscpu/lsblk/blkid; ps; ss/netstat listen views; systemctl status|is-active|is-enabled|list-units; dpkg/rpm query; psql/postgres --version; command -v|which <bin>; smartctl -H|-i /dev/<disk>; sysctl/getent; ls/stat under postgresql paths. No pipes, redirects, shell composition, or interpreters.",
   "transport": "ssh",
   "adapter": "auditor.tools.ssh:invoke_ssh_run",
-  "capabilities": ["host.execute", "host.read"],
+  "capabilities": [
+    "host.execute",
+    "host.read"
+  ],
   "risk": "low",
   "readonly": true,
-  "inventory_access": ["ssh"],
+  "inventory_access": [
+    "ssh"
+  ],
   "credential_source": "inventory:ssh",
   "blocked_operations": [
     "destructive_shell",
@@ -19,20 +24,36 @@
   "timeout_seconds": 30,
   "max_output_bytes": 200000,
   "enabled": true,
-  "profiles": ["poc_audit_v1"],
+  "profiles": [
+    "poc_audit_v1"
+  ],
   "input_schema": {
     "type": "object",
-    "required": ["command"],
+    "required": [
+      "command"
+    ],
     "properties": {
-      "command": {"type": "string", "description": "Remote shell command"}
+      "command": {
+        "type": "string",
+        "description": "Exact allow-listed remote command (no shell metacharacters)."
+      }
     }
   },
   "output_schema": {
     "type": "object",
     "properties": {
-      "status": {"type": "string"},
-      "output": {"type": "string"},
-      "exit_code": {"type": ["integer", "null"]}
+      "status": {
+        "type": "string"
+      },
+      "output": {
+        "type": "string"
+      },
+      "exit_code": {
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
     }
   }
 }

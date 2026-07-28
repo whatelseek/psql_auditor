@@ -780,3 +780,28 @@ async def test_sqlite_init_failure_is_not_silent_success(tmp_path: Path):
                     "intake": {"client_name": "Alpha"},
                 },
             )
+
+
+def test_rebind_rewrites_stale_copied_ownership(tmp_path: Path):
+    """Moving evidence to a new audit_run path must not keep source ownership.json."""
+    from auditor.run_scope import read_ownership_manifest
+
+    src = EvidenceStore(tmp_path, run_id=f"client_alpha/{RUN_ALPHA_PREVIOUS_ID}")
+    src.root.mkdir(parents=True, exist_ok=True)
+    src.write_run_meta(client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_PREVIOUS_ID)
+    (src.root / "note.txt").write_text("hello", encoding="utf-8")
+    assert read_ownership_manifest(src.root).audit_run_id == RUN_ALPHA_PREVIOUS_ID
+
+    final = src.rebind_run_id(
+        f"client_alpha/{RUN_ALPHA_CURRENT_ID}",
+        client_id=CLIENT_ALPHA_ID,
+        audit_run_id=RUN_ALPHA_CURRENT_ID,
+    )
+    assert final == f"client_alpha/{RUN_ALPHA_CURRENT_ID}"
+    dest = tmp_path / "client_alpha" / RUN_ALPHA_CURRENT_ID
+    assert (dest / "note.txt").is_file()
+    own = read_ownership_manifest(dest)
+    assert own.client_id == CLIENT_ALPHA_ID
+    assert own.audit_run_id == RUN_ALPHA_CURRENT_ID
+    # write_run_meta for the new identity must succeed
+    src.write_run_meta(client_id=CLIENT_ALPHA_ID, audit_run_id=RUN_ALPHA_CURRENT_ID)

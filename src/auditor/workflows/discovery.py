@@ -579,7 +579,30 @@ async def discover_inventory_hosts(
             )
         ]
     discovered: list[tuple[InventorySshTarget, HostFacts]] = []
+    client_id = str(intake.get("client_id") or "").strip()
+    audit_run_id = str(intake.get("audit_run_id") or "").strip()
     for target in targets:
+        # Intake discovery writes ToolResults/findings — need asset_id on run meta.
+        if store is not None and client_id:
+            from auditor.asset_registry import get_asset_registry
+
+            inv_key = (
+                str(getattr(target, "inventory_key", "") or "").strip()
+                or str(getattr(target, "label", "") or "").strip()
+                or target.slug
+                or target.host
+            )
+            asset_id = get_asset_registry(runtime.settings.evidence_dir).ensure_asset(
+                client_id=client_id,
+                inventory_key=inv_key,
+                label=str(getattr(target, "label", "") or target.slug or target.host),
+                ssh_host=target.host,
+            )
+            store.write_run_meta(
+                client_id=client_id,
+                audit_run_id=audit_run_id,
+                asset_id=asset_id,
+            )
         with runtime._target_scope(client_slug=slug, ssh_target=target, intake=intake):
             facts = await runtime._collect_host_facts(
                 store=store,

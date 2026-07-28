@@ -148,6 +148,32 @@ class AuditRegistry:
                 ).fetchone()
         return self._row_to_run(row) if row else None
 
+    def find_run_by_base_thread(self, base_thread_id: str) -> AuditRun | None:
+        """Return the earliest AuditRun registered for an intake/checkpoint thread.
+
+        Used when LangGraph re-enters ``intake_gate`` on resume so we reuse the
+        run allocated on the first client-name answer instead of creating twins.
+        Prefers a row that already has ``evidence_run_id`` when several match.
+        """
+        tid = (base_thread_id or "").strip()
+        if not tid:
+            return None
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM audit_runs
+                    WHERE base_thread_id = ?
+                    ORDER BY created_at ASC
+                    """,
+                    (tid,),
+                ).fetchall()
+        if not rows:
+            return None
+        runs = [self._row_to_run(r) for r in rows]
+        with_evidence = [r for r in runs if (r.evidence_run_id or "").strip()]
+        return with_evidence[0] if with_evidence else runs[0]
+
     def get_run_by_evidence_id(self, evidence_run_id: str) -> AuditRun | None:
         """Lookup by evidence folder id.
 

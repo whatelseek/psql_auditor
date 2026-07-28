@@ -159,7 +159,8 @@ def test_default_catalog_registers_ssh_tools() -> None:
 
 
 @pytest.mark.unit
-def test_readonly_ssh_policy() -> None:
+def test_readonly_ssh_policy(tmp_path: Path) -> None:
+    """Strict allow-list (no ssh_allow_all_commands) rejects composition."""
     from auditor.tools.ssh_policy import (
         is_approved_ssh_command,
         is_approved_ssh_read_path,
@@ -167,14 +168,46 @@ def test_readonly_ssh_policy() -> None:
         ssh_read_path_denial_reason,
     )
 
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    _write_manifest(catalog, "ssh_run", _valid_ssh_manifest("ssh_run"))
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    # Omit ssh_* keys → builtins; omit ssh_allow_all_commands → False.
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": ["ssh_run", "ssh_read_file"],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 6000,
+            "require_inventory_credentials": True,
+        },
+    )
+    get_tool_registry(tools_dir=root, profile="poc_audit_v1", refresh=True)
+
     # Allow-list: exact approved commands only (no shell composition).
     assert is_approved_ssh_command("ss -lntp")
     assert is_approved_ssh_command("cat /etc/os-release")
     assert is_approved_ssh_command("uname -a")
+    assert is_approved_ssh_command("hostnamectl")
+    assert is_approved_ssh_command("hostname -f")
+    assert is_approved_ssh_command("free -h")
+    assert is_approved_ssh_command("lscpu")
+    assert is_approved_ssh_command("lsblk -dn -o NAME")
+    assert is_approved_ssh_command("ss -tulpen")
+    assert is_approved_ssh_command("systemctl list-units --type=service --state=running")
+    assert is_approved_ssh_command("rpm -qa")
+    assert is_approved_ssh_command("dpkg-query -W")
+    assert is_approved_ssh_command("smartctl -H /dev/sda")
     assert not is_approved_ssh_command("ss -lntp | grep 5432")
     assert not is_approved_ssh_command("bash -c 'uname'")
     assert not is_approved_ssh_command("rm -rf /var/lib/postgresql")
     assert not is_approved_ssh_command("apt-get install nginx")
+    assert not is_approved_ssh_command("echo test")
     assert not is_approved_ssh_command("")
     assert "composition" in (ssh_command_denial_reason("uname -a; id") or "")
 
@@ -188,7 +221,29 @@ def test_readonly_ssh_policy() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_ssh_invocation_through_registry_denies_destructive() -> None:
+async def test_ssh_invocation_through_registry_denies_destructive(tmp_path: Path) -> None:
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    _write_manifest(catalog, "ssh_run", _valid_ssh_manifest("ssh_run"))
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": ["ssh_run", "ssh_read_file"],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 6000,
+            "require_inventory_credentials": True,
+            "ssh_allowed_commands": ["uname -a"],
+            "ssh_allowed_command_patterns": [],
+        },
+    )
+    get_tool_registry(tools_dir=root, profile="poc_audit_v1", refresh=True)
+
     settings = Settings(
         _env_file=None,
         ssh_host="db.example",
@@ -420,13 +475,37 @@ async def test_execute_tool_calls_persists_ssh_tool_result(tmp_path: Path) -> No
 
     from auditor.workflows.tool_execution import execute_tool_calls
 
-    store = EvidenceStore(tmp_path, run_id="run_exec")
+    tools_root = tmp_path / "tools"
+    catalog = tools_root / "catalog"
+    _write_manifest(catalog, "ssh_run", _valid_ssh_manifest("ssh_run"))
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    _write_policy(
+        tools_root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": ["ssh_run", "ssh_read_file"],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 6000,
+            "require_inventory_credentials": True,
+            "ssh_allowed_commands": ["uname -a"],
+            "ssh_allowed_command_patterns": [],
+        },
+    )
+    get_tool_registry(tools_dir=tools_root, profile="poc_audit_v1", refresh=True)
+
+    store = EvidenceStore(tmp_path / "evidence", run_id="run_exec")
     store.write_run_meta(client_id="client_x", audit_run_id="arun_x000000000001")
 
     class _Tool:
         name = "ssh_run"
 
         async def ainvoke(self, args: dict) -> str:
+            # execute_tool_calls() may reload the default registry; re-pin strict policy.
+            get_tool_registry(tools_dir=tools_root, profile="poc_audit_v1")
             result = await invoke_ssh_run(
                 str(args.get("command") or ""),
                 settings=Settings(
@@ -850,3 +929,140 @@ def test_snapshot_rejects_cleared_validation_issues(tmp_path: Path) -> None:
         )
     assert exc_info.value.code == "registry_snapshot_mismatch"
     assert exc_info.value.tool_id == "ssh_run"
+
+
+@pytest.mark.unit
+def test_normalize_manifest_source_path_none_equals_empty() -> None:
+    """None and empty source_path must compare equal after normalization."""
+    from dataclasses import replace
+
+    from auditor.tool_registry import (
+        ToolManifest,
+        _normalize_manifest_source_path,
+        _required_manifest_snapshot_matches,
+    )
+
+    base = ToolManifest(
+        id="ssh_run",
+        version="1.0.0",
+        title="SSH Run",
+        description="",
+        transport="ssh",
+        adapter="ssh_run",
+        capabilities=("exec",),
+        risk="low",
+        readonly=True,
+        inventory_access=(),
+        credential_source="inventory",
+        blocked_operations=(),
+        timeout_seconds=30,
+        max_output_bytes=1024,
+        enabled=True,
+        profiles=("poc_audit_v1",),
+        input_schema={},
+        output_schema={},
+    )
+    with_none = replace(base, source_path=None)  # type: ignore[arg-type]
+    with_empty = replace(base, source_path="")
+    assert with_none.source_path is None
+    assert with_empty.source_path == ""
+    assert _normalize_manifest_source_path(with_none).source_path == ""
+    assert _normalize_manifest_source_path(with_empty).source_path == ""
+    assert _required_manifest_snapshot_matches(with_none, with_empty)
+
+
+@pytest.mark.unit
+def test_ssh_allowlist_from_capability_policy(tmp_path: Path) -> None:
+    """ssh_allowed_commands in policy JSON drive approval (empty = deny-all)."""
+    from auditor.tool_registry import get_tool_registry, reset_tool_registry_cache
+    from auditor.tools.ssh_policy import is_approved_ssh_command, ssh_command_denial_reason
+
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    _write_manifest(catalog, "ssh_run", _valid_ssh_manifest("ssh_run"))
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+
+    # Explicit empty lists → deny-all (fail closed).
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": ["ssh_run", "ssh_read_file"],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 6000,
+            "require_inventory_credentials": True,
+            "ssh_allowed_commands": [],
+            "ssh_allowed_command_patterns": [],
+        },
+    )
+    reset_tool_registry_cache()
+    get_tool_registry(tools_dir=root, profile="poc_audit_v1", refresh=True)
+    assert not is_approved_ssh_command("hostname")
+    assert ssh_command_denial_reason("hostname")
+
+    # Policy-only exact command (not relying on builtins).
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": ["ssh_run", "ssh_read_file"],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 6000,
+            "require_inventory_credentials": True,
+            "ssh_allowed_commands": ["hostnamectl", "mycustom-probe --ok"],
+            "ssh_allowed_command_patterns": [r"^sysctl\s+[A-Za-z0-9._*-]+$"],
+        },
+    )
+    reset_tool_registry_cache()
+    pol = get_tool_registry(tools_dir=root, profile="poc_audit_v1", refresh=True).policy
+    assert pol is not None
+    assert pol.ssh_allowed_commands == ("hostnamectl", "mycustom-probe --ok")
+    assert is_approved_ssh_command("hostnamectl")
+    assert is_approved_ssh_command("mycustom-probe --ok")
+    assert is_approved_ssh_command("sysctl net.ipv4.ip_forward")
+    assert not is_approved_ssh_command("hostname")  # not in this policy
+    assert not is_approved_ssh_command("mycustom-probe --ok | cat")
+
+
+@pytest.mark.unit
+def test_ssh_allow_all_commands_poc_flag(tmp_path: Path) -> None:
+    """ssh_allow_all_commands approves arbitrary (including composed) commands."""
+    from auditor.tool_registry import get_tool_registry, reset_tool_registry_cache
+    from auditor.tools.ssh_policy import is_approved_ssh_command, ssh_command_denial_reason
+
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    _write_manifest(catalog, "ssh_run", _valid_ssh_manifest("ssh_run"))
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": ["ssh_run", "ssh_read_file"],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 6000,
+            "require_inventory_credentials": True,
+            "ssh_allow_all_commands": True,
+            "ssh_allowed_commands": [],
+            "ssh_allowed_command_patterns": [],
+        },
+    )
+    reset_tool_registry_cache()
+    get_tool_registry(tools_dir=root, profile="poc_audit_v1", refresh=True)
+    assert is_approved_ssh_command("hostnamectl")
+    assert is_approved_ssh_command("ss -lntp | grep 5432")
+    assert is_approved_ssh_command("echo test")
+    assert ssh_command_denial_reason("anything goes") is None
+    assert not is_approved_ssh_command("")
