@@ -32,8 +32,14 @@ Discovery does not hard-code ad-hoc SSH strings in the happy path. `inventory/to
 
 ## Framework selection
 
-`select_frameworks_for_inventory` consumes snapshots + client inventory. Unsupported classes (e.g. certain Cisco network devices in current code) are marked unsupported rather than silently audited.
+`select_frameworks_for_inventory` still consumes technology detections + inventory via the existing production mapping. Structured applicability metadata and normalized facts are foundations for later declarative selection (INPUT005-12/13) and are **not** the production selector yet.
+
+## Normalized facts
+
+`auditor.domain.normalized_facts` builds a stable per-host fact namespace (`asset.*`, `os.*`, `access.*`, `service.*`, `port.*`, `technology.*`) with `source_type`, `source_ref`, confidence, and evidence refs. Conflicts for the same key with different values are recorded explicitly and **not** silently resolved (no last-write-wins). Conflicted keys are omitted from `HostFactSet.as_value_map()`.
+
+Applicability predicates evaluate against that value map only.
 
 ## Boundary
 
-Capabilities describe **what the host can be assessed with**, not authorization to run arbitrary commands. Authorization is Tool Registry + policy + SSH allow-lists.
+Capabilities describe **what the host can be assessed with**, not authorization to run arbitrary commands. Authorization is Tool Registry + policy + SSH allow-lists. Candidate evaluation must not invoke tools.
