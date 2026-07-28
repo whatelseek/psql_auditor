@@ -101,8 +101,11 @@ def generate_audit_plan(
     """
     decisions = select_frameworks_for_inventory(inventory, detections, agents_dir=agents_dir)
     host_by_id = {h.host_id: h for h in inventory.hosts}
+    eligible_host_ids = {host.host_id for host in inventory.hosts_without_errors()}
     executable_hosts = [
-        h for h in inventory.hosts_without_errors() if not h.is_unsupported_network_device
+        h
+        for h in inventory.hosts_without_errors()
+        if not h.is_unsupported_network_device and h.host_id in eligible_host_ids
     ]
 
     targets: list[AuditPlanTarget] = []
@@ -128,6 +131,9 @@ def generate_audit_plan(
             continue
 
         host_id = decision.target_id.split("/", 1)[0]
+        if host_id not in eligible_host_ids:
+            # Defense in depth: never create executable targets for invalid hosts.
+            continue
         matched = host_by_id.get(host_id)
         if matched is None:
             continue
@@ -212,6 +218,7 @@ def generate_audit_plan(
             and i.host_id
         ),
     ]
+    unresolved = list(dict.fromkeys(unresolved))
 
     # Coverage heuristic: hosts without errors / total hosts, adjusted for missing data.
     total = len(inventory.hosts) or 1

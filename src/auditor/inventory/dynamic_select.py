@@ -34,6 +34,20 @@ _MISSING_EVIDENCE_REASON = "Required normalized facts are missing or conflicted"
 _CAPABILITY_BLOCKED_REASON = "Required authorized capability is unavailable for the target"
 _WEAK_STATUS_REASON = "Applicability matched only weak or unknown status evidence"
 _MATCHED_REASON = "Declarative applicability matched normalized facts"
+_HOST_VALIDATION_REASON = "Host has inventory validation errors"
+_NO_ELIGIBLE_HOSTS_REASON = "No eligible hosts remain after inventory validation"
+
+
+@dataclass(frozen=True, slots=True)
+class _CatalogVariant:
+    family_id: str
+    framework_id: str
+    framework_version: str
+    language: str
+    metadata_state: str
+    fingerprint: str
+    target_scope: str | None
+    target_service: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +63,13 @@ class _ResolvedVariant:
     reason: str
     missing_capabilities: tuple[str, ...]
     structured_valid: bool
+
+
+def _normalize_status_value(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().casefold()
+    return normalized or None
 
 
 def _resolve_target_id(candidate: FrameworkCandidate, *, client_id: str) -> str:
@@ -87,11 +108,14 @@ def _weak_status_only(
     status_keys = [k for k in matched_fact_keys if k.endswith(".status")]
     if not status_keys:
         return False
-    values: list[object] = []
+    values: list[str] = []
     for value_map in value_maps:
         for key in status_keys:
-            if key in value_map:
-                values.append(value_map[key])
+            if key not in value_map:
+                continue
+            normalized = _normalize_status_value(value_map[key])
+            if normalized is not None:
+                values.append(normalized)
     if not values:
         return False
     if any(v == "confirmed" for v in values):
@@ -107,10 +131,19 @@ def _decision_fields(
     missing_capabilities: tuple[str, ...],
     matched_fact_keys: tuple[str, ...],
     value_maps: Sequence[Mapping[str, object]],
+    host_blocked: bool = False,
 ) -> tuple[str, str, tuple[str, ...]]:
     """Return ``(status, reason, missing_capabilities)``."""
     if metadata_state == "invalid" or predicate_result == "invalid":
         return "blocked", _INVALID_REASON, ()
+    if host_blocked and predicate_result == "not_matched":
+        return "not_applicable", _NOT_MATCHED_REASON, ()
+    if host_blocked and metadata_state == "legacy":
+        return "blocked", _HOST_VALIDATION_REASON, ()
+    if host_blocked and predicate_result in {"matched", "missing_evidence"}:
+        return "blocked", _HOST_VALIDATION_REASON, ()
+    if host_blocked and predicate_result is None:
+        return "blocked", _HOST_VALIDATION_REASON, ()
     if metadata_state == "legacy" or predicate_result is None:
         return "requires_operator_decision", _LEGACY_REASON, ()
     if predicate_result == "not_matched":
@@ -138,6 +171,54 @@ def _pick_language_variant(
     return sorted(variants, key=lambda v: v.framework_id)[0]
 
 
+def _pick_family_representative(variants: Sequence[_CatalogVariant]) -> _CatalogVariant:
+    """Choose a deterministic representative for an inconsistent family."""
+    for lang in ("en", "any"):
+        matches = [v for v in variants if v.language == lang]
+        if matches:
+            return sorted(matches, key=lambda v: v.framework_id)[0]
+    return sorted(variants, key=lambda v: v.framework_id)[0]
+
+
+def _catalog_variants(candidates: Sequence[FrameworkCandidate]) -> list[_CatalogVariant]:
+    """Deduplicate per-host candidates into one catalog definition per framework."""
+    by_id: dict[str, _CatalogVariant] = {}
+    for candidate in candidates:
+        if candidate.framework_id in by_id:
+            continue
+        by_id[candidate.framework_id] = _CatalogVariant(
+            family_id=candidate.family_id,
+            framework_id=candidate.framework_id,
+            framework_version=candidate.framework_version,
+            language=candidate.language,
+            metadata_state=candidate.metadata_state,
+            fingerprint=candidate.applicability_fingerprint,
+            target_scope=candidate.target_scope,
+            target_service=candidate.target_service,
+        )
+    return sorted(
+        by_id.values(),
+        key=lambda v: (v.family_id, v.language, v.framework_id, v.framework_version),
+    )
+
+
+def _inconsistent_families(
+    catalog: Sequence[_CatalogVariant],
+) -> dict[str, _CatalogVariant]:
+    """Return family_id → representative for families with divergent fingerprints."""
+    by_family: dict[str, list[_CatalogVariant]] = defaultdict(list)
+    for variant in catalog:
+        if variant.metadata_state == "structured":
+            by_family[variant.family_id].append(variant)
+
+    inconsistent: dict[str, _CatalogVariant] = {}
+    for family_id, variants in by_family.items():
+        fingerprints = {v.fingerprint for v in variants}
+        if len(fingerprints) > 1:
+            inconsistent[family_id] = _pick_family_representative(variants)
+    return inconsistent
+
+
 def _from_candidate(
     candidate: FrameworkCandidate,
     *,
@@ -148,6 +229,8 @@ def _from_candidate(
     missing_capabilities: tuple[str, ...] | None = None,
     matched_fact_keys: tuple[str, ...] | None = None,
     host_ids: Sequence[str] | None = None,
+    host_blocked: bool = False,
+    force_target_id: str | None = None,
 ) -> _ResolvedVariant:
     pred: str | None
     if predicate_result is ...:
@@ -170,11 +253,16 @@ def _from_candidate(
         missing_capabilities=missing_caps,
         matched_fact_keys=matched,
         value_maps=maps,
+        host_blocked=host_blocked,
     )
+    if force_target_id is not None:
+        target_id = force_target_id
+    elif candidate.target_scope == "client":
+        target_id = f"client:{client_id}"
+    else:
+        target_id = _resolve_target_id(candidate, client_id=client_id)
     return _ResolvedVariant(
-        target_id=_resolve_target_id(candidate, client_id=client_id)
-        if candidate.target_scope != "client"
-        else f"client:{client_id}",
+        target_id=target_id,
         family_id=candidate.family_id,
         framework_id=candidate.framework_id,
         framework_version=candidate.framework_version,
@@ -218,10 +306,37 @@ def select_frameworks_dynamic(
         host_id: fs.as_value_map() for host_id, fs in facts.items()
     }
 
+    blocked_host_ids = {
+        issue.host_id for issue in inventory.issues if issue.level == "error" and issue.host_id
+    }
+    eligible_host_ids = {host.host_id for host in inventory.hosts_without_errors()}
+
+    catalog = _catalog_variants(candidates)
+    inconsistent = _inconsistent_families(catalog)
+
+    decisions: list[FrameworkSelectionDecision] = []
+
+    # Fix 1: one blocked client-level decision per inconsistent family.
+    for family_id in sorted(inconsistent):
+        representative = inconsistent[family_id]
+        decisions.append(
+            FrameworkSelectionDecision(
+                framework_id=representative.framework_id,
+                framework_version=representative.framework_version,
+                target_id=f"client:{client_id}",
+                reason=_FAMILY_INCONSISTENT_REASON,
+                status="blocked",
+            )
+        )
+
+    inconsistent_family_ids = set(inconsistent)
+    # Skip normal resolution for all variants belonging to inconsistent families.
+    active_candidates = [c for c in candidates if c.family_id not in inconsistent_family_ids]
+
     resolved: list[_ResolvedVariant] = []
     client_groups: dict[tuple[str, str, str, str], list[FrameworkCandidate]] = defaultdict(list)
 
-    for candidate in candidates:
+    for candidate in active_candidates:
         if candidate.target_scope == "client":
             key = (
                 candidate.framework_id,
@@ -231,29 +346,72 @@ def select_frameworks_dynamic(
             )
             client_groups[key].append(candidate)
             continue
-        resolved.append(_from_candidate(candidate, client_id=client_id, value_maps=value_maps))
+        host_blocked = candidate.host_id in blocked_host_ids
+        resolved.append(
+            _from_candidate(
+                candidate,
+                client_id=client_id,
+                value_maps=value_maps,
+                host_blocked=host_blocked,
+            )
+        )
 
     for _, group in sorted(client_groups.items(), key=lambda item: item[0]):
         sample = sorted(group, key=lambda c: c.host_id)[0]
-        if sample.metadata_state != "structured":
+        eligible = [c for c in group if c.host_id in eligible_host_ids]
+
+        if not eligible:
             resolved.append(
-                _from_candidate(
-                    sample,
-                    client_id=client_id,
-                    value_maps=value_maps,
-                    host_ids=[c.host_id for c in group],
+                _ResolvedVariant(
+                    target_id=f"client:{client_id}",
+                    family_id=sample.family_id,
+                    framework_id=sample.framework_id,
+                    framework_version=sample.framework_version,
+                    language=sample.language,
+                    metadata_state=sample.metadata_state,
+                    fingerprint=sample.applicability_fingerprint,
+                    status="blocked",
+                    reason=_NO_ELIGIBLE_HOSTS_REASON,
+                    missing_capabilities=(),
+                    structured_valid=sample.metadata_state == "structured",
                 )
             )
             continue
 
-        pred = _aggregate_client_predicate([c.predicate_result for c in group])
-        matched = _union_sorted(*(c.matched_fact_keys for c in group))
-        missing_caps = _union_sorted(*(c.missing_capabilities for c in group))
+        if sample.metadata_state != "structured":
+            # Legacy/invalid client-scoped: evaluate against eligible hosts only.
+            # Use sample metadata; if invalid keep invalid reason.
+            if sample.metadata_state == "invalid":
+                status, reason, missing = "blocked", _INVALID_REASON, ()
+            else:
+                status, reason, missing = (
+                    "requires_operator_decision",
+                    _LEGACY_REASON,
+                    (),
+                )
+            resolved.append(
+                _ResolvedVariant(
+                    target_id=f"client:{client_id}",
+                    family_id=sample.family_id,
+                    framework_id=sample.framework_id,
+                    framework_version=sample.framework_version,
+                    language=sample.language,
+                    metadata_state=sample.metadata_state,
+                    fingerprint=sample.applicability_fingerprint,
+                    status=status,
+                    reason=reason,
+                    missing_capabilities=missing,
+                    structured_valid=False,
+                )
+            )
+            continue
+
+        pred = _aggregate_client_predicate([c.predicate_result for c in eligible])
+        matched = _union_sorted(*(c.matched_fact_keys for c in eligible))
+        missing_caps = _union_sorted(*(c.missing_capabilities for c in eligible))
         requires_caps = bool(sample.required_any_capabilities or sample.required_all_capabilities)
-        if requires_caps and pred == "matched":
-            capability_ready = all(c.capability_ready for c in group)
-        elif requires_caps:
-            capability_ready = all(c.capability_ready for c in group)
+        if requires_caps:
+            capability_ready = all(c.capability_ready for c in eligible)
         else:
             capability_ready = True
             missing_caps = ()
@@ -267,7 +425,8 @@ def select_frameworks_dynamic(
                 capability_ready=capability_ready,
                 missing_capabilities=missing_caps,
                 matched_fact_keys=matched,
-                host_ids=[c.host_id for c in group],
+                host_ids=[c.host_id for c in eligible],
+                force_target_id=f"client:{client_id}",
             )
         )
 
@@ -275,27 +434,10 @@ def select_frameworks_dynamic(
     for item in resolved:
         by_family[(item.target_id, item.family_id)].append(item)
 
-    decisions: list[FrameworkSelectionDecision] = []
     for (target_id, _family_id), variants in sorted(by_family.items()):
         structured_valid = [v for v in variants if v.structured_valid]
-        if len(structured_valid) >= 2:
-            fingerprints = {v.fingerprint for v in structured_valid}
-            if len(fingerprints) > 1:
-                representative = sorted(
-                    structured_valid,
-                    key=lambda v: (v.framework_id, v.language),
-                )[0]
-                decisions.append(
-                    FrameworkSelectionDecision(
-                        framework_id=representative.framework_id,
-                        framework_version=representative.framework_version,
-                        target_id=target_id,
-                        reason=_FAMILY_INCONSISTENT_REASON,
-                        status="blocked",
-                    )
-                )
-                continue
-
+        # Prefer structured variants; suppress legacy production decisions when
+        # a valid structured variant exists for the same family/target.
         pool = structured_valid or list(variants)
         picked = _pick_language_variant(pool, preferred)
         decisions.append(
@@ -310,6 +452,9 @@ def select_frameworks_dynamic(
         )
 
     family_for = {(v.target_id, v.framework_id): v.family_id for v in resolved}
+    for family_id, representative in inconsistent.items():
+        family_for[(f"client:{client_id}", representative.framework_id)] = family_id
+
     decisions.sort(
         key=lambda d: (
             d.target_id,

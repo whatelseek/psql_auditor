@@ -15,9 +15,11 @@ from auditor.domain.applicability import (
 from auditor.domain.inventory import (
     ClientInventory,
     FactConflict,
+    FrameworkSelectionDecision,
     InventoryHost,
     InventoryVersion,
     TechnologyDetection,
+    ValidationIssue,
 )
 from auditor.domain.normalized_facts import (
     HostFactSet,
@@ -964,8 +966,11 @@ target:
     blocked = [d for d in decisions if d.framework_id in {"mism_fw", "mism_fw_ru"}]
     assert len(blocked) == 1
     assert blocked[0].status == "blocked"
+    assert blocked[0].target_id == "client:client-a"
     assert "inconsistent applicability metadata" in blocked[0].reason
-    assert blocked[0].status != "selected"
+    assert not any(
+        d.status == "selected" and d.framework_id in {"mism_fw", "mism_fw_ru"} for d in decisions
+    )
 
 
 def test_invalid_variant_isolation(tmp_path: Path) -> None:
@@ -1231,3 +1236,930 @@ def test_dynamic_modules_have_no_hardcoded_preferences() -> None:
             "5432",
         ):
             assert needle not in text, f"{name} contains {needle}"
+
+
+# ---------------------------------------------------------------------------
+# INPUT005-12/13-FIX — edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_family_mismatch_host_vs_service(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    shared_preds = """
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+"""
+    _write_fw(
+        agents,
+        "en.md",
+        frontmatter=f"""
+id: fam_hs_en
+version: "1.0"
+family_id: fam_hs
+language: en
+{shared_preds}
+target:
+  scope: host
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "ru.md",
+        frontmatter=f"""
+id: fam_hs_ru
+version: "1.0"
+family_id: fam_hs
+language: ru
+{shared_preds}
+target:
+  scope: service
+  service: example
+""".strip(),
+    )
+    inventory = _inventory([_host()])
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    family = [d for d in decisions if d.framework_id in {"fam_hs_en", "fam_hs_ru"}]
+    assert len(family) == 1
+    assert family[0].status == "blocked"
+    assert family[0].target_id == "client:client-a"
+    assert family[0].reason == (
+        "Framework family variants have inconsistent applicability metadata"
+    )
+    assert not any(d.status == "selected" for d in family)
+
+
+def test_family_mismatch_different_service_names(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    shared = """
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+"""
+    _write_fw(
+        agents,
+        "en.md",
+        frontmatter=f"""
+id: db_en
+version: "1.0"
+family_id: database_health
+language: en
+{shared}
+target:
+  scope: service
+  service: postgresql
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "ru.md",
+        frontmatter=f"""
+id: db_ru
+version: "1.0"
+family_id: database_health
+language: ru
+{shared}
+target:
+  scope: service
+  service: postgres
+""".strip(),
+    )
+    inventory = _inventory([_host()])
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    family = [d for d in decisions if d.framework_id in {"db_en", "db_ru"}]
+    assert len(family) == 1
+    assert family[0].status == "blocked"
+    assert family[0].target_id == "client:client-a"
+    assert not any(
+        d.status == "selected" and d.target_id == "host-01/postgresql" for d in decisions
+    )
+    assert not any(d.status == "selected" and d.target_id == "host-01/postgres" for d in decisions)
+
+
+def test_family_mismatch_client_vs_host(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    shared = """
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+"""
+    _write_fw(
+        agents,
+        "en.md",
+        frontmatter=f"""
+id: ch_en
+version: "1.0"
+family_id: ch_fam
+language: en
+{shared}
+target:
+  scope: client
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "ru.md",
+        frontmatter=f"""
+id: ch_ru
+version: "1.0"
+family_id: ch_fam
+language: ru
+{shared}
+target:
+  scope: host
+""".strip(),
+    )
+    inventory = _inventory([_host()])
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    family = [d for d in decisions if d.framework_id in {"ch_en", "ch_ru"}]
+    assert len(family) == 1
+    assert family[0].status == "blocked"
+    assert family[0].target_id == "client:client-a"
+
+
+def test_family_mismatch_one_unresolved_question(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    shared = """
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+"""
+    _write_fw(
+        agents,
+        "en.md",
+        frontmatter=f"""
+id: uq_en
+version: "1.0"
+family_id: uq_fam
+language: en
+{shared}
+target:
+  scope: host
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "ru.md",
+        frontmatter=f"""
+id: uq_ru
+version: "1.0"
+family_id: uq_fam
+language: ru
+{shared}
+target:
+  scope: service
+  service: example
+""".strip(),
+    )
+    inventory = _inventory([_host(), _host(host_id="host-02")])
+    plan = generate_audit_plan(inventory, [], agents_dir=agents)
+    questions = [q for q in plan.unresolved_questions if "inconsistent applicability metadata" in q]
+    assert len(questions) == 1
+    assert "client:client-a" in questions[0]
+    assert "host-01" not in questions[0]
+    assert "host-02" not in questions[0]
+
+
+def test_legacy_variant_isolated_from_structured(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "en.md",
+        frontmatter="""
+id: mix_en
+version: "1.0"
+family_id: mix_fam
+language: en
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+target:
+  scope: host
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "ru_legacy.md",
+        frontmatter="""
+id: mix_ru
+version: "1.0"
+family_id: mix_fam
+language: ru
+detect:
+  always: true
+""".strip(),
+    )
+    inventory = _inventory([_host()])
+    facts = build_inventory_fact_sets(inventory, ())
+    candidates = evaluate_framework_candidates(
+        fact_sets=facts, agents_dir=agents, registry=_empty_registry()
+    )
+    assert any(c.framework_id == "mix_ru" and c.metadata_state == "legacy" for c in candidates)
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    family = [d for d in decisions if d.framework_id in {"mix_en", "mix_ru"}]
+    assert len(family) == 1
+    assert family[0].framework_id == "mix_en"
+    assert family[0].status == "selected"
+    assert not any(d.framework_id == "mix_ru" for d in decisions)
+
+
+@pytest.mark.parametrize(
+    "status_value",
+    [
+        "suspected",
+        "Suspected",
+        "SUSPECTED",
+        " suspected ",
+        "possible",
+        "Possible",
+        "PROBABLE",
+        " unknown ",
+    ],
+)
+def test_weak_status_casing(tmp_path: Path, status_value: str) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "widget.md",
+        frontmatter="""
+id: weak_widget
+version: "1.0"
+family_id: weak_widget
+language: en
+applicability:
+  all:
+    - fact: technology.widget.status
+      operator: in
+      value:
+        - confirmed
+        - suspected
+        - possible
+        - probable
+        - unknown
+required_facts:
+  - technology.widget.status
+target:
+  scope: service
+  service: widget
+""".strip(),
+    )
+    inventory = _inventory([_host()])
+    facts = {
+        "host-01": HostFactSet(
+            host_id="host-01",
+            facts=(
+                NormalizedFact(
+                    fact="asset.id",
+                    value="host-01",
+                    confidence=1.0,
+                    source_type="inventory",
+                    source_ref="inventory:inv-1:host-01",
+                ),
+                NormalizedFact(
+                    fact="technology.widget.status",
+                    value=status_value.strip(),  # NormalizedFact may trim? use as-is via coerce
+                    confidence=0.4,
+                    source_type="discovery",
+                    source_ref="detection:host-01:widget",
+                ),
+            ),
+        )
+    }
+    # Preserve exact string including spaces by bypassing HostFactSet builder trim -
+    # coerce_fact_value keeps strings; write value directly.
+    from auditor.domain.applicability import coerce_fact_value
+
+    raw_value = coerce_fact_value(status_value)
+    facts = {
+        "host-01": HostFactSet(
+            host_id="host-01",
+            facts=(
+                NormalizedFact(
+                    fact="asset.id",
+                    value="host-01",
+                    confidence=1.0,
+                    source_type="inventory",
+                    source_ref="inventory:inv-1:host-01",
+                ),
+                NormalizedFact(
+                    fact="technology.widget.status",
+                    value=raw_value if isinstance(raw_value, str) else status_value,
+                    confidence=0.4,
+                    source_type="discovery",
+                    source_ref="detection:host-01:widget",
+                ),
+            ),
+        )
+    }
+    # Force exact whitespace when needed
+    if status_value != status_value.strip():
+        facts = {
+            "host-01": HostFactSet.model_construct(
+                host_id="host-01",
+                facts=(
+                    NormalizedFact(
+                        fact="asset.id",
+                        value="host-01",
+                        confidence=1.0,
+                        source_type="inventory",
+                        source_ref="inventory:inv-1:host-01",
+                    ),
+                    NormalizedFact.model_construct(
+                        fact="technology.widget.status",
+                        value=status_value,
+                        confidence=0.4,
+                        source_type="discovery",
+                        source_ref="detection:host-01:widget",
+                        evidence_refs=(),
+                    ),
+                ),
+                conflicts=(),
+            )
+        }
+    decisions = select_frameworks_for_inventory(
+        inventory,
+        [],
+        agents_dir=agents,
+        registry=_empty_registry(),
+        host_facts=facts,
+    )
+    widget = [d for d in decisions if d.framework_id == "weak_widget"]
+    assert widget
+    assert widget[0].status == "requires_operator_decision"
+    assert widget[0].reason == ("Applicability matched only weak or unknown status evidence")
+
+
+@pytest.mark.parametrize(
+    "status_value",
+    [
+        "confirmed",
+        "Confirmed",
+        "CONFIRMED",
+        " confirmed ",
+    ],
+)
+def test_confirmed_status_casing(tmp_path: Path, status_value: str) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "widget.md",
+        frontmatter="""
+id: conf_widget
+version: "1.0"
+family_id: conf_widget
+language: en
+applicability:
+  all:
+    - fact: technology.widget.status
+      operator: in
+      value:
+        - confirmed
+        - suspected
+required_facts:
+  - technology.widget.status
+target:
+  scope: service
+  service: widget
+""".strip(),
+    )
+    inventory = _inventory([_host()])
+    if status_value != status_value.strip():
+        facts = {
+            "host-01": HostFactSet.model_construct(
+                host_id="host-01",
+                facts=(
+                    NormalizedFact(
+                        fact="asset.id",
+                        value="host-01",
+                        confidence=1.0,
+                        source_type="inventory",
+                        source_ref="inventory:inv-1:host-01",
+                    ),
+                    NormalizedFact.model_construct(
+                        fact="technology.widget.status",
+                        value=status_value,
+                        confidence=1.0,
+                        source_type="discovery",
+                        source_ref="detection:host-01:widget",
+                        evidence_refs=(),
+                    ),
+                ),
+                conflicts=(),
+            )
+        }
+    else:
+        facts = {
+            "host-01": HostFactSet(
+                host_id="host-01",
+                facts=(
+                    NormalizedFact(
+                        fact="asset.id",
+                        value="host-01",
+                        confidence=1.0,
+                        source_type="inventory",
+                        source_ref="inventory:inv-1:host-01",
+                    ),
+                    NormalizedFact(
+                        fact="technology.widget.status",
+                        value=status_value,
+                        confidence=1.0,
+                        source_type="discovery",
+                        source_ref="detection:host-01:widget",
+                    ),
+                ),
+            )
+        }
+    decisions = select_frameworks_for_inventory(
+        inventory,
+        [],
+        agents_dir=agents,
+        registry=_empty_registry(),
+        host_facts=facts,
+    )
+    widget = [d for d in decisions if d.framework_id == "conf_widget"]
+    assert widget and widget[0].status == "selected"
+
+
+def test_mixed_weak_and_confirmed_statuses(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "multi.md",
+        frontmatter="""
+id: multi_status
+version: "1.0"
+family_id: multi_status
+language: en
+applicability:
+  all:
+    - fact: technology.example.status
+      operator: in
+      value: [confirmed, suspected, unknown]
+    - fact: service.example.status
+      operator: in
+      value: [confirmed, suspected, unknown]
+required_facts:
+  - technology.example.status
+  - service.example.status
+target:
+  scope: service
+  service: example
+""".strip(),
+    )
+    inventory = _inventory([_host()])
+
+    def _facts(tech: str, service: str) -> dict[str, HostFactSet]:
+        return {
+            "host-01": HostFactSet(
+                host_id="host-01",
+                facts=(
+                    NormalizedFact(
+                        fact="asset.id",
+                        value="host-01",
+                        confidence=1.0,
+                        source_type="inventory",
+                        source_ref="inventory:inv-1:host-01",
+                    ),
+                    NormalizedFact(
+                        fact="technology.example.status",
+                        value=tech,
+                        confidence=0.5,
+                        source_type="discovery",
+                        source_ref="detection:host-01:example",
+                    ),
+                    NormalizedFact(
+                        fact="service.example.status",
+                        value=service,
+                        confidence=0.5,
+                        source_type="inventory",
+                        source_ref="inventory:inv-1:host-01",
+                    ),
+                ),
+            )
+        }
+
+    selected = select_frameworks_for_inventory(
+        inventory,
+        [],
+        agents_dir=agents,
+        registry=_empty_registry(),
+        host_facts=_facts("suspected", "Confirmed"),
+    )
+    hit = [d for d in selected if d.framework_id == "multi_status"]
+    assert hit and hit[0].status == "selected"
+
+    weak = select_frameworks_for_inventory(
+        inventory,
+        [],
+        agents_dir=agents,
+        registry=_empty_registry(),
+        host_facts=_facts("suspected", "Unknown"),
+    )
+    hit = [d for d in weak if d.framework_id == "multi_status"]
+    assert hit and hit[0].status == "requires_operator_decision"
+
+
+def test_candidate_matrix_retains_invalid_hosts(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "ubuntu_like.md",
+        frontmatter="""
+id: ubu_like
+version: "1.0"
+family_id: ubu_like
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+    - fact: os.name
+      operator: contains
+      value: ubuntu
+required_facts:
+  - os.family
+  - os.name
+target:
+  scope: host
+""".strip(),
+    )
+    inventory = _inventory(
+        [_host()],
+        issues=(
+            ValidationIssue(
+                level="error",
+                code="host_invalid",
+                message="bad host",
+                host_id="host-01",
+            ),
+        ),
+    )
+    facts = build_inventory_fact_sets(inventory, ())
+    candidates = evaluate_framework_candidates(
+        fact_sets=facts, agents_dir=agents, registry=_empty_registry()
+    )
+    matched = [
+        c for c in candidates if c.framework_id == "ubu_like" and c.predicate_result == "matched"
+    ]
+    assert matched
+
+
+def test_invalid_host_decision_blocked(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "ubuntu_like.md",
+        frontmatter="""
+id: ubu_like
+version: "1.0"
+family_id: ubu_like
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+    - fact: os.name
+      operator: contains
+      value: ubuntu
+required_facts:
+  - os.family
+  - os.name
+target:
+  scope: host
+""".strip(),
+    )
+    inventory = _inventory(
+        [_host()],
+        issues=(
+            ValidationIssue(
+                level="error",
+                code="host_invalid",
+                message="bad host",
+                host_id="host-01",
+            ),
+        ),
+    )
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    ubu = [d for d in decisions if d.framework_id == "ubu_like"]
+    assert ubu
+    assert ubu[0].status == "blocked"
+    assert ubu[0].reason == "Host has inventory validation errors"
+    plan = generate_audit_plan(inventory, [], agents_dir=agents)
+    assert not any(t.host_id == "host-01" for t in plan.targets)
+
+
+def test_mixed_valid_and_invalid_hosts(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "ubuntu_like.md",
+        frontmatter="""
+id: ubu_like
+version: "1.0"
+family_id: ubu_like
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+    - fact: os.name
+      operator: contains
+      value: ubuntu
+required_facts:
+  - os.family
+  - os.name
+target:
+  scope: host
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "client_fw.md",
+        frontmatter="""
+id: client_facts
+version: "1.0"
+family_id: client_facts
+language: en
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+target:
+  scope: client
+""".strip(),
+    )
+    inventory = _inventory(
+        [_host(host_id="host-01"), _host(host_id="host-02")],
+        issues=(
+            ValidationIssue(
+                level="error",
+                code="host_invalid",
+                message="bad host",
+                host_id="host-02",
+            ),
+        ),
+    )
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    assert any(
+        d.framework_id == "ubu_like" and d.target_id == "host-01" and d.status == "selected"
+        for d in decisions
+    )
+    assert any(
+        d.framework_id == "ubu_like"
+        and d.target_id == "host-02"
+        and d.status == "blocked"
+        and d.reason == "Host has inventory validation errors"
+        for d in decisions
+    )
+    assert any(
+        d.framework_id == "client_facts"
+        and d.target_id == "client:client-a"
+        and d.status == "selected"
+        for d in decisions
+    )
+    plan = generate_audit_plan(inventory, [], agents_dir=agents)
+    assert any(t.host_id == "host-01" and t.framework_id == "ubu_like" for t in plan.targets)
+    assert not any(t.host_id == "host-02" for t in plan.targets)
+    assert any(t.host_id == "host-01" and t.framework_id == "client_facts" for t in plan.targets)
+    assert not any(
+        t.host_id == "host-02" and t.framework_id == "client_facts" for t in plan.targets
+    )
+
+
+def test_all_hosts_invalid_blocks_client_framework(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "client_fw.md",
+        frontmatter="""
+id: client_facts
+version: "1.0"
+family_id: client_facts
+language: en
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+target:
+  scope: client
+""".strip(),
+    )
+    inventory = _inventory(
+        [_host(host_id="host-01"), _host(host_id="host-02")],
+        issues=(
+            ValidationIssue(
+                level="error",
+                code="host_invalid",
+                message="bad host 1",
+                host_id="host-01",
+            ),
+            ValidationIssue(
+                level="error",
+                code="host_invalid",
+                message="bad host 2",
+                host_id="host-02",
+            ),
+        ),
+    )
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    client = [d for d in decisions if d.framework_id == "client_facts"]
+    assert client
+    assert client[0].status == "blocked"
+    assert client[0].reason == "No eligible hosts remain after inventory validation"
+    assert client[0].target_id == "client:client-a"
+    plan = generate_audit_plan(inventory, [], agents_dir=agents)
+    assert plan.targets == ()
+    questions = [
+        q
+        for q in plan.unresolved_questions
+        if "No eligible hosts remain after inventory validation" in q
+    ]
+    assert len(questions) == 1
+
+
+def test_plan_defense_filters_selected_invalid_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    inventory = _inventory(
+        [_host(host_id="host-invalid")],
+        issues=(
+            ValidationIssue(
+                level="error",
+                code="host_invalid",
+                message="bad host",
+                host_id="host-invalid",
+            ),
+        ),
+    )
+
+    def _fake_select(*_a: object, **_k: object) -> list[FrameworkSelectionDecision]:
+        return [
+            FrameworkSelectionDecision(
+                framework_id="example",
+                framework_version="1",
+                target_id="host-invalid",
+                reason="test",
+                status="selected",
+            )
+        ]
+
+    monkeypatch.setattr(
+        "auditor.inventory.plan.select_frameworks_for_inventory",
+        _fake_select,
+    )
+    plan = generate_audit_plan(inventory, [], agents_dir=Path("agents"))
+    assert any(
+        d.status == "selected" and d.target_id == "host-invalid" for d in plan.framework_decisions
+    )
+    assert not any(t.host_id == "host-invalid" for t in plan.targets)
+
+
+def test_unresolved_question_deduplication(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "en.md",
+        frontmatter="""
+id: dup_en
+version: "1.0"
+family_id: dup_fam
+language: en
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+target:
+  scope: host
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "ru.md",
+        frontmatter="""
+id: dup_ru
+version: "1.0"
+family_id: dup_fam
+language: ru
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+target:
+  scope: service
+  service: example
+""".strip(),
+    )
+    inventory = _inventory([_host(), _host(host_id="host-02")])
+    plan = generate_audit_plan(inventory, [], agents_dir=agents)
+    assert len(plan.unresolved_questions) == len(set(plan.unresolved_questions))
+
+
+def test_deterministic_identity_after_fixes(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "host_fw.md",
+        frontmatter="""
+id: host_fw
+version: "1.0"
+family_id: host_fw
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+required_facts:
+  - os.family
+target:
+  scope: host
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "client_fw.md",
+        frontmatter="""
+id: client_fw
+version: "1.0"
+family_id: client_fw
+language: en
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+target:
+  scope: client
+""".strip(),
+    )
+    inventory = _inventory(
+        [_host(host_id="host-01"), _host(host_id="host-02")],
+        issues=(
+            ValidationIssue(
+                level="error",
+                code="host_invalid",
+                message="bad host",
+                host_id="host-02",
+            ),
+        ),
+    )
+    plan1 = generate_audit_plan(inventory, [], agents_dir=agents)
+    plan2 = generate_audit_plan(inventory, [], agents_dir=agents)
+    assert plan1.framework_decisions == plan2.framework_decisions
+    assert plan1.targets == plan2.targets
+    assert plan1.unresolved_questions == plan2.unresolved_questions
+    assert plan1.framework_hash == plan2.framework_hash
+    assert plan1.plan_revision_id == plan2.plan_revision_id
