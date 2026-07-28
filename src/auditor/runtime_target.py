@@ -205,7 +205,9 @@ def runtime_target_from_ssh(
         ssh_user=user or None,
         ssh_password=password or None,
         ssh_private_key_path=private_key_path or None,
-        ssh_strict_host_key=_truthy(strict_host_key),
+        # Inventory omits the flag by default; match legacy AsyncsshTransport
+        # (strict host-key checks are opt-in via inventory notes).
+        ssh_strict_host_key=_truthy(strict_host_key, default=False),
     )
 
 

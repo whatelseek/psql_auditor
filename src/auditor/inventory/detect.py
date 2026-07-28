@@ -15,13 +15,52 @@ _PORT_ONLY_CONFIDENCE = 0.4
 def detect_technologies(inventory: ClientInventory) -> list[TechnologyDetection]:
     """Detect technologies from reconciled inventory + discovery facts.
 
-    Confirmed inventory or discovered services → ``confirmed``.
-    Port-only evidence without a matching service name → ``possible``.
-    Conflicting OS evidence → ``unknown`` for OS technologies.
+    Status vocabulary (INPUT-005):
+
+    * ``confirmed`` — strong evidence (binary + service, or confirmed service)
+    * ``suspected`` — weak signal only (e.g. port 5432 alone)
+    * ``absent`` — discovery succeeded with no evidence of the technology
+    * ``unknown`` — discovery failed / conflicting evidence
+    * ``unsupported`` — asset type has no registered adapter/capability
     """
     conflicted_os = {c.host_id for c in inventory.conflicts if c.fact in {"os_family", "os_name"}}
+    discovery_failed = {
+        i.host_id
+        for i in inventory.issues
+        if i.host_id
+        and i.code
+        in {
+            "discovery_failed",
+            "connection_timeout",
+            "authentication_failed",
+            "host_unreachable",
+            "command_timeout",
+            "partial_discovery",
+        }
+        and i.level in {"error", "warning"}
+    }
     detections: list[TechnologyDetection] = []
     for host in inventory.hosts_without_errors():
+        if host.is_unsupported_network_device:
+            missing = ["cisco.cli.read"] if (host.vendor or "").lower() in {"", "cisco"} else []
+            if (host.vendor or "").lower() and (host.vendor or "").lower() != "cisco":
+                missing = [f"{host.vendor.lower()}.cli.read"]
+            detections.append(
+                TechnologyDetection(
+                    technology_id="network_device",
+                    target_id=host.host_id,
+                    status="unsupported",
+                    confidence=1.0,
+                    evidence=(
+                        f"asset_type={host.asset_type or 'network_device'}",
+                        f"vendor={host.vendor or 'unknown'}",
+                        *(f"missing={cap}" for cap in missing),
+                    ),
+                    source="inventory",
+                )
+            )
+            continue
+
         service_names = {s.name for s in host.services}
         confirmed_services = {
             s.name for s in host.services if s.status == "confirmed" and s.confidence >= 1.0
@@ -71,14 +110,32 @@ def detect_technologies(inventory: ClientInventory) -> list[TechnologyDetection]
                     source=source,
                 )
             )
+        elif host.host_id in discovery_failed and not host.os_family:
+            detections.append(
+                TechnologyDetection(
+                    technology_id="os",
+                    target_id=host.host_id,
+                    status="unknown",
+                    confidence=0.0,
+                    evidence=("discovery_failed",),
+                    source="discovered",
+                )
+            )
 
         if "postgresql" in confirmed_services or "postgresql" in service_names:
             svc = next(s for s in host.services if s.name == "postgresql")
+            # Strong evidence only → confirmed; weaker inventory/discovery → suspected.
+            if svc.confidence >= 1.0 and svc.status in {"confirmed", "probable"}:
+                pg_status: DetectionStatus = "confirmed"
+            elif svc.confidence >= 0.7:
+                pg_status = "confirmed"
+            else:
+                pg_status = "suspected"
             detections.append(
                 TechnologyDetection(
                     technology_id="postgresql",
                     target_id=f"{host.host_id}/postgresql",
-                    status="confirmed" if svc.confidence >= 1.0 else "probable",
+                    status=pg_status,
                     confidence=float(svc.confidence),
                     evidence=(f"service=postgresql source={svc.source}",),
                     source=svc.source,
@@ -89,9 +146,32 @@ def detect_technologies(inventory: ClientInventory) -> list[TechnologyDetection]
                 TechnologyDetection(
                     technology_id="postgresql",
                     target_id=f"{host.host_id}/postgresql",
-                    status="possible",
+                    status="suspected",
                     confidence=_PORT_ONLY_CONFIDENCE,
                     evidence=("port=5432",),
+                    source="discovered",
+                )
+            )
+        elif host.os_family in {"linux", "windows"} and host.host_id not in discovery_failed:
+            # Explicit absent when discovery produced OS facts but no PG signals.
+            detections.append(
+                TechnologyDetection(
+                    technology_id="postgresql",
+                    target_id=f"{host.host_id}/postgresql",
+                    status="absent",
+                    confidence=1.0,
+                    evidence=("no_postgresql_binary_service_or_port",),
+                    source="discovered",
+                )
+            )
+        elif host.host_id in discovery_failed:
+            detections.append(
+                TechnologyDetection(
+                    technology_id="postgresql",
+                    target_id=f"{host.host_id}/postgresql",
+                    status="unknown",
+                    confidence=0.0,
+                    evidence=("discovery_failed",),
                     source="discovered",
                 )
             )
@@ -141,18 +221,23 @@ def detection_status_for(
 ) -> DetectionStatus:
     """Return best detection status for technology on a target prefix."""
     rank = {
-        "confirmed": 4,
-        "probable": 3,
-        "possible": 2,
-        "unknown": 1,
+        "confirmed": 5,
+        "suspected": 4,
+        "probable": 4,
+        "possible": 3,
+        "unknown": 2,
+        "unsupported": 2,
+        "absent": 1,
         "not_detected": 0,
     }
-    best: DetectionStatus = "not_detected"
+    best: DetectionStatus = "absent"
+    found = False
     for det in detections:
         if det.technology_id != technology_id:
             continue
         if not det.target_id.startswith(target_prefix):
             continue
-        if rank[det.status] > rank[best]:
+        found = True
+        if rank.get(det.status, 0) > rank.get(best, 0):
             best = det.status
-    return best
+    return best if found else "absent"

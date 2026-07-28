@@ -34,6 +34,7 @@ from auditor.inventory.discovery_evidence import COLLECTOR_VERSION
 from auditor.inventory.loaders import InventoryLoadError, load_raw_inventory
 from auditor.inventory.normalize import normalize_inventory
 from auditor.inventory.plan import (
+    assert_plan_matches_framework_hash,
     assert_plan_matches_inventory,
     assert_plan_matches_preflight,
     assert_plan_matches_tool_registry,
@@ -56,6 +57,8 @@ from auditor.inventory.preflight import (
 
 AuditExecutor = Callable[[Any], Awaitable[dict[str, Any]]]
 
+EFFECTIVE_INVENTORY_FILENAME = "effective.inventory.json"
+
 
 def load_client_inventory(
     inventory_dir: Path | str,
@@ -70,6 +73,54 @@ def load_client_inventory(
         source_path=path,
         source_format=fmt,
     )
+
+
+def plans_dir_for(inventory_dir: Path | str, client_name: str) -> Path:
+    """Return ``{inventory_dir}/{client}/.audit_plans``."""
+    client = validate_client_name(client_name)
+    return Path(inventory_dir) / client / ".audit_plans"
+
+
+def persist_effective_inventory(
+    inventory: ClientInventory,
+    persist_dir: Path | str,
+) -> Path:
+    """Persist the reconciled/effective inventory used for plan validation."""
+    root = Path(persist_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    payload = _safe_inventory_dump(inventory)
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    path = root / EFFECTIVE_INVENTORY_FILENAME
+    path.write_text(text, encoding="utf-8")
+    (root / f"{inventory.version.version_id}.inventory.json").write_text(text, encoding="utf-8")
+    return path
+
+
+def load_effective_inventory(
+    inventory_dir: Path | str,
+    client_name: str,
+) -> ClientInventory | None:
+    """Load persisted effective inventory from the client's audit-plans dir."""
+    path = plans_dir_for(inventory_dir, client_name) / EFFECTIVE_INVENTORY_FILENAME
+    if not path.is_file():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return ClientInventory.model_validate(data)
+
+
+def resolve_effective_inventory(
+    inventory_dir: Path | str,
+    client_name: str,
+    *,
+    inventory: ClientInventory | None = None,
+) -> ClientInventory:
+    """Prefer persisted effective inventory; fall back to source or provided."""
+    if inventory is not None:
+        return inventory
+    effective = load_effective_inventory(inventory_dir, client_name)
+    if effective is not None:
+        return effective
+    return load_client_inventory(inventory_dir, client_name)
 
 
 def validate_client_inventory(
@@ -99,8 +150,14 @@ def analyze_client_inventory(
     client_name = validate_client_name(client_name)
     inventory = load_client_inventory(inventory_dir, client_name)
 
-    if discoverer is not None:
-        collector: DiscoveryCollector = discoverer
+    # Do not start discovery when inventory validation contains errors.
+    discovery_blocked = inventory.error_count > 0
+    if discovery_blocked:
+        collector: DiscoveryCollector = NoopDiscoveryCollector()
+        discoveries: list[Any] = []
+    elif discoverer is not None:
+        collector = discoverer
+        discoveries = collector.discover(inventory)
     else:
         if artifacts_root is None and discovery:
             try:
@@ -113,12 +170,25 @@ def analyze_client_inventory(
             artifacts_root=artifacts_root,
             enabled=discovery,
         )
-
-    discoveries = collector.discover(inventory)
+        discoveries = collector.discover(inventory)
     if discoveries:
         inventory = reconcile_inventory(inventory, discoveries)
 
     detections = detect_technologies(inventory)
+    if artifacts_root is not None:
+        try:
+            from auditor.inventory.tool_discovery import (
+                sync_capability_snapshots_from_detections,
+            )
+
+            sync_capability_snapshots_from_detections(
+                inventory,
+                detections,
+                artifacts_root=artifacts_root,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     # Build provisional plan decisions for selected framework list / revision.
     provisional = build_plan(inventory, detections, agents_dir=agents_dir)
     selected = sorted(
@@ -153,13 +223,14 @@ def analyze_client_inventory(
         effective_facts_hash=revision.effective_facts_hash,
         preflight_revision_id=revision.revision_id,
     )
+    # Always persist effective inventory next to plans when possible so
+    # confirm/start validate against discovery-reconciled facts.
+    plans_root = (
+        Path(persist_dir) if persist_dir is not None else plans_dir_for(inventory_dir, client_name)
+    )
+    persist_effective_inventory(inventory, plans_root)
     if persist_dir is not None:
-        root = Path(persist_dir)
-        persist_plan(plan, root / f"{plan.plan_id}.json")
-        (root / f"{inventory.version.version_id}.inventory.json").write_text(
-            json.dumps(_safe_inventory_dump(inventory), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        persist_plan(plan, plans_root / f"{plan.plan_id}.json")
     return inventory, plan
 
 
@@ -197,10 +268,15 @@ def confirm_audit_plan(
 ) -> AuditPlan:
     """Confirm, reject, or adjust a draft plan.
 
-    When ``action`` is ``approve``, reloads inventory (unless provided) and
-    rejects with ``plan_stale`` if the inventory hash/version diverged.
+    When ``action`` is ``approve``, reloads the effective (discovery-reconciled)
+    inventory when available and rejects with ``audit_plan_stale`` if the
+    inventory hash/version or framework selection diverged.
     """
     if action == "approve":
+        if inventory_dir is not None and client_name is not None:
+            source = load_client_inventory(inventory_dir, client_name)
+            assert_plan_matches_inventory(plan, source)
+
         current = inventory
         if current is None:
             if inventory_dir is None or client_name is None:
@@ -208,9 +284,20 @@ def confirm_audit_plan(
                     "inventory_dir and client_name are required to confirm a plan",
                     code="missing_inventory_context",
                 )
-            current = load_client_inventory(inventory_dir, client_name)
+            current = resolve_effective_inventory(inventory_dir, client_name)
         assert_plan_matches_inventory(plan, current)
         assert_plan_matches_tool_registry(plan)
+        from auditor.inventory.plan import framework_selection_hash
+        from auditor.inventory.select_frameworks import select_frameworks_for_inventory
+
+        current_fw_hash = framework_selection_hash(
+            select_frameworks_for_inventory(
+                current,
+                detect_technologies(current),
+                agents_dir=None,
+            )
+        )
+        assert_plan_matches_framework_hash(plan, framework_hash=current_fw_hash)
         # If a newer preflight exists for the same inventory with different
         # effective facts, the plan is stale (discovery changed post-plan).
         if inventory_dir is not None and client_name is not None:
@@ -255,16 +342,31 @@ def plan_to_audit_request_payload(
     """Convert a confirmed plan into an INPUT-001 AuditRequest payload.
 
     ``client_id`` must be the registry id. Target refs use host addresses so
-    ``list_client_ssh_targets`` can resolve them. Client-level frameworks are
-    attached to each host target.
+    ``list_client_ssh_targets`` can resolve them. Confirmed plan targets are
+    used as-is so plan identity matches execution identity (client-level
+    frameworks must already be expanded to explicit per-host targets, or
+    appear as a single client-level job).
     """
     ensure_plan_confirmed(plan)
     assert_plan_matches_inventory(plan, inventory)
     assert_plan_matches_tool_registry(plan)
+    from auditor.inventory.plan import framework_selection_hash
+    from auditor.inventory.select_frameworks import select_frameworks_for_inventory
+
+    assert_plan_matches_framework_hash(
+        plan,
+        framework_hash=framework_selection_hash(
+            select_frameworks_for_inventory(
+                inventory,
+                detect_technologies(inventory),
+                agents_dir=None,
+            )
+        ),
+    )
 
     host_by_id = {h.host_id: h for h in inventory.hosts}
     by_ref: dict[str, list[dict[str, str]]] = {}
-    client_frameworks: list[dict[str, str]] = []
+    client_level: list[dict[str, str]] = []
 
     for target in plan.active_targets:
         pair = {
@@ -272,8 +374,9 @@ def plan_to_audit_request_payload(
             "framework_version": target.framework_version or "0",
         }
         if target.target_id.startswith("client:"):
-            if pair not in client_frameworks:
-                client_frameworks.append(pair)
+            # Preserve as a single client-level job (not silent per-host fan-out).
+            if pair not in client_level:
+                client_level.append(pair)
             continue
         host = host_by_id.get(target.host_id)
         if host is None:
@@ -283,17 +386,16 @@ def plan_to_audit_request_payload(
         if pair not in by_ref[ref]:
             by_ref[ref].append(pair)
 
-    if client_frameworks:
-        if by_ref:
-            for ref in by_ref:
-                for pair in client_frameworks:
-                    if pair not in by_ref[ref]:
-                        by_ref[ref].append(pair)
-        else:
-            raise PlanConfirmationRejected(
-                "confirmed plan has only client-level targets and no host targets",
-                code="empty_plan",
-            )
+    if client_level and not by_ref:
+        # Explicit client-level-only plan: one synthetic target for the client.
+        by_ref[f"client:{plan.client_id}"] = client_level
+    elif client_level and by_ref:
+        raise PlanConfirmationRejected(
+            "confirmed plan mixes client-level targets with host targets; "
+            "expand client frameworks to per-host targets before confirmation "
+            "or keep a single client-level job",
+            code="plan_identity_mismatch",
+        )
 
     if not by_ref:
         raise PlanConfirmationRejected(
@@ -350,8 +452,10 @@ async def astart_confirmed_audit(
     inventory_dir = Path(inventory_dir)
     client_name = validate_client_name(client_name)
 
-    # Reload inventory; discovery is not re-run on start by default.
-    inventory = load_client_inventory(inventory_dir, client_name)
+    # Source inventory identity check + effective inventory for plan validation.
+    source = load_client_inventory(inventory_dir, client_name)
+    assert_plan_matches_inventory(plan, source)
+    inventory = resolve_effective_inventory(inventory_dir, client_name)
     assert_plan_matches_inventory(plan, inventory)
     assert_plan_matches_tool_registry(plan)
 
@@ -367,6 +471,7 @@ async def astart_confirmed_audit(
             discoverer=discoverer,
             discovery=True,
             artifacts_root=settings.evidence_dir,
+            persist_dir=plans_dir_for(inventory_dir, client_name),
         )
         assert_plan_matches_preflight(
             plan,
@@ -502,12 +607,16 @@ __all__ = [
     "confirm_audit_plan",
     "generate_audit_plan",
     "load_client_inventory",
+    "load_effective_inventory",
     "load_plan",
+    "persist_effective_inventory",
     "persist_plan",
     "plan_confirmation_prompt",
+    "plans_dir_for",
     "astart_confirmed_audit",
     "plan_to_audit_request_payload",
     "reject_audit_launch",
+    "resolve_effective_inventory",
     "start_confirmed_audit",
     "validate_client_inventory",
 ]

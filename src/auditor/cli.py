@@ -29,6 +29,7 @@ from auditor.inventory.service import (
     load_plan,
     persist_plan,
     reject_audit_launch,
+    resolve_effective_inventory,
     start_confirmed_audit,
     validate_client_inventory,
 )
@@ -103,10 +104,12 @@ def cmd_audit_plan(args: argparse.Namespace) -> int:
         plan = load_plan(latest)
         # Surface stale plans before the operator confirms.
         try:
-            inventory = load_client_inventory(settings.inventory_dir, args.client)
+            inventory = resolve_effective_inventory(settings.inventory_dir, args.client)
             from auditor.inventory.plan import assert_plan_matches_inventory
 
             assert_plan_matches_inventory(plan, inventory)
+            source = load_client_inventory(settings.inventory_dir, args.client)
+            assert_plan_matches_inventory(plan, source)
         except PlanConfirmationRejected as exc:
             print(f"warning: {exc}", file=sys.stderr)
             print("Re-run with --refresh to regenerate the plan.", file=sys.stderr)
@@ -171,7 +174,7 @@ def cmd_audit_start(args: argparse.Namespace) -> int:
         )
     except PlanConfirmationRejected as exc:
         print(f"error: {exc}", file=sys.stderr)
-        if getattr(exc, "code", "") == "plan_stale":
+        if getattr(exc, "code", "") in {"plan_stale", "audit_plan_stale"}:
             print("Re-run `inventory analyze` / `audit plan --refresh`.", file=sys.stderr)
             return 4
         return 3
