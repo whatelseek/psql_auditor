@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -283,16 +282,13 @@ def test_registry_path_isolation(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_compose_mounts_tools_readonly() -> None:
-    result = subprocess.run(
-        ["docker", "compose", "config"],
-        cwd=Path(__file__).resolve().parents[1],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    config = result.stdout
-    assert "TOOLS_DIR: /app/tools" in config or "TOOLS_DIR=/app/tools" in config
-    assert "/app/tools" in config
-    lowered = config.lower()
-    assert "tools" in lowered
-    assert "read_only: true" in lowered or ":ro" in config
+    """Assert agent service declares TOOLS_DIR and a read-only tools mount.
+
+    Parses ``docker-compose.yml`` directly so CI unit jobs do not require Docker.
+    """
+    compose_path = Path(__file__).resolve().parents[1] / "docker-compose.yml"
+    text = compose_path.read_text(encoding="utf-8")
+    assert "TOOLS_DIR: /app/tools" in text
+    assert "./tools:/app/tools:ro" in text
+    # Open WebUI / Open Terminal must not mount the catalog.
+    assert text.count("./tools:/app/tools:ro") == 1
