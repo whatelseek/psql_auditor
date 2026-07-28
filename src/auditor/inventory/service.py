@@ -34,6 +34,7 @@ from auditor.inventory.discovery_evidence import COLLECTOR_VERSION
 from auditor.inventory.loaders import InventoryLoadError, load_raw_inventory
 from auditor.inventory.normalize import normalize_inventory
 from auditor.inventory.plan import (
+    assert_plan_matches_discovery_plan,
     assert_plan_matches_framework_hash,
     assert_plan_matches_inventory,
     assert_plan_matches_preflight,
@@ -329,6 +330,11 @@ def confirm_audit_plan(
             )
         )
         assert_plan_matches_framework_hash(plan, framework_hash=current_fw_hash)
+        assert_plan_matches_discovery_plan(
+            plan,
+            current,
+            detections=detect_technologies(current),
+        )
         # If a newer preflight exists for the same inventory with different
         # effective facts, the plan is stale (discovery changed post-plan).
         if inventory_dir is not None and client_name is not None:
@@ -393,6 +399,11 @@ def plan_to_audit_request_payload(
                 agents_dir=None,
             )
         ),
+    )
+    assert_plan_matches_discovery_plan(
+        plan,
+        inventory,
+        detections=detect_technologies(inventory),
     )
 
     host_by_id = {h.host_id: h for h in inventory.hosts}

@@ -28,6 +28,10 @@ last_updated: 2026-07-28
 5. Treat capability readiness as host-specific and separate from predicate match results.
 6. Candidate evaluation never invokes tools; authorization uses `registry.authorized_tools()` only.
 
+
+7. Build typed capability discovery plans from missing facts/capabilities + `discovery_hints` + authorized manifests; check host `access.<segment>.available` generically; dedupe identical host/operation work across frameworks.
+8. Pin `discovery_plan_hash` on `AuditPlan` / plan revision; assert on confirm/start.
+
 ## Gotchas
 - Catalog visibility ≠ authorization to bind.
 - Hardcoded tech→framework mapping is opt-in only (`use_legacy_tech_mapping`).

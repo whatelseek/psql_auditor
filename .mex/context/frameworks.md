@@ -61,3 +61,9 @@ Markdown frameworks may expose **strict structured applicability metadata** in f
 - Candidate evaluation never binds or invokes tools.
 - Full evidence-backed selection provenance is deferred to INPUT005-18.
 
+## Capability discovery planning (INPUT005-14)
+
+- Discovery proposals use **typed `discovery_hints` only** — never framework IDs, titles, ports, or Markdown prose.
+- Planning (`build_capability_discovery_plan`) is separate from execution (INPUT005-15+).
+- `AuditPlan` pins `discovery_plan_hash`; confirmation rejects stale discovery plans.
+

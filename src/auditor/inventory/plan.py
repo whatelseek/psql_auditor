@@ -65,6 +65,7 @@ def _plan_revision_id(
     framework_hash: str,
     tool_catalog_hash: str,
     capability_policy_hash: str,
+    discovery_plan_hash: str = "",
 ) -> str:
     """Immutable plan revision identity from all pinned plan inputs."""
     payload = {
@@ -76,6 +77,7 @@ def _plan_revision_id(
         "framework_hash": framework_hash,
         "tool_catalog_hash": tool_catalog_hash,
         "capability_policy_hash": capability_policy_hash,
+        "discovery_plan_hash": discovery_plan_hash,
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -240,6 +242,14 @@ def generate_audit_plan(
 
     tool_hashes = _tool_snapshot_hashes()
     framework_hash = _framework_selection_hash(decisions)
+    from auditor.inventory.discovery_plan import build_capability_discovery_plan
+
+    discovery_plan = build_capability_discovery_plan(
+        inventory,
+        detections,
+        agents_dir=agents_dir,
+    )
+    unresolved = list(dict.fromkeys([*unresolved, *discovery_plan.unresolved_questions]))
     plan_revision_id = _plan_revision_id(
         inventory_version_id=inventory.version.version_id,
         inventory_content_hash=inventory.version.content_hash,
@@ -249,6 +259,7 @@ def generate_audit_plan(
         framework_hash=framework_hash,
         tool_catalog_hash=str(tool_hashes["tool_catalog_hash"]),
         capability_policy_hash=str(tool_hashes["capability_policy_hash"]),
+        discovery_plan_hash=discovery_plan.discovery_plan_hash,
     )
     return AuditPlan(
         plan_id=_plan_id(inventory.client_id, inventory.version.version_id),
@@ -261,6 +272,9 @@ def generate_audit_plan(
         preflight_revision_id=preflight_revision_id,
         framework_hash=framework_hash,
         **tool_hashes,
+        discovery_plan_id=discovery_plan.discovery_plan_id,
+        discovery_plan_hash=discovery_plan.discovery_plan_hash,
+        discovery_steps=discovery_plan.steps,
         status="draft",
         targets=tuple(targets),
         framework_decisions=tuple(decisions),
@@ -473,6 +487,32 @@ def assert_plan_matches_framework_hash(
         raise PlanConfirmationRejected(
             "audit plan is stale: framework selection changed since plan generation; "
             "re-run inventory analyze / audit plan",
+            code="audit_plan_stale",
+        )
+
+
+def assert_plan_matches_discovery_plan(
+    plan: AuditPlan,
+    inventory: ClientInventory,
+    *,
+    detections: list[Any] | tuple[Any, ...] | None = None,
+    agents_dir: Path | str | None = None,
+) -> None:
+    """Reject confirm/start when the typed discovery plan hash diverged."""
+    pinned = (plan.discovery_plan_hash or "").strip()
+    if not pinned:
+        return
+    from auditor.inventory.discovery_plan import build_capability_discovery_plan
+
+    current = build_capability_discovery_plan(
+        inventory,
+        list(detections or ()),
+        agents_dir=agents_dir,
+    )
+    if current.discovery_plan_hash != pinned:
+        raise PlanConfirmationRejected(
+            "audit plan is stale: capability discovery plan changed since plan "
+            "generation; re-run inventory analyze / audit plan",
             code="audit_plan_stale",
         )
 
