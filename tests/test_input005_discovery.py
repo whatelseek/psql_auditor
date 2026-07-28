@@ -1313,7 +1313,12 @@ async def test_e2e_api_analyze_confirm_start_with_discovery(tmp_path: Path):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 f"/audit-plans/{plan.plan_id}/confirm",
-                json={"action": "approve", "start": True, "note": "api-e2e"},
+                json={
+                    "plan_revision_id": plan.plan_revision_id,
+                    "action": "approve",
+                    "start": True,
+                    "note": "api-e2e",
+                },
             )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -1477,3 +1482,258 @@ def test_same_inventory_changed_discovery_new_plan_revision(tmp_path: Path):
     assert plan1.inventory_version_id == plan2.inventory_version_id
     assert plan1.discovery_result_hash != plan2.discovery_result_hash
     assert plan1.plan_revision_id != plan2.plan_revision_id
+
+
+@pytest.mark.asyncio
+async def test_api_stale_plan_revision_rejected_current_succeeds(tmp_path: Path):
+    """Same plan_id + older displayed revision → 409 audit_plan_stale; current confirms."""
+    import httpx
+
+    from auditor.api.app import create_app
+    from auditor.application_runtime import ApplicationRuntime
+    from auditor.inventory.service import load_plan, persist_plan
+
+    root = tmp_path / "inventory"
+    client_dir = root / "RevPinApi"
+    _write_md(
+        client_dir,
+        f"""# Inventory
+
+## In-scope hosts
+
+| Host | IP | Access |
+|---|---|---|
+| host-01 | 10.0.30.1 | SSH |
+
+## Credentials & Access
+
+| Access | Host / URL | Port | Username | Password / Token |
+|---|---|---:|---|---|
+| SSH | 10.0.30.1 | 22 | audit | {CANARY} |
+""",
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    settings = Settings(
+        _env_file=None,
+        evidence_dir=evidence,
+        inventory_dir=root,
+        agents_dir=AGENTS,
+        intake_enabled=False,
+        hitl_enabled=False,
+        archive_enabled=False,
+    )
+    plans = client_dir / ".audit_plans"
+    with patch("auditor.inventory.discovery_evidence.utc_now", return_value="2026-01-01T00:00:00Z"):
+        with patch("auditor.inventory.plan._utc_now", return_value="2026-01-01T00:00:00Z"):
+            with patch("auditor.inventory.preflight._utc_now", return_value="2026-01-01T00:00:00Z"):
+                _i1, old_plan = analyze_client_inventory(
+                    root,
+                    "RevPinApi",
+                    agents_dir=AGENTS,
+                    artifacts_root=evidence,
+                    discoverer=SshDiscoveryCollector(
+                        inventory_dir=root,
+                        client_name="RevPinApi",
+                        artifacts_root=evidence,
+                        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+                        transport_factory=lambda c, s: _linux_transport(),
+                    ),
+                    persist_dir=plans,
+                )
+                _i2, new_plan = analyze_client_inventory(
+                    root,
+                    "RevPinApi",
+                    agents_dir=AGENTS,
+                    artifacts_root=evidence,
+                    discoverer=SshDiscoveryCollector(
+                        inventory_dir=root,
+                        client_name="RevPinApi",
+                        artifacts_root=evidence,
+                        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+                        transport_factory=lambda c, s: _linux_transport(with_postgres=True),
+                    ),
+                    persist_dir=plans,
+                )
+    persist_plan(new_plan, plans / "latest.json")
+    assert new_plan.plan_id == old_plan.plan_id
+    assert new_plan.plan_revision_id != old_plan.plan_revision_id
+
+    called = {"n": 0}
+
+    class _GuardGraph:
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        async def aclose_runtime_resources(self, timeout: float | None = None) -> None:
+            return None
+
+        async def arun_request(self, request, operator_context: str = ""):
+            called["n"] += 1
+            raise AssertionError("executor must not run for stale revision")
+
+    async def _runtime_factory():
+        runtime = ApplicationRuntime(
+            settings,
+            graph_factory=lambda rt: _GuardGraph(rt.settings),  # type: ignore[arg-type, return-value]
+            shutdown_timeout=0.5,
+        )
+        await runtime.start()
+        return runtime
+
+    app = create_app(settings=settings, runtime_factory=_runtime_factory)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            stale = await http.post(
+                f"/audit-plans/{old_plan.plan_id}/confirm",
+                json={
+                    "plan_revision_id": old_plan.plan_revision_id,
+                    "action": "approve",
+                },
+            )
+            stale_start = await http.post(
+                f"/audit-plans/{old_plan.plan_id}/confirm",
+                json={
+                    "plan_revision_id": old_plan.plan_revision_id,
+                    "action": "approve",
+                    "start": True,
+                },
+            )
+            persist_plan(new_plan, plans / "latest.json")
+            ok = await http.post(
+                f"/audit-plans/{new_plan.plan_id}/confirm",
+                json={
+                    "plan_revision_id": new_plan.plan_revision_id,
+                    "action": "approve",
+                },
+            )
+
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["detail"]["code"] == "audit_plan_stale"
+    assert CANARY not in json.dumps(stale.json())
+    assert stale_start.status_code == 409, stale_start.text
+    assert stale_start.json()["detail"]["code"] == "audit_plan_stale"
+    assert called["n"] == 0
+    assert not (evidence / ".audit_registry.sqlite").exists()
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["plan"]["status"] == "confirmed"
+    assert load_plan(plans / "latest.json").status == "confirmed"
+
+
+def test_cli_stale_and_current_plan_revision(tmp_path: Path, capsys):
+    """CLI --plan-revision-id: stale → exit 4; current → exit 0."""
+    from auditor.cli import main
+    from auditor.inventory.service import load_plan, persist_plan
+
+    root = tmp_path / "inventory"
+    client_dir = root / "Testcompany"
+    _write_md(
+        client_dir,
+        f"""# Inventory
+
+## In-scope hosts
+
+| Host | IP | Access |
+|---|---|---|
+| host-01 | 10.0.31.1 | SSH |
+
+## Credentials & Access
+
+| Access | Host / URL | Port | Username | Password / Token |
+|---|---|---:|---|---|
+| SSH | 10.0.31.1 | 22 | audit | {CANARY} |
+""",
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    settings = Settings(
+        _env_file=None,
+        evidence_dir=evidence,
+        inventory_dir=root,
+        agents_dir=AGENTS,
+        intake_enabled=False,
+        hitl_enabled=False,
+        archive_enabled=False,
+    )
+    plans = client_dir / ".audit_plans"
+    with patch("auditor.inventory.discovery_evidence.utc_now", return_value="2026-01-01T00:00:00Z"):
+        with patch("auditor.inventory.plan._utc_now", return_value="2026-01-01T00:00:00Z"):
+            with patch("auditor.inventory.preflight._utc_now", return_value="2026-01-01T00:00:00Z"):
+                _i1, old_plan = analyze_client_inventory(
+                    root,
+                    "Testcompany",
+                    agents_dir=AGENTS,
+                    artifacts_root=evidence,
+                    discoverer=SshDiscoveryCollector(
+                        inventory_dir=root,
+                        client_name="Testcompany",
+                        artifacts_root=evidence,
+                        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+                        transport_factory=lambda c, s: _linux_transport(),
+                    ),
+                    persist_dir=plans,
+                )
+                _i2, new_plan = analyze_client_inventory(
+                    root,
+                    "Testcompany",
+                    agents_dir=AGENTS,
+                    artifacts_root=evidence,
+                    discoverer=SshDiscoveryCollector(
+                        inventory_dir=root,
+                        client_name="Testcompany",
+                        artifacts_root=evidence,
+                        defaults=DiscoveryHostSettings(connection_timeout=0.05, retry_count=0),
+                        transport_factory=lambda c, s: _linux_transport(with_postgres=True),
+                    ),
+                    persist_dir=plans,
+                )
+    persist_plan(new_plan, plans / "latest.json")
+    assert new_plan.plan_id == old_plan.plan_id
+    assert new_plan.plan_revision_id != old_plan.plan_revision_id
+
+    with patch("auditor.cli.load_settings", return_value=settings):
+        rc_stale = main(
+            [
+                "audit",
+                "start",
+                "Testcompany",
+                "--confirm",
+                "--plan-revision-id",
+                old_plan.plan_revision_id,
+            ]
+        )
+    assert rc_stale == 4
+    err = capsys.readouterr().err
+    assert "stale" in err.lower()
+    assert load_plan(plans / "latest.json").status == "draft"
+    assert not (plans / "audit_request.json").exists()
+    assert not (evidence / ".audit_registry.sqlite").exists()
+
+    with patch("auditor.cli.load_settings", return_value=settings):
+        with patch(
+            "auditor.cli.start_confirmed_audit",
+            return_value={
+                "status": "started",
+                "plan_id": new_plan.plan_id,
+                "plan": new_plan.model_copy(update={"status": "confirmed"}),
+                "client_id": "client_test",
+                "audit_run_id": "run_ok",
+                "evidence_run_id": "ev_ok",
+                "audit_run_status": "running",
+                "awaiting_hitl": False,
+                "audit_request": {"client_id": "client_test", "targets": []},
+            },
+        ) as start_mock:
+            rc_ok = main(
+                [
+                    "audit",
+                    "start",
+                    "Testcompany",
+                    "--confirm",
+                    "--plan-revision-id",
+                    new_plan.plan_revision_id,
+                ]
+            )
+    assert rc_ok == 0
+    assert start_mock.call_args.kwargs["expected_plan_revision_id"] == new_plan.plan_revision_id

@@ -366,6 +366,29 @@ def confirm_audit_plan(
     )
 
 
+def assert_plan_revision(
+    plan: AuditPlan,
+    expected_plan_revision_id: str,
+) -> None:
+    """Reject confirm/start when the operator-supplied revision does not match."""
+    expected = expected_plan_revision_id.strip()
+
+    if not expected:
+        raise PlanConfirmationRejected(
+            "plan_revision_id is required",
+            code="missing_plan_revision",
+        )
+
+    if plan.plan_revision_id != expected:
+        raise PlanConfirmationRejected(
+            (
+                "audit plan revision is stale: "
+                f"expected {expected!r}, current {plan.plan_revision_id!r}"
+            ),
+            code="audit_plan_stale",
+        )
+
+
 def ensure_plan_confirmed(plan: AuditPlan) -> AuditPlan:
     """Reject audit launch when the plan is not confirmed."""
     if not plan.is_executable():

@@ -742,7 +742,12 @@ async def test_api_start_true_works_in_active_event_loop(tmp_path: Path):
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
                     f"/audit-plans/{plan.plan_id}/confirm",
-                    json={"action": "approve", "start": True, "note": "api-start"},
+                    json={
+                        "plan_revision_id": plan.plan_revision_id,
+                        "action": "approve",
+                        "start": True,
+                        "note": "api-start",
+                    },
                 )
 
     assert response.status_code == 200, response.text
@@ -969,3 +974,46 @@ def test_identity_rejection_errors_do_not_expose_secrets(tmp_path: Path):
     assert "changeme" not in blob
     for issue in exc.value.issues:
         assert "password" not in issue.message.lower() or "content_hash" in issue.location
+
+
+@pytest.mark.asyncio
+async def test_api_confirm_missing_plan_revision_id_returns_422(tmp_path: Path):
+    """ConfirmBody.plan_revision_id is required (HTTP 422)."""
+    from auditor.inventory.service import load_plan
+
+    root = _copy_client(tmp_path, fmt="md")
+    settings = _settings_for(tmp_path, root)
+    _inventory, plan = analyze_client_inventory(
+        root, "Testcompany", agents_dir=AGENTS, discovery=False
+    )
+    plans = root / "Testcompany" / ".audit_plans"
+    plans.mkdir(parents=True, exist_ok=True)
+    persist_plan(plan, plans / "latest.json")
+
+    async def _runtime_factory():
+        runtime = ApplicationRuntime(
+            settings,
+            graph_factory=lambda rt: _FakeGraph(rt.settings),  # type: ignore[arg-type, return-value]
+            shutdown_timeout=0.5,
+        )
+        await runtime.start()
+        return runtime
+
+    app = create_app(settings=settings, runtime_factory=_runtime_factory)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/audit-plans/{plan.plan_id}/confirm",
+                json={"action": "approve"},
+            )
+    assert response.status_code == 422, response.text
+    assert load_plan(plans / "latest.json").status == "draft"
+
+
+def test_cli_audit_start_requires_plan_revision_id():
+    from auditor.cli import build_parser
+
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["audit", "start", "Testcompany", "--confirm"])
+    assert exc.value.code == 2

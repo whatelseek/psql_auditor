@@ -5,7 +5,7 @@ Examples::
     psql-auditor inventory validate Testcompany
     psql-auditor inventory analyze Testcompany
     psql-auditor audit plan Testcompany
-    psql-auditor audit start Testcompany --confirm
+    psql-auditor audit start Testcompany --confirm --plan-revision-id prev-...
 """
 
 from __future__ import annotations
@@ -84,6 +84,7 @@ def cmd_inventory_analyze(args: argparse.Namespace) -> int:
             "inventory_version": inventory.version.model_dump(),
             "summary": plan.summary.model_dump(),
             "plan_id": plan.plan_id,
+            "plan_revision_id": plan.plan_revision_id,
             "status": plan.status,
             "detections": [d.model_dump() for d in plan.technology_detections],
             "framework_decisions": [d.model_dump() for d in plan.framework_decisions],
@@ -145,11 +146,19 @@ def cmd_audit_start(args: argparse.Namespace) -> int:
         return 2
     plan = load_plan(latest)
     if args.reject:
-        plan = confirm_audit_plan(
-            plan,
-            action="reject",
-            note=args.note or "rejected via CLI",
-        )
+        try:
+            plan = confirm_audit_plan(
+                plan,
+                action="reject",
+                note=args.note or "rejected via CLI",
+                expected_plan_revision_id=args.plan_revision_id,
+            )
+        except PlanConfirmationRejected as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            if getattr(exc, "code", "") in {"plan_stale", "audit_plan_stale"}:
+                print("Re-run `inventory analyze` / `audit plan --refresh`.", file=sys.stderr)
+                return 4
+            return 3
         persist_plan(plan, latest)
         print("audit launch rejected by operator")
         return 1
@@ -171,6 +180,7 @@ def cmd_audit_start(args: argparse.Namespace) -> int:
             agents_dir=settings.agents_dir,
             note=args.note or "confirmed via CLI",
             refresh_discovery=bool(args.refresh_discovery),
+            expected_plan_revision_id=args.plan_revision_id,
         )
     except PlanConfirmationRejected as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -193,6 +203,7 @@ def cmd_audit_start(args: argparse.Namespace) -> int:
         {
             "status": started["status"],
             "plan_id": started["plan_id"],
+            "plan_revision_id": started["plan"].plan_revision_id,
             "client_id": started["client_id"],
             "audit_run_id": started["audit_run_id"],
             "evidence_run_id": started.get("evidence_run_id"),
@@ -244,6 +255,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("client")
     p_start.add_argument("--confirm", action="store_true", help="Approve the draft plan")
     p_start.add_argument("--reject", action="store_true", help="Reject the draft plan")
+    p_start.add_argument(
+        "--plan-revision-id",
+        required=True,
+        help="Exact plan revision shown by inventory analyze or audit plan",
+    )
     p_start.add_argument("--note", default="")
     p_start.add_argument(
         "--refresh-discovery",

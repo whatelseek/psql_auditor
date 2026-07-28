@@ -38,6 +38,7 @@ from auditor.inventory.plan import (
     assert_plan_matches_inventory,
     assert_plan_matches_preflight,
     assert_plan_matches_tool_registry,
+    assert_plan_revision,
     ensure_plan_confirmed,
     load_plan,
     persist_plan,
@@ -265,6 +266,7 @@ def confirm_audit_plan(
     inventory_dir: Path | str | None = None,
     client_name: str | None = None,
     inventory: ClientInventory | None = None,
+    expected_plan_revision_id: str | None = None,
 ) -> AuditPlan:
     """Confirm, reject, or adjust a draft plan.
 
@@ -272,6 +274,9 @@ def confirm_audit_plan(
     inventory when available and rejects with ``audit_plan_stale`` if the
     inventory hash/version or framework selection diverged.
     """
+    if expected_plan_revision_id is not None:
+        assert_plan_revision(plan, expected_plan_revision_id)
+
     if action == "approve":
         if inventory_dir is not None and client_name is not None:
             source = load_client_inventory(inventory_dir, client_name)
@@ -442,6 +447,7 @@ async def astart_confirmed_audit(
     executor: AuditExecutor | None = None,
     discoverer: DiscoveryCollector | None = None,
     refresh_discovery: bool = False,
+    expected_plan_revision_id: str | None = None,
 ) -> dict[str, Any]:
     """Confirm a fresh plan and execute it via ``arun_request`` (or ``executor``).
 
@@ -451,6 +457,9 @@ async def astart_confirmed_audit(
     settings = settings or load_settings()
     inventory_dir = Path(inventory_dir)
     client_name = validate_client_name(client_name)
+
+    if expected_plan_revision_id is not None:
+        assert_plan_revision(plan, expected_plan_revision_id)
 
     # Source inventory identity check + effective inventory for plan validation.
     source = load_client_inventory(inventory_dir, client_name)
@@ -496,6 +505,7 @@ async def astart_confirmed_audit(
             inventory=inventory,
             inventory_dir=inventory_dir,
             client_name=client_name,
+            expected_plan_revision_id=expected_plan_revision_id,
         )
     else:
         assert_plan_matches_inventory(plan, inventory)
@@ -559,6 +569,7 @@ def start_confirmed_audit(
     executor: AuditExecutor | None = None,
     discoverer: DiscoveryCollector | None = None,
     refresh_discovery: bool = False,
+    expected_plan_revision_id: str | None = None,
 ) -> dict[str, Any]:
     """CLI-only synchronous wrapper around :func:`astart_confirmed_audit`.
 
@@ -576,6 +587,7 @@ def start_confirmed_audit(
             executor=executor,
             discoverer=discoverer,
             refresh_discovery=refresh_discovery,
+            expected_plan_revision_id=expected_plan_revision_id,
         )
     )
 
