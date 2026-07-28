@@ -1,0 +1,60 @@
+# Planning and audit documents
+checklist/
+docs/audit/
+docs/reviews/
+reviews/
+
+# Generated audit artifacts
+artifacts/
+evidence/
+reports/
+exports/
+.audit_plans/
+.audit_runs/
+checkpoints/
+
+# Real inventories and client data
+inventory/clients/
+inventory/*/credentials*
+inventory/*/secrets*
+inventory/*/private*
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build and generated output
+build/
+dist/
+*.egg-info/
+tmp/
+temp/
+*.log
+
+# IDE noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
