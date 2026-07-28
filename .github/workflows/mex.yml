@@ -19,9 +19,8 @@ on:
 
 jobs:
   mex-check:
-    name: mex graph + check (advisory)
+    name: mex verify
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,8 +34,5 @@ jobs:
       - name: Install mex-agent (pinned)
         run: npm ci
 
-      - name: Build code graph
-        run: npm run mex:graph
-
-      - name: Run mex check
-        run: npm run mex:check
+      - name: Verify MEX
+        run: npm run mex:verify
