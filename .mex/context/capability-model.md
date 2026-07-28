@@ -32,7 +32,15 @@ Discovery does not hard-code ad-hoc SSH strings in the happy path. `inventory/to
 
 ## Framework selection
 
-`select_frameworks_for_inventory` still consumes technology detections + inventory via the existing production mapping. Structured applicability metadata and normalized facts are foundations for later declarative selection (INPUT005-12/13) and are **not** the production selector yet.
+`select_frameworks_for_inventory` defaults to declarative Markdown applicability
+(`select_frameworks_dynamic` / INPUT005-13). Candidates are evaluated for every
+host/framework pair (INPUT005-12) against normalized facts. Capability readiness
+is host-specific (authorized tools whose `inventory_access` segments are available
+on that host) and does not change applicability match/not-match results.
+
+The hardcoded `_TECH_FRAMEWORK_PREFERENCES` selector remains available only via
+`use_legacy_tech_mapping=True` (compatibility). Applicability and authorization
+are separate decisions. Full selection provenance is deferred to INPUT005-18.
 
 ## Normalized facts
 

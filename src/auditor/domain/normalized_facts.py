@@ -30,6 +30,9 @@ from auditor.domain.inventory import (
     InventoryHost,
     TechnologyDetection,
 )
+from auditor.domain.inventory import (
+    FactConflict as InventoryFactConflict,
+)
 from auditor.tools.secrets import redact_secret_text
 
 FactSourceType = Literal[
@@ -420,6 +423,95 @@ def build_host_fact_set(
     return _reconcile_facts(host.host_id, collected)
 
 
+_INVENTORY_CONFLICT_FACT_MAP: dict[str, str] = {
+    "os_family": "os.family",
+    "os_name": "os.name",
+}
+
+
+def apply_inventory_fact_conflicts(
+    fact_sets: Mapping[str, HostFactSet],
+    inventory: ClientInventory,
+) -> dict[str, HostFactSet]:
+    """Overlay inventory-vs-discovery conflicts onto normalized fact sets.
+
+    Maps inventory conflict field names (e.g. ``os_family``) to normalized keys
+    (``os.family``). Conflicted keys are removed from active facts and recorded
+    as :class:`FactConflict` entries so they stay absent from ``as_value_map()``.
+    Does not resolve conflicts by source priority.
+    """
+    by_host: dict[str, list[InventoryFactConflict]] = {}
+    for conflict in inventory.conflicts:
+        by_host.setdefault(conflict.host_id, []).append(conflict)
+
+    result: dict[str, HostFactSet] = {}
+    for host_id in sorted(fact_sets):
+        fs = fact_sets[host_id]
+        host_conflicts = by_host.get(host_id, [])
+        if not host_conflicts:
+            result[host_id] = fs
+            continue
+
+        existing_conflict_keys = {c.fact for c in fs.conflicts}
+        new_conflicts: list[FactConflict] = list(fs.conflicts)
+        remove_keys: set[str] = set()
+        version_id = inventory.version.version_id
+
+        for ic in sorted(host_conflicts, key=lambda c: (c.fact, repr(c.inventory_value))):
+            nkey = _INVENTORY_CONFLICT_FACT_MAP.get(ic.fact)
+            if nkey is None:
+                continue
+            if nkey in existing_conflict_keys or any(c.fact == nkey for c in new_conflicts):
+                remove_keys.add(nkey)
+                continue
+            try:
+                inv_val = coerce_fact_value(ic.inventory_value)
+                disc_val = coerce_fact_value(ic.discovered_value)
+            except (TypeError, ValueError):
+                continue
+            if nkey in {"os.family"} and isinstance(inv_val, str):
+                inv_val = inv_val.strip().lower()
+            if nkey in {"os.family"} and isinstance(disc_val, str):
+                disc_val = disc_val.strip().lower()
+            cand_inv = NormalizedFact(
+                fact=nkey,
+                value=inv_val,
+                confidence=1.0,
+                source_type="inventory",
+                source_ref=_inventory_source_ref(version_id, host_id),
+            )
+            cand_disc = NormalizedFact(
+                fact=nkey,
+                value=disc_val,
+                confidence=1.0,
+                source_type="discovery",
+                source_ref=f"discovery:conflict:{host_id}:{nkey}",
+            )
+            reason = str(ic.message or "").strip() or (f"inventory vs discovery conflict on {nkey}")
+            new_conflicts.append(
+                FactConflict(
+                    fact=nkey,
+                    candidates=(cand_inv, cand_disc),
+                    reason=reason,
+                )
+            )
+            remove_keys.add(nkey)
+
+        if not remove_keys:
+            result[host_id] = fs
+            continue
+
+        new_facts = tuple(f for f in fs.facts if f.fact not in remove_keys)
+        # Stable conflict ordering by fact key.
+        ordered_conflicts = tuple(sorted(new_conflicts, key=lambda c: c.fact))
+        result[host_id] = HostFactSet(
+            host_id=host_id,
+            facts=new_facts,
+            conflicts=ordered_conflicts,
+        )
+    return result
+
+
 def build_inventory_fact_sets(
     inventory: ClientInventory,
     detections: Sequence[TechnologyDetection],
@@ -444,7 +536,7 @@ def build_inventory_fact_sets(
             detections=by_host.get(host.host_id, ()),
             extra_facts=extras.get(host.host_id, ()),
         )
-    return result
+    return apply_inventory_fact_conflicts(result, inventory)
 
 
 def facts_to_serializable(

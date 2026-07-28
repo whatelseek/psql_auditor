@@ -8,6 +8,17 @@ family_id: host_facts
 detect:
   always: true
 version: "1.0"
+
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+
+required_facts:
+  - asset.id
+
+target:
+  scope: client
 ---
 # Чеклист инвентаризации фактов хоста
 

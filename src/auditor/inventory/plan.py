@@ -186,6 +186,11 @@ def generate_audit_plan(
             if d.status in {"requires_operator_decision", "considered"}
         ),
         *(
+            f"Resolve blocked framework {d.framework_id} for {d.target_id}: {d.reason}"
+            for d in decisions
+            if d.status == "blocked"
+        ),
+        *(
             f"Unsupported asset {d.target_id}: {d.reason}"
             for d in decisions
             if d.status == "unsupported"

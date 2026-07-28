@@ -8,6 +8,18 @@ family_id: windows_server
 detect:
   os_ids: [windows]
 version: "1.0"
+
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: windows
+
+required_facts:
+  - os.family
+
+target:
+  scope: host
 ---
 # Windows Server Security Audit Checklist
 

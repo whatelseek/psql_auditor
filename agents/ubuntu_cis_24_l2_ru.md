@@ -8,6 +8,22 @@ family_id: ubuntu_cis_24_l2
 detect:
   os_ids: [ubuntu]
 version: "24.0"
+
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+    - fact: os.name
+      operator: contains
+      value: ubuntu
+
+required_facts:
+  - os.family
+  - os.name
+
+target:
+  scope: host
 ---
 # CIS Ubuntu Linux 24.04 LTS v1.0.0 (Level 2 Server, RU)
 

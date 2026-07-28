@@ -2,12 +2,15 @@
 
 INPUT005-09 — strict applicability models and parse_applicability_meta.
 INPUT005-10 — deterministic predicate / applicability evaluation.
+INPUT005-12 — typed target scope and applicability fingerprint.
 
 Does not select frameworks. Does not synthesize predicates from legacy ``detect:``.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from typing import Any, Literal, Mapping
@@ -56,14 +59,67 @@ _RESULT_PRECEDENCE: dict[PredicateResult, int] = {
 
 CAPABILITY_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)+$")
 OPERATION_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
+SERVICE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+TargetScope = Literal[
+    "client",
+    "host",
+    "service",
+]
 
 _STRUCTURED_KEYS = frozenset(
     {
         "required_capabilities",
         "required_facts",
         "discovery_hints",
+        "target",
     }
 )
+
+
+def validate_service_id(value: str) -> str:
+    """Validate a service identifier used in ``target.service``."""
+    if not isinstance(value, str):
+        raise ValueError("invalid service id")
+    text = value.strip()
+    if not text:
+        raise ValueError("invalid service id")
+    if not SERVICE_ID_PATTERN.fullmatch(text):
+        raise ValueError("invalid service id")
+    if text.startswith("_") or text.endswith("_") or "__" in text:
+        raise ValueError("invalid service id")
+    if "/" in text or "\\" in text or ".." in text or "." in text:
+        raise ValueError("invalid service id")
+    return text
+
+
+class FrameworkTargetSpec(BaseModel):
+    """Declarative target identity for framework selection."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    scope: TargetScope = "host"
+    service: StrictStr = ""
+
+    @field_validator("service", mode="before")
+    @classmethod
+    def _coerce_service(cls, value: Any) -> Any:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        raise ValueError("invalid service id")
+
+    @model_validator(mode="after")
+    def _scope_service_rules(self) -> FrameworkTargetSpec:
+        if self.scope in {"client", "host"}:
+            if self.service:
+                raise ValueError(f"scope {self.scope!r} must have an empty service")
+            return self
+        if not self.service:
+            raise ValueError("scope 'service' requires a non-empty service id")
+        validate_service_id(self.service)
+        return self
 
 
 def _reject_dunder_segments(text: str, *, label: str) -> str:
@@ -335,6 +391,7 @@ class FrameworkApplicabilityMeta(BaseModel):
     required_capabilities: CapabilityRequirement = Field(default_factory=CapabilityRequirement)
     required_facts: tuple[StrictStr, ...] = ()
     discovery_hints: tuple[DiscoveryHint, ...] = ()
+    target: FrameworkTargetSpec = Field(default_factory=FrameworkTargetSpec)
     has_structured_applicability: bool = False
     metadata_valid: bool = True
     validation_errors: tuple[StrictStr, ...] = ()
@@ -359,6 +416,23 @@ class FrameworkApplicabilityMeta(BaseModel):
         if isinstance(value, list):
             return tuple(value)
         raise ValueError("discovery_hints must be a list")
+
+
+def applicability_fingerprint(meta: FrameworkApplicabilityMeta) -> str:
+    """Return a deterministic fingerprint of selection-relevant applicability metadata.
+
+    Includes applicability predicates, required capabilities, required facts, and
+    target scope. Excludes prose, titles, language, paths, and validation errors.
+    """
+    payload = {
+        "applicability": meta.applicability.model_dump(mode="json"),
+        "required_capabilities": meta.required_capabilities.model_dump(mode="json"),
+        "required_facts": list(meta.required_facts),
+        "target": meta.target.model_dump(mode="json"),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return f"app-{digest}"
 
 
 class ApplicabilityEvaluation(BaseModel):
@@ -702,11 +776,20 @@ def parse_applicability_meta(
         else:
             raise ValueError("discovery_hints must be a list")
 
+        target_raw = raw_front_matter.get("target")
+        if target_raw is None:
+            target = FrameworkTargetSpec()
+        elif isinstance(target_raw, Mapping):
+            target = FrameworkTargetSpec.model_validate(target_raw)
+        else:
+            raise ValueError("target must be a mapping when structured")
+
         return FrameworkApplicabilityMeta(
             applicability=applicability,
             required_capabilities=caps,
             required_facts=required_facts,
             discovery_hints=hints,
+            target=target,
             has_structured_applicability=True,
             metadata_valid=True,
             validation_errors=(),
