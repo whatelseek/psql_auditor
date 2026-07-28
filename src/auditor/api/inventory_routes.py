@@ -13,14 +13,17 @@ from auditor.domain.audit_plan import PlanConfirmationRejected
 from auditor.domain.audit_request import AuditRequestRejected
 from auditor.inventory.client_name import InvalidClientNameError
 from auditor.inventory.loaders import InventoryLoadError
-from auditor.inventory.plan import persist_plan, plan_confirmation_prompt
+from auditor.inventory.plan import plan_confirmation_prompt
+from auditor.inventory.plan_store import (
+    PlanRevisionStore,
+    PlanStoreError,
+    find_client_for_plan_revision,
+)
 from auditor.inventory.service import (
     analyze_client_inventory,
     astart_confirmed_audit,
     confirm_audit_plan,
-    load_plan,
     plan_to_audit_request_payload,
-    resolve_effective_inventory,
     validate_client_inventory,
 )
 
@@ -54,6 +57,22 @@ def _settings(request: Request):
     return runtime.settings
 
 
+def _plan_store_http_status(exc: PlanConfirmationRejected) -> int:
+    code = getattr(exc, "code", "")
+    if code in {
+        "plan_stale",
+        "audit_plan_stale",
+        "plan_revision_collision",
+        "invalid_plan_pointer",
+    }:
+        return 409
+    if code == "plan_revision_not_found":
+        return 404
+    if code == "plan_store_lock_failed":
+        return 503
+    return 400
+
+
 async def _read_analyze_body(request: Request) -> AnalyzeBody:
     try:
         payload = await request.json()
@@ -81,7 +100,12 @@ async def analyze_inventory(client_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except InventoryLoadError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    persist_plan(plan, _plans_dir(Path(settings.inventory_dir), client_id) / "latest.json")
+    except PlanStoreError as exc:
+        raise HTTPException(
+            status_code=_plan_store_http_status(exc),
+            detail=exc.to_dict(),
+        ) from exc
+    # analyze_client_inventory persists immutable revision + compatibility latest.
     return {
         "inventory_version": inventory.version.model_dump(),
         "plan_id": plan.plan_id,
@@ -120,27 +144,27 @@ async def create_audit_plan(client_id: str, request: Request) -> dict[str, Any]:
 @router.post("/audit-plans/{plan_id}/confirm")
 async def confirm_plan(plan_id: str, body: ConfirmBody, request: Request) -> dict[str, Any]:
     settings = _settings(request)
-    inventory_root = Path(settings.inventory_dir)
-    plan_path = None
-    client_name = ""
-    for client_dir in inventory_root.iterdir() if inventory_root.is_dir() else []:
-        candidate = client_dir / ".audit_plans" / "latest.json"
-        if candidate.is_file():
-            plan = load_plan(candidate)
-            if plan.plan_id == plan_id:
-                plan_path = candidate
-                client_name = client_dir.name
-                break
-    if plan_path is None:
-        raise HTTPException(status_code=404, detail=f"plan {plan_id!r} not found")
-
     try:
-        inventory = resolve_effective_inventory(settings.inventory_dir, client_name)
+        client_name, plans_root = find_client_for_plan_revision(
+            settings.inventory_dir,
+            plan_id=plan_id,
+            plan_revision_id=body.plan_revision_id,
+        )
+    except PlanStoreError as exc:
+        raise HTTPException(
+            status_code=_plan_store_http_status(exc),
+            detail=exc.to_dict(),
+        ) from exc
+
+    store = PlanRevisionStore(plans_root)
+    try:
+        snapshot = store.load_revision(body.plan_revision_id)
+        inventory = snapshot.effective_inventory
         if body.action == "approve" and body.start:
             started = await astart_confirmed_audit(
                 settings.inventory_dir,
                 client_name,
-                load_plan(plan_path),
+                snapshot.plan,
                 settings=settings,
                 agents_dir=settings.agents_dir,
                 note=body.note,
@@ -148,7 +172,6 @@ async def confirm_plan(plan_id: str, body: ConfirmBody, request: Request) -> dic
                 refresh_discovery=body.refresh_discovery,
                 expected_plan_revision_id=body.plan_revision_id,
             )
-            persist_plan(started["plan"], plan_path)
             return {
                 "plan": started["plan"].model_dump(),
                 "audit_run_id": started["audit_run_id"],
@@ -156,8 +179,11 @@ async def confirm_plan(plan_id: str, body: ConfirmBody, request: Request) -> dic
                 "audit_request": started["audit_request"],
             }
 
+        # Operator adjustments (exclude_*/add_framework) remain compatibility-only
+        # working-plan materializations (INPUT005-19 will introduce derived revisions).
+        store.assert_current(body.plan_revision_id)
         updated = confirm_audit_plan(
-            load_plan(plan_path),
+            snapshot.plan,
             action=body.action,
             host_ids=body.host_ids,
             framework_ids=body.framework_ids,
@@ -167,13 +193,18 @@ async def confirm_plan(plan_id: str, body: ConfirmBody, request: Request) -> dic
             client_name=client_name,
             expected_plan_revision_id=body.plan_revision_id,
         )
+        store.persist_latest_materialized_plan(
+            updated,
+            expected_plan_revision_id=body.plan_revision_id,
+        )
     except PlanConfirmationRejected as exc:
-        status = 409 if getattr(exc, "code", "") in {"plan_stale", "audit_plan_stale"} else 400
-        raise HTTPException(status_code=status, detail=exc.to_dict()) from exc
+        raise HTTPException(
+            status_code=_plan_store_http_status(exc),
+            detail=exc.to_dict(),
+        ) from exc
     except (InvalidClientNameError, InventoryLoadError, AuditRequestRejected) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    persist_plan(updated, plan_path)
     result: dict[str, Any] = {"plan": updated.model_dump()}
     if updated.status == "confirmed":
         client = get_client_registry(settings.evidence_dir).ensure_client(

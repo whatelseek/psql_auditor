@@ -22,14 +22,12 @@ from auditor.domain.audit_request import AuditRequestRejected
 from auditor.inventory.client_name import InvalidClientNameError
 from auditor.inventory.loaders import InventoryLoadError
 from auditor.inventory.plan import plan_confirmation_prompt
+from auditor.inventory.plan_store import PlanRevisionStore, PlanStoreError
 from auditor.inventory.service import (
     analyze_client_inventory,
     confirm_audit_plan,
     load_client_inventory,
-    load_plan,
-    persist_plan,
     reject_audit_launch,
-    resolve_effective_inventory,
     start_confirmed_audit,
     validate_client_inventory,
 )
@@ -75,10 +73,11 @@ def cmd_inventory_analyze(args: argparse.Namespace) -> int:
             discovery=not args.no_discovery,
             artifacts_root=settings.evidence_dir,
         )
-    except (InvalidClientNameError, InventoryLoadError) as exc:
+    except (InvalidClientNameError, InventoryLoadError, PlanStoreError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        if isinstance(exc, PlanStoreError) and exc.code == "plan_store_lock_failed":
+            return 5
         return 2
-    persist_plan(plan, plans / "latest.json")
     _print_json(
         {
             "inventory_version": inventory.version.model_dump(),
@@ -100,17 +99,32 @@ def cmd_inventory_analyze(args: argparse.Namespace) -> int:
 def cmd_audit_plan(args: argparse.Namespace) -> int:
     settings = load_settings()
     plans = _plans_dir(Path(settings.inventory_dir), args.client)
-    latest = plans / "latest.json"
-    if latest.is_file() and not args.refresh:
-        plan = load_plan(latest)
-        # Surface stale plans before the operator confirms.
+    store = PlanRevisionStore(plans)
+    if not args.refresh:
         try:
-            inventory = resolve_effective_inventory(settings.inventory_dir, args.client)
+            snapshot = store.load_latest()
+            plan = snapshot.plan
+            inventory = snapshot.effective_inventory
             from auditor.inventory.plan import assert_plan_matches_inventory
 
             assert_plan_matches_inventory(plan, inventory)
             source = load_client_inventory(settings.inventory_dir, args.client)
             assert_plan_matches_inventory(plan, source)
+        except PlanStoreError as exc:
+            if exc.code != "plan_revision_not_found":
+                print(f"error: {exc}", file=sys.stderr)
+                if exc.code == "plan_store_lock_failed":
+                    return 5
+                return 2
+            # No stored revision yet — generate one.
+            _inventory, plan = analyze_client_inventory(
+                settings.inventory_dir,
+                args.client,
+                agents_dir=settings.agents_dir,
+                persist_dir=plans,
+                discovery=not args.no_discovery,
+                artifacts_root=settings.evidence_dir,
+            )
         except PlanConfirmationRejected as exc:
             print(f"warning: {exc}", file=sys.stderr)
             print("Re-run with --refresh to regenerate the plan.", file=sys.stderr)
@@ -118,48 +132,68 @@ def cmd_audit_plan(args: argparse.Namespace) -> int:
         except (InvalidClientNameError, InventoryLoadError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
-    else:
-        _inventory, plan = analyze_client_inventory(
-            settings.inventory_dir,
-            args.client,
-            agents_dir=settings.agents_dir,
-            persist_dir=plans,
-            discovery=not args.no_discovery,
-            artifacts_root=settings.evidence_dir,
-        )
-        persist_plan(plan, latest)
+        else:
+            print(plan_confirmation_prompt(plan))
+            print()
+            _print_json(plan.model_dump())
+            return 0
+        print(plan_confirmation_prompt(plan))
+        print()
+        _print_json(plan.model_dump())
+        return 0
+
+    _inventory, plan = analyze_client_inventory(
+        settings.inventory_dir,
+        args.client,
+        agents_dir=settings.agents_dir,
+        persist_dir=plans,
+        discovery=not args.no_discovery,
+        artifacts_root=settings.evidence_dir,
+    )
     print(plan_confirmation_prompt(plan))
     print()
     _print_json(plan.model_dump())
     return 0
 
 
+def _cli_plan_error(exc: PlanConfirmationRejected) -> int:
+    print(f"error: {exc}", file=sys.stderr)
+    code = getattr(exc, "code", "")
+    if code in {"plan_stale", "audit_plan_stale"}:
+        print("Re-run `inventory analyze` / `audit plan --refresh`.", file=sys.stderr)
+        return 4
+    if code in {"plan_revision_not_found", "invalid_plan_pointer"}:
+        return 2
+    if code == "plan_store_lock_failed":
+        return 5
+    return 3
+
+
 def cmd_audit_start(args: argparse.Namespace) -> int:
     settings = load_settings()
     plans = _plans_dir(Path(settings.inventory_dir), args.client)
-    latest = plans / "latest.json"
-    if not latest.is_file():
-        print(
-            "error: no draft plan found; run `audit plan` / `inventory analyze` first",
-            file=sys.stderr,
-        )
-        return 2
-    plan = load_plan(latest)
+    store = PlanRevisionStore(plans)
+    try:
+        snapshot = store.load_revision(args.plan_revision_id)
+    except PlanConfirmationRejected as exc:
+        return _cli_plan_error(exc)
+
+    plan = snapshot.plan
     if args.reject:
         try:
+            store.assert_current(args.plan_revision_id)
             plan = confirm_audit_plan(
                 plan,
                 action="reject",
                 note=args.note or "rejected via CLI",
                 expected_plan_revision_id=args.plan_revision_id,
             )
+            store.persist_latest_materialized_plan(
+                plan,
+                expected_plan_revision_id=args.plan_revision_id,
+            )
         except PlanConfirmationRejected as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            if getattr(exc, "code", "") in {"plan_stale", "audit_plan_stale"}:
-                print("Re-run `inventory analyze` / `audit plan --refresh`.", file=sys.stderr)
-                return 4
-            return 3
-        persist_plan(plan, latest)
+            return _cli_plan_error(exc)
         print("audit launch rejected by operator")
         return 1
     if not args.confirm:
@@ -183,11 +217,7 @@ def cmd_audit_start(args: argparse.Namespace) -> int:
             expected_plan_revision_id=args.plan_revision_id,
         )
     except PlanConfirmationRejected as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        if getattr(exc, "code", "") in {"plan_stale", "audit_plan_stale"}:
-            print("Re-run `inventory analyze` / `audit plan --refresh`.", file=sys.stderr)
-            return 4
-        return 3
+        return _cli_plan_error(exc)
     except (InvalidClientNameError, InventoryLoadError, AuditRequestRejected) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -197,8 +227,6 @@ def cmd_audit_start(args: argparse.Namespace) -> int:
         json.dumps(started["audit_request"], indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    if started.get("plan") is not None:
-        persist_plan(started["plan"], latest)
     _print_json(
         {
             "status": started["status"],

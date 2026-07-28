@@ -50,6 +50,10 @@ from auditor.inventory.plan import (
 from auditor.inventory.plan import (
     generate_audit_plan as build_plan,
 )
+from auditor.inventory.plan_store import (
+    PlanRevisionStore,
+    PlanStoreError,
+)
 from auditor.inventory.preflight import (
     build_preflight_revision,
     load_latest_preflight,
@@ -107,6 +111,16 @@ def load_effective_inventory(
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
     return ClientInventory.model_validate(data)
+
+
+def load_effective_inventory_revision(
+    inventory_dir: Path | str,
+    client_name: str,
+    plan_revision_id: str,
+) -> ClientInventory:
+    """Load the effective inventory pinned to an immutable plan revision."""
+    store = PlanRevisionStore(plans_dir_for(inventory_dir, client_name))
+    return store.load_revision(plan_revision_id).effective_inventory
 
 
 def resolve_effective_inventory(
@@ -224,14 +238,15 @@ def analyze_client_inventory(
         effective_facts_hash=revision.effective_facts_hash,
         preflight_revision_id=revision.revision_id,
     )
-    # Always persist effective inventory next to plans when possible so
-    # confirm/start validate against discovery-reconciled facts.
+    # Immutable revision store is the source of truth; latest.* are views.
     plans_root = (
         Path(persist_dir) if persist_dir is not None else plans_dir_for(inventory_dir, client_name)
     )
-    persist_effective_inventory(inventory, plans_root)
-    if persist_dir is not None:
-        persist_plan(plan, plans_root / f"{plan.plan_id}.json")
+    PlanRevisionStore(plans_root).persist_revision(
+        plan,
+        inventory,
+        make_latest=True,
+    )
     return inventory, plan
 
 
@@ -281,6 +296,10 @@ def confirm_audit_plan(
         if inventory_dir is not None and client_name is not None:
             source = load_client_inventory(inventory_dir, client_name)
             assert_plan_matches_inventory(plan, source)
+            if expected_plan_revision_id is not None:
+                PlanRevisionStore(plans_dir_for(inventory_dir, client_name)).assert_current(
+                    expected_plan_revision_id
+                )
 
         current = inventory
         if current is None:
@@ -289,7 +308,14 @@ def confirm_audit_plan(
                     "inventory_dir and client_name are required to confirm a plan",
                     code="missing_inventory_context",
                 )
-            current = resolve_effective_inventory(inventory_dir, client_name)
+            if expected_plan_revision_id is not None:
+                current = load_effective_inventory_revision(
+                    inventory_dir,
+                    client_name,
+                    expected_plan_revision_id,
+                )
+            else:
+                current = resolve_effective_inventory(inventory_dir, client_name)
         assert_plan_matches_inventory(plan, current)
         assert_plan_matches_tool_registry(plan)
         from auditor.inventory.plan import framework_selection_hash
@@ -457,14 +483,31 @@ async def astart_confirmed_audit(
     settings = settings or load_settings()
     inventory_dir = Path(inventory_dir)
     client_name = validate_client_name(client_name)
+    store = PlanRevisionStore(plans_dir_for(inventory_dir, client_name))
 
     if expected_plan_revision_id is not None:
-        assert_plan_revision(plan, expected_plan_revision_id)
+        snapshot = store.load_revision(expected_plan_revision_id)
+        assert_plan_revision(snapshot.plan, expected_plan_revision_id)
+        inventory = snapshot.effective_inventory
+        # Immutable revision files stay draft forever; confirmation lives in the
+        # compatibility working plan / caller state (INPUT005-19 for derived revs).
+        if plan.status == "confirmed" and plan.plan_revision_id == snapshot.plan.plan_revision_id:
+            plan = snapshot.plan.model_copy(
+                update={
+                    "status": "confirmed",
+                    "confirmed_at": plan.confirmed_at,
+                    "confirmation_note": plan.confirmation_note,
+                    "targets": plan.targets,
+                }
+            )
+        else:
+            plan = snapshot.plan
+    else:
+        inventory = resolve_effective_inventory(inventory_dir, client_name)
 
-    # Source inventory identity check + effective inventory for plan validation.
+    # Source inventory identity check + revision/effective inventory for validation.
     source = load_client_inventory(inventory_dir, client_name)
     assert_plan_matches_inventory(plan, source)
-    inventory = resolve_effective_inventory(inventory_dir, client_name)
     assert_plan_matches_inventory(plan, inventory)
     assert_plan_matches_tool_registry(plan)
 
@@ -473,7 +516,8 @@ async def astart_confirmed_audit(
 
     if refresh_discovery or discoverer is not None:
         # Explicit refresh only — compare against the confirmed plan hashes.
-        inventory, refreshed_plan = analyze_client_inventory(
+        # Refresh may advance latest; claim must happen against the original revision.
+        _ref_inventory, refreshed_plan = analyze_client_inventory(
             inventory_dir,
             client_name,
             agents_dir=agents_dir or settings.agents_dir,
@@ -487,17 +531,28 @@ async def astart_confirmed_audit(
             discovery_result_hash=refreshed_plan.discovery_result_hash,
             effective_facts_hash=refreshed_plan.effective_facts_hash,
         )
+        # Keep execution tied to the claimed revision inventory, not the refreshed global.
+        if expected_plan_revision_id is not None:
+            inventory = store.load_revision(expected_plan_revision_id).effective_inventory
+        else:
+            inventory = _ref_inventory
     else:
         # Stale check against latest stored preflight without re-running discovery.
-        latest = load_latest_preflight(settings.evidence_dir, client_name)
-        if latest is not None and latest.inventory_version_id == plan.inventory_version_id:
-            assert_plan_matches_preflight(
-                plan,
-                discovery_result_hash=latest.discovery_result_hash,
-                effective_facts_hash=latest.effective_facts_hash,
-            )
+        # Already-claimed revisions stay executable against their immutable snapshot
+        # even if a newer analyze advanced the latest preflight pointer.
+        if not (plan.status == "confirmed" and expected_plan_revision_id is not None):
+            latest = load_latest_preflight(settings.evidence_dir, client_name)
+            if latest is not None and latest.inventory_version_id == plan.inventory_version_id:
+                assert_plan_matches_preflight(
+                    plan,
+                    discovery_result_hash=latest.discovery_result_hash,
+                    effective_facts_hash=latest.effective_facts_hash,
+                )
 
     if plan.status != "confirmed":
+        # Draft plans must still be the current latest pointer before claiming.
+        if expected_plan_revision_id is not None:
+            store.assert_current(expected_plan_revision_id)
         plan = confirm_audit_plan(
             plan,
             action="approve",
@@ -507,7 +562,15 @@ async def astart_confirmed_audit(
             client_name=client_name,
             expected_plan_revision_id=expected_plan_revision_id,
         )
+        if expected_plan_revision_id is not None:
+            # Materialize confirmed status into compatibility latest.json under lock.
+            # Do not advance/replace the pointer after a newer analyze.
+            store.persist_latest_materialized_plan(
+                plan,
+                expected_plan_revision_id=expected_plan_revision_id,
+            )
     else:
+        # Already claimed earlier; remain tied to the immutable revision inventory.
         assert_plan_matches_inventory(plan, inventory)
         assert_plan_matches_tool_registry(plan)
 
@@ -620,7 +683,9 @@ __all__ = [
     "generate_audit_plan",
     "load_client_inventory",
     "load_effective_inventory",
+    "load_effective_inventory_revision",
     "load_plan",
+    "PlanStoreError",
     "persist_effective_inventory",
     "persist_plan",
     "plan_confirmation_prompt",
