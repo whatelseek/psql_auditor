@@ -330,8 +330,22 @@ def select_frameworks_dynamic(
         )
 
     inconsistent_family_ids = set(inconsistent)
-    # Skip normal resolution for all variants belonging to inconsistent families.
-    active_candidates = [c for c in candidates if c.family_id not in inconsistent_family_ids]
+    # Families with at least one valid structured variant suppress legacy production
+    # decisions regardless of target scope (FIX2).
+    valid_structured_family_ids = {
+        variant.family_id for variant in catalog if variant.metadata_state == "structured"
+    }
+    # Skip inconsistent families entirely, and suppress legacy variants when a
+    # valid structured sibling exists in the same family.
+    active_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.family_id not in inconsistent_family_ids
+        and not (
+            candidate.metadata_state == "legacy"
+            and candidate.family_id in valid_structured_family_ids
+        )
+    ]
 
     resolved: list[_ResolvedVariant] = []
     client_groups: dict[tuple[str, str, str, str], list[FrameworkCandidate]] = defaultdict(list)
@@ -436,20 +450,38 @@ def select_frameworks_dynamic(
 
     for (target_id, _family_id), variants in sorted(by_family.items()):
         structured_valid = [v for v in variants if v.structured_valid]
-        # Prefer structured variants; suppress legacy production decisions when
-        # a valid structured variant exists for the same family/target.
-        pool = structured_valid or list(variants)
-        picked = _pick_language_variant(pool, preferred)
-        decisions.append(
-            FrameworkSelectionDecision(
-                framework_id=picked.framework_id,
-                framework_version=picked.framework_version,
-                target_id=target_id,
-                reason=picked.reason,
-                status=picked.status,  # type: ignore[arg-type]
-                missing_capabilities=picked.missing_capabilities,
+        if structured_valid:
+            # Prefer structured variants; legacy already filtered at family level.
+            picked = _pick_language_variant(structured_valid, preferred)
+            decisions.append(
+                FrameworkSelectionDecision(
+                    framework_id=picked.framework_id,
+                    framework_version=picked.framework_version,
+                    target_id=target_id,
+                    reason=picked.reason,
+                    status=picked.status,  # type: ignore[arg-type]
+                    missing_capabilities=picked.missing_capabilities,
+                )
             )
-        )
+            continue
+
+        # No valid structured sibling: keep invalid and legacy visible as separate
+        # production decisions (do not collapse across framework_id by language).
+        by_framework: dict[str, list[_ResolvedVariant]] = defaultdict(list)
+        for variant in variants:
+            by_framework[variant.framework_id].append(variant)
+        for framework_id in sorted(by_framework):
+            picked = _pick_language_variant(by_framework[framework_id], preferred)
+            decisions.append(
+                FrameworkSelectionDecision(
+                    framework_id=picked.framework_id,
+                    framework_version=picked.framework_version,
+                    target_id=target_id,
+                    reason=picked.reason,
+                    status=picked.status,  # type: ignore[arg-type]
+                    missing_capabilities=picked.missing_capabilities,
+                )
+            )
 
     family_for = {(v.target_id, v.framework_id): v.family_id for v in resolved}
     for family_id, representative in inconsistent.items():

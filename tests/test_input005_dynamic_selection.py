@@ -2163,3 +2163,457 @@ target:
     assert plan1.unresolved_questions == plan2.unresolved_questions
     assert plan1.framework_hash == plan2.framework_hash
     assert plan1.plan_revision_id == plan2.plan_revision_id
+
+
+# ---------------------------------------------------------------------------
+# INPUT005-12/13-FIX2 — suppress legacy across target scopes
+# ---------------------------------------------------------------------------
+
+
+def test_structured_client_suppresses_legacy_host_decisions(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "client_structured.md",
+        frontmatter="""
+id: client_structured
+version: "1.0"
+family_id: mixed_client_family
+language: en
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+target:
+  scope: client
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "client_legacy.md",
+        frontmatter="""
+id: client_legacy
+version: "1.0"
+family_id: mixed_client_family
+language: ru
+detect:
+  always: true
+""".strip(),
+    )
+    inventory = _inventory([_host(host_id="host-01"), _host(host_id="host-02")])
+    facts = build_inventory_fact_sets(inventory, ())
+    candidates = evaluate_framework_candidates(
+        fact_sets=facts, agents_dir=agents, registry=_empty_registry()
+    )
+    assert sum(1 for c in candidates if c.framework_id == "client_structured") == 2
+    assert sum(1 for c in candidates if c.framework_id == "client_legacy") == 2
+
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    family = [d for d in decisions if d.framework_id in {"client_structured", "client_legacy"}]
+    assert len(family) == 1
+    assert family[0].framework_id == "client_structured"
+    assert family[0].target_id == "client:client-a"
+    assert family[0].status == "selected"
+    assert not any(d.framework_id == "client_legacy" for d in decisions)
+    assert not any(
+        d.framework_id == "client_legacy" and d.target_id in {"host-01", "host-02"}
+        for d in decisions
+    )
+
+    plan = generate_audit_plan(inventory, [], agents_dir=agents)
+    assert any(
+        t.framework_id == "client_structured" and t.host_id == "host-01" for t in plan.targets
+    )
+    assert any(
+        t.framework_id == "client_structured" and t.host_id == "host-02" for t in plan.targets
+    )
+    assert not any(t.framework_id == "client_legacy" for t in plan.targets)
+
+
+def test_structured_service_suppresses_legacy_host_decision(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "service_structured.md",
+        frontmatter="""
+id: service_structured
+version: "1.0"
+family_id: mixed_service_family
+language: en
+applicability:
+  all:
+    - fact: technology.example.status
+      operator: equals
+      value: confirmed
+required_facts:
+  - technology.example.status
+target:
+  scope: service
+  service: example
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "service_legacy.md",
+        frontmatter="""
+id: service_legacy
+version: "1.0"
+family_id: mixed_service_family
+language: ru
+detect:
+  always: true
+""".strip(),
+    )
+    inventory = _inventory([_host()])
+    facts = {
+        "host-01": HostFactSet(
+            host_id="host-01",
+            facts=(
+                NormalizedFact(
+                    fact="asset.id",
+                    value="host-01",
+                    confidence=1.0,
+                    source_type="inventory",
+                    source_ref="inventory:inv-1:host-01",
+                ),
+                NormalizedFact(
+                    fact="technology.example.status",
+                    value="confirmed",
+                    confidence=1.0,
+                    source_type="discovery",
+                    source_ref="detection:host-01:example",
+                ),
+            ),
+        )
+    }
+    candidates = evaluate_framework_candidates(
+        fact_sets=facts, agents_dir=agents, registry=_empty_registry()
+    )
+    assert any(c.framework_id == "service_structured" for c in candidates)
+    assert any(c.framework_id == "service_legacy" for c in candidates)
+
+    decisions = select_frameworks_for_inventory(
+        inventory,
+        [],
+        agents_dir=agents,
+        registry=_empty_registry(),
+        host_facts=facts,
+    )
+    assert any(
+        d.framework_id == "service_structured"
+        and d.target_id == "host-01/example"
+        and d.status == "selected"
+        for d in decisions
+    )
+    assert not any(d.framework_id == "service_legacy" for d in decisions)
+
+
+def test_structured_not_applicable_does_not_fall_back_to_legacy(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "struct.md",
+        frontmatter="""
+id: na_structured
+version: "1.0"
+family_id: na_family
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: windows
+required_facts:
+  - os.family
+target:
+  scope: host
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "legacy.md",
+        frontmatter="""
+id: na_legacy
+version: "1.0"
+family_id: na_family
+language: ru
+detect:
+  always: true
+""".strip(),
+    )
+    inventory = _inventory([_host(os_family="linux", os_name="Ubuntu")])
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    family = [d for d in decisions if d.framework_id in {"na_structured", "na_legacy"}]
+    assert len(family) == 1
+    assert family[0].framework_id == "na_structured"
+    assert family[0].status == "not_applicable"
+    assert not any(d.framework_id == "na_legacy" for d in decisions)
+    assert not any(d.status == "selected" and d.framework_id == "na_legacy" for d in decisions)
+
+
+def test_structured_missing_evidence_does_not_fall_back(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "struct.md",
+        frontmatter="""
+id: me_structured
+version: "1.0"
+family_id: me_family
+language: en
+applicability:
+  all:
+    - fact: technology.example.status
+      operator: equals
+      value: confirmed
+required_facts:
+  - technology.example.status
+target:
+  scope: host
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "legacy.md",
+        frontmatter="""
+id: me_legacy
+version: "1.0"
+family_id: me_family
+language: ru
+detect:
+  always: true
+""".strip(),
+    )
+    inventory = _inventory([_host()])
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    family = [d for d in decisions if d.framework_id in {"me_structured", "me_legacy"}]
+    assert len(family) == 1
+    assert family[0].framework_id == "me_structured"
+    assert family[0].status == "requires_operator_decision"
+    assert not any(d.framework_id == "me_legacy" for d in decisions)
+
+
+def test_structured_missing_capability_does_not_fall_back(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "struct.md",
+        frontmatter="""
+id: cap_structured
+version: "1.0"
+family_id: cap_family
+language: en
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_capabilities:
+  all_of:
+    - example.read
+required_facts:
+  - asset.id
+target:
+  scope: host
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "legacy.md",
+        frontmatter="""
+id: cap_legacy
+version: "1.0"
+family_id: cap_family
+language: ru
+detect:
+  always: true
+""".strip(),
+    )
+    inventory = _inventory([_host()])
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    family = [d for d in decisions if d.framework_id in {"cap_structured", "cap_legacy"}]
+    assert len(family) == 1
+    assert family[0].framework_id == "cap_structured"
+    assert family[0].status == "blocked"
+    assert family[0].reason == ("Required authorized capability is unavailable for the target")
+    assert not any(d.framework_id == "cap_legacy" for d in decisions)
+
+
+def test_invalid_structured_does_not_suppress_legacy(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "invalid.md",
+        frontmatter="""
+id: invalid_structured
+version: "1.0"
+family_id: invalid_legacy_family
+language: en
+applicability:
+  all:
+    - fact: INVALID KEY
+      operator: equals
+      value: x
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "legacy.md",
+        frontmatter="""
+id: valid_legacy
+version: "1.0"
+family_id: invalid_legacy_family
+language: ru
+detect:
+  always: true
+""".strip(),
+    )
+    inventory = _inventory([_host()])
+    facts = build_inventory_fact_sets(inventory, ())
+    candidates = evaluate_framework_candidates(
+        fact_sets=facts, agents_dir=agents, registry=_empty_registry()
+    )
+    assert any(c.framework_id == "invalid_structured" for c in candidates)
+    assert any(c.framework_id == "valid_legacy" for c in candidates)
+
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    by_id = {
+        d.framework_id: d
+        for d in decisions
+        if d.framework_id
+        in {
+            "invalid_structured",
+            "valid_legacy",
+        }
+    }
+    assert by_id["invalid_structured"].status == "blocked"
+    assert by_id["valid_legacy"].status == "requires_operator_decision"
+    assert not any(d.status == "selected" for d in by_id.values())
+
+
+def test_inconsistent_structured_family_suppresses_legacy(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    shared = """
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+"""
+    _write_fw(
+        agents,
+        "en.md",
+        frontmatter=f"""
+id: inc_en
+version: "1.0"
+family_id: inc_legacy_family
+language: en
+{shared}
+target:
+  scope: host
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "ru.md",
+        frontmatter=f"""
+id: inc_ru
+version: "1.0"
+family_id: inc_legacy_family
+language: ru
+{shared}
+target:
+  scope: service
+  service: example
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "legacy.md",
+        frontmatter="""
+id: inc_legacy
+version: "1.0"
+family_id: inc_legacy_family
+language: any
+detect:
+  always: true
+""".strip(),
+    )
+    inventory = _inventory([_host()])
+    decisions = select_frameworks_for_inventory(
+        inventory, [], agents_dir=agents, registry=_empty_registry()
+    )
+    family = [d for d in decisions if d.framework_id in {"inc_en", "inc_ru", "inc_legacy"}]
+    assert len(family) == 1
+    assert family[0].status == "blocked"
+    assert family[0].target_id == "client:client-a"
+    assert family[0].reason == (
+        "Framework family variants have inconsistent applicability metadata"
+    )
+    assert not any(d.framework_id == "inc_legacy" for d in decisions)
+    assert not any(d.status == "selected" for d in family)
+
+
+def test_legacy_suppression_deterministic_output(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "client_structured.md",
+        frontmatter="""
+id: det_structured
+version: "1.0"
+family_id: det_family
+language: en
+applicability:
+  all:
+    - fact: asset.id
+      operator: exists
+required_facts:
+  - asset.id
+target:
+  scope: client
+""".strip(),
+    )
+    _write_fw(
+        agents,
+        "client_legacy.md",
+        frontmatter="""
+id: det_legacy
+version: "1.0"
+family_id: det_family
+language: ru
+detect:
+  always: true
+""".strip(),
+    )
+    inventory = _inventory([_host(host_id="host-01"), _host(host_id="host-02")])
+    plan1 = generate_audit_plan(inventory, [], agents_dir=agents)
+    plan2 = generate_audit_plan(inventory, [], agents_dir=agents)
+    assert plan1.framework_decisions == plan2.framework_decisions
+    assert [d.model_dump(mode="json") for d in plan1.framework_decisions] == [
+        d.model_dump(mode="json") for d in plan2.framework_decisions
+    ]
+    assert plan1.targets == plan2.targets
+    assert plan1.unresolved_questions == plan2.unresolved_questions
+    assert plan1.framework_hash == plan2.framework_hash
+    assert plan1.plan_revision_id == plan2.plan_revision_id
