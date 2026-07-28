@@ -726,7 +726,6 @@ async def test_execute_tool_calls_rejects_stale_run_snapshot(tmp_path: Path) -> 
     assert messages[0].content.startswith("Tool unauthorized:")
 
 
-
 @pytest.mark.unit
 def test_registry_cache_isolates_directories(tmp_path: Path) -> None:
     """Process cache must not mix catalogs from different tools directories."""

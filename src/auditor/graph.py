@@ -166,9 +166,7 @@ class AuditorGraph:
         self.results_store = results_store
         self._owns_task_registry = task_registry is None
         self.task_registry = task_registry or TaskRegistry()
-        self.tool_registry = tool_registry or get_tool_registry(
-            tools_dir=self.settings.tools_dir
-        )
+        self.tool_registry = tool_registry or get_tool_registry(tools_dir=self.settings.tools_dir)
         self.tools = _all_tools(self.mcp_pool, tool_registry=self.tool_registry)
         self.tools_by_name = {t.name: t for t in self.tools}
         self._evidence = EvidenceRegistry()
