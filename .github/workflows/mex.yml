@@ -4,17 +4,21 @@ on:
   push:
     paths:
       - '.mex/**'
+      - '.cursor/**'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/mex.yml'
       - 'src/**'
+      - 'tests/**'
   pull_request:
     paths:
       - '.mex/**'
+      - '.cursor/**'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/mex.yml'
       - 'src/**'
+      - 'tests/**'
   workflow_dispatch:
 
 jobs:
