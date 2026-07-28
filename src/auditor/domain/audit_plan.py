@@ -19,6 +19,7 @@ from pydantic import (
     field_validator,
 )
 
+from auditor.domain.discovery_plan import DiscoveryPlanStep
 from auditor.domain.inventory import (
     FrameworkSelectionDecision,
     TechnologyDetection,
@@ -95,6 +96,10 @@ class AuditPlan(BaseModel):
     framework_hash: StrictStr = ""
     tool_catalog_hash: StrictStr = ""
     capability_policy_hash: StrictStr = ""
+    discovery_plan_id: StrictStr = ""
+    discovery_plan_hash: StrictStr = ""
+    framework_catalog_hash: StrictStr = ""
+    discovery_steps: tuple[DiscoveryPlanStep, ...] = ()
     status: PlanStatus = "draft"
     targets: tuple[AuditPlanTarget, ...] = ()
     framework_decisions: tuple[FrameworkSelectionDecision, ...] = ()
