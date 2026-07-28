@@ -1,0 +1,21 @@
+---
+description: Use MEX architectural memory before repository work
+alwaysApply: true
+---
+
+Before working on the repository:
+
+1. Read `.mex/AGENTS.md`.
+2. Read `.mex/ROUTER.md`.
+3. Load only the context files selected by the router.
+4. Check `.mex/patterns/INDEX.md` before implementation.
+5. Prefer MEX graph queries over reading complete files.
+6. Before changing an existing symbol, inspect its impact.
+7. After architectural changes, update the relevant `.mex/context/*.md`.
+8. Before completing a task, run:
+
+   npm run mex:graph
+   npm run mex:check
+
+Do not store credentials, audit evidence, customer data, reports, tokens, or secrets in `.mex/`.
+Do not load the whole `.mex` directory into context.
