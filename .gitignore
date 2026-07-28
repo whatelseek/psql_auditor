@@ -19,3 +19,10 @@ dist/
 build/
 .DS_Store
 
+
+# MEX generated graph database (keep Markdown under .mex/)
+.mex/graph.db
+.mex/*.db
+.mex/*.db-shm
+.mex/*.db-wal
+node_modules/

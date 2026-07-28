@@ -1,0 +1,42 @@
+name: mex
+
+on:
+  push:
+    paths:
+      - '.mex/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/mex.yml'
+      - 'src/**'
+  pull_request:
+    paths:
+      - '.mex/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/mex.yml'
+      - 'src/**'
+  workflow_dispatch:
+
+jobs:
+  mex-check:
+    name: mex graph + check (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install mex-agent (pinned)
+        run: npm ci
+
+      - name: Build code graph
+        run: npm run mex:graph
+
+      - name: Run mex check
+        run: npm run mex:check

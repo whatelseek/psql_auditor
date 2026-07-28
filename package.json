@@ -1,0 +1,17 @@
+{
+  "name": "psql-auditor",
+  "private": true,
+  "description": "Infrastructure Auditor — MEX architectural memory only (not audit runtime data)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "mex:setup": "mex setup",
+    "mex:graph": "mex graph",
+    "mex:check": "mex check",
+    "mex:sync": "mex sync"
+  },
+  "devDependencies": {
+    "mex-agent": "0.7.0"
+  }
+}
