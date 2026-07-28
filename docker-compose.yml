@@ -46,6 +46,7 @@ services:
       MEMORY_DIR: /app/memory
       MEMORY_ENABLED: ${MEMORY_ENABLED:-true}
       MEMORY_LEARN: ${MEMORY_LEARN:-true}
+      TOOLS_DIR: /app/tools
       EVIDENCE_DIR: /app/artifacts
       HITL_ENABLED: ${HITL_ENABLED:-false}
       ARCHIVE_ENABLED: ${ARCHIVE_ENABLED:-true}
@@ -74,6 +75,7 @@ services:
     volumes:
       - ./agents:/app/agents:ro
       - ./mcps:/app/mcps:ro
+      - ./tools:/app/tools:ro
       - ./memory:/app/memory
       - ./artifacts:/app/artifacts
       - ./secrets:/app/secrets:ro

@@ -724,3 +724,129 @@ async def test_execute_tool_calls_rejects_stale_run_snapshot(tmp_path: Path) -> 
     )
     assert not tool.called
     assert messages[0].content.startswith("Tool unauthorized:")
+
+
+@pytest.mark.unit
+def test_registry_cache_isolates_directories(tmp_path: Path) -> None:
+    """Process cache must not mix catalogs from different tools directories."""
+    root_a = tmp_path / "tools_a"
+    root_b = tmp_path / "tools_b"
+    for root, desc in ((root_a, "catalog-a"), (root_b, "catalog-b")):
+        catalog = root / "catalog"
+        payload_run = _valid_ssh_manifest("ssh_run")
+        payload_run["description"] = desc
+        _write_manifest(catalog, "ssh_run", payload_run)
+        _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+        _write_policy(
+            root,
+            "poc_audit_v1",
+            {
+                "version": "1.0.0",
+                "profile": "poc_audit_v1",
+                "readonly_required": True,
+                "allowed_tools": ["ssh_run", "ssh_read_file"],
+                "denied_tools": [],
+                "allowed_transports": ["ssh"],
+                "max_output_chars": 6000,
+                "require_inventory_credentials": True,
+            },
+        )
+
+    registry_a = get_tool_registry(tools_dir=root_a, profile="poc_audit_v1")
+    registry_b = get_tool_registry(tools_dir=root_b, profile="poc_audit_v1")
+    assert registry_a is not registry_b
+    assert registry_a.catalog_hash != registry_b.catalog_hash
+    assert get_tool_registry(tools_dir=root_a, profile="poc_audit_v1") is registry_a
+
+
+@pytest.mark.unit
+def test_validate_rejects_tampered_injected_adapter(tmp_path: Path) -> None:
+    """On-disk snapshot must win over mutated in-memory adapter fields."""
+    from dataclasses import replace
+
+    from auditor.tool_registry import (
+        RuntimeToolCatalogError,
+        load_tool_registry,
+        validate_runtime_tool_registry,
+    )
+
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    _write_manifest(catalog, "ssh_run", _valid_ssh_manifest("ssh_run"))
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": ["ssh_run", "ssh_read_file"],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 6000,
+            "require_inventory_credentials": True,
+        },
+    )
+    registry = load_tool_registry(root, profile="poc_audit_v1")
+    manifest = registry.get("ssh_run")
+    assert manifest is not None
+    registry.tools["ssh_run"] = replace(
+        manifest,
+        adapter="auditor.tools.ssh:invoke_ssh_read_file",
+    )
+    with pytest.raises(RuntimeToolCatalogError) as exc_info:
+        validate_runtime_tool_registry(
+            registry,
+            tools_dir=root,
+            expected_profile="poc_audit_v1",
+        )
+    assert exc_info.value.code == "registry_snapshot_mismatch"
+    assert exc_info.value.tool_id == "ssh_run"
+    assert "invoke_ssh_read_file" not in str(exc_info.value)
+
+
+@pytest.mark.unit
+def test_snapshot_rejects_cleared_validation_issues(tmp_path: Path) -> None:
+    """issues=() on an invalid on-disk manifest must not pass snapshot equality."""
+    from dataclasses import replace
+
+    from auditor.tool_registry import (
+        RuntimeToolCatalogError,
+        load_tool_registry,
+        validate_runtime_tool_registry,
+    )
+
+    root = tmp_path / "tools"
+    catalog = root / "catalog"
+    payload = _valid_ssh_manifest("ssh_run")
+    payload["timeout_seconds"] = "not-a-number"
+    _write_manifest(catalog, "ssh_run", payload)
+    _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+    _write_policy(
+        root,
+        "poc_audit_v1",
+        {
+            "version": "1.0.0",
+            "profile": "poc_audit_v1",
+            "readonly_required": True,
+            "allowed_tools": ["ssh_run", "ssh_read_file"],
+            "denied_tools": [],
+            "allowed_transports": ["ssh"],
+            "max_output_chars": 6000,
+            "require_inventory_credentials": True,
+        },
+    )
+    registry = load_tool_registry(root, profile="poc_audit_v1")
+    manifest = registry.get("ssh_run")
+    assert manifest is not None
+    assert any(i.level == "error" for i in manifest.issues)
+    registry.tools["ssh_run"] = replace(manifest, issues=(), enabled=True)
+    with pytest.raises(RuntimeToolCatalogError) as exc_info:
+        validate_runtime_tool_registry(
+            registry,
+            tools_dir=root,
+            expected_profile="poc_audit_v1",
+        )
+    assert exc_info.value.code == "registry_snapshot_mismatch"
+    assert exc_info.value.tool_id == "ssh_run"

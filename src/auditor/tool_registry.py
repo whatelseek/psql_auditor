@@ -12,9 +12,9 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, NoReturn
 
 from auditor.domain.audit_request import POC_TOOL_PROFILE
 
@@ -219,6 +219,29 @@ class ToolNotAuthorized(ValueError):
     def __init__(self, message: str, *, code: str = "tool_unauthorized") -> None:
         self.code = code
         super().__init__(message)
+
+
+class RuntimeToolCatalogError(RuntimeError):
+    """Raised when the runtime tool catalog/policy fails startup validation."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        tool_id: str = "",
+        catalog_path: str = "",
+        policy_profile: str = "",
+    ) -> None:
+        self.code = code
+        self.tool_id = tool_id
+        self.catalog_path = catalog_path
+        self.policy_profile = policy_profile
+        super().__init__(message)
+
+
+# POC profile requires these SSH tools to be authorized and LangChain-bindable.
+REQUIRED_POC_SSH_TOOL_IDS: tuple[str, ...] = ("ssh_run", "ssh_read_file")
 
 
 def default_tools_dir() -> Path:
@@ -805,8 +828,16 @@ def load_tool_registry(
     )
 
 
-# Process-level cache for the default cwd catalog (tests can bypass via tools_dir).
-_CACHED: ToolRegistry | None = None
+# Process-level cache keyed by normalized tools directory + profile.
+_CACHED: dict[tuple[str, str], ToolRegistry] = {}
+
+
+def _registry_cache_key(
+    tools_dir: Path | str | None,
+    profile: str,
+) -> tuple[str, str]:
+    root = Path(tools_dir) if tools_dir is not None else default_tools_dir()
+    return (str(root.resolve()), profile)
 
 
 def get_tool_registry(
@@ -815,19 +846,252 @@ def get_tool_registry(
     profile: str = POC_TOOL_PROFILE,
     refresh: bool = False,
 ) -> ToolRegistry:
-    """Return the tool registry, caching the default-path load."""
-    global _CACHED
-    if tools_dir is not None:
-        return load_tool_registry(tools_dir, profile=profile)
-    if _CACHED is None or refresh:
-        _CACHED = load_tool_registry(profile=profile)
-    return _CACHED
+    """Return the tool registry, caching by normalized directory and profile."""
+    key = _registry_cache_key(tools_dir, profile)
+    if refresh or key not in _CACHED:
+        _CACHED[key] = load_tool_registry(tools_dir, profile=profile)
+    return _CACHED[key]
 
 
 def reset_tool_registry_cache() -> None:
-    """Drop the cached default registry (tests)."""
-    global _CACHED
-    _CACHED = None
+    """Drop all cached registries (tests)."""
+    _CACHED.clear()
+
+
+def _normalize_manifest_source_path(manifest: ToolManifest) -> ToolManifest:
+    """Return a copy with ``source_path`` resolved for snapshot equality."""
+    try:
+        source_path = str(Path(manifest.source_path).resolve()) if manifest.source_path else ""
+    except OSError:
+        source_path = manifest.source_path or ""
+    if source_path == (manifest.source_path or ""):
+        return manifest
+    return replace(manifest, source_path=source_path)
+
+
+def _required_manifest_snapshot_matches(
+    injected: ToolManifest,
+    trusted: ToolManifest,
+) -> bool:
+    """Return True when the injected manifest matches the trusted on-disk snapshot.
+
+    Compares the complete ``ToolManifest`` (every field, including ``issues`` and
+    schemas) after normalizing ``source_path`` via ``Path.resolve()``.
+    """
+    return _normalize_manifest_source_path(injected) == _normalize_manifest_source_path(trusted)
+
+
+def validate_runtime_tool_registry(
+    registry: ToolRegistry,
+    *,
+    required_tool_ids: tuple[str, ...] = REQUIRED_POC_SSH_TOOL_IDS,
+    tools_dir: Path | str | None = None,
+    expected_profile: str = POC_TOOL_PROFILE,
+) -> None:
+    """Fail closed when the active catalog/policy cannot support runtime tools.
+
+    Raises:
+        RuntimeToolCatalogError: missing paths, invalid policy, unauthorized or
+            non-bindable required tools, origin mismatches, snapshot mismatches
+            against the on-disk catalog, or bound-name mismatches. Messages
+            include only code, tool ID, profile, and catalog path — never raw
+            manifest/policy values or credentials.
+    """
+    root = Path(tools_dir) if tools_dir is not None else default_tools_dir()
+    root_resolved = root.resolve()
+    expected_catalog = (root_resolved / "catalog").resolve()
+    expected_policy_path = (root_resolved / "policies" / f"{expected_profile}.json").resolve()
+    catalog_path = str(expected_catalog)
+
+    def _fail(
+        message: str,
+        *,
+        code: str,
+        tool_id: str = "",
+        policy_profile: str = expected_profile,
+    ) -> NoReturn:
+        raise RuntimeToolCatalogError(
+            message,
+            code=code,
+            tool_id=tool_id,
+            catalog_path=catalog_path,
+            policy_profile=policy_profile,
+        )
+
+    if not isinstance(registry, ToolRegistry):
+        _fail(
+            "tool registry is not a ToolRegistry instance",
+            code="invalid_registry_type",
+        )
+
+    if not root.is_dir():
+        _fail(
+            "tools directory missing: code=tools_dir_missing",
+            code="tools_dir_missing",
+        )
+    if not expected_catalog.is_dir():
+        _fail(
+            "tool catalog directory missing: code=catalog_dir_missing",
+            code="catalog_dir_missing",
+        )
+
+    if registry.catalog_dir is None or registry.catalog_dir.resolve() != expected_catalog:
+        _fail(
+            "tool registry catalog path does not match configured TOOLS_DIR",
+            code="catalog_path_mismatch",
+        )
+
+    policy = registry.policy
+    if policy is None:
+        _fail(
+            "capability policy is missing: code=policy_missing",
+            code="policy_missing",
+        )
+
+    if policy.profile != expected_profile:
+        _fail(
+            "capability policy profile mismatch: "
+            f"code=policy_profile_mismatch profile={expected_profile}",
+            code="policy_profile_mismatch",
+            policy_profile=expected_profile,
+        )
+
+    if not expected_policy_path.is_file():
+        _fail(
+            "capability policy file missing: code=policy_missing",
+            code="policy_missing",
+        )
+
+    if registry.policy_path is None or registry.policy_path.resolve() != expected_policy_path:
+        _fail(
+            "tool registry policy path does not match configured TOOLS_DIR",
+            code="policy_path_mismatch",
+        )
+
+    if any(i.code == "policy_missing" for i in policy.issues):
+        _fail(
+            "capability policy file missing: code=policy_missing",
+            code="policy_missing",
+        )
+
+    policy_errors = [i for i in policy.issues if i.level == "error"]
+    if policy_errors:
+        issue_code = policy_errors[0].code or "policy_invalid"
+        _fail(
+            f"capability policy invalid: code={issue_code}",
+            code=issue_code,
+        )
+
+    # Re-load from disk; never trust hashes/contents stored only in memory.
+    trusted_registry = load_tool_registry(root, profile=expected_profile)
+    if (
+        registry.catalog_hash != trusted_registry.catalog_hash
+        or registry.policy_hash != trusted_registry.policy_hash
+        or registry.policy != trusted_registry.policy
+    ):
+        _fail(
+            "tool registry snapshot mismatch: code=registry_snapshot_mismatch",
+            code="registry_snapshot_mismatch",
+        )
+
+    for tool_id in required_tool_ids:
+        trusted_manifest = trusted_registry.get(tool_id)
+        injected_manifest = registry.get(tool_id)
+        if trusted_manifest is None or injected_manifest is None:
+            continue  # missing tools handled below
+        if not _required_manifest_snapshot_matches(injected_manifest, trusted_manifest):
+            _fail(
+                f"tool registry snapshot mismatch: code=registry_snapshot_mismatch tool={tool_id}",
+                code="registry_snapshot_mismatch",
+                tool_id=tool_id,
+            )
+
+    for allowed_id in policy.allowed_tools:
+        if registry.get(allowed_id) is None:
+            _fail(
+                f"capability policy allows unknown tool: tool={allowed_id}",
+                code="unknown_allowed_tool",
+                tool_id=allowed_id,
+            )
+
+    for tool_id in required_tool_ids:
+        manifest = registry.get(tool_id)
+        if manifest is None:
+            _fail(
+                f"required tool manifest missing: tool={tool_id}",
+                code="required_tool_missing",
+                tool_id=tool_id,
+            )
+        source = (manifest.source_path or "").strip()
+        if not source:
+            _fail(
+                f"required tool manifest outside configured catalog: tool={tool_id}",
+                code="manifest_outside_catalog",
+                tool_id=tool_id,
+            )
+        try:
+            manifest_parent = Path(source).resolve().parent
+        except OSError:
+            _fail(
+                f"required tool manifest outside configured catalog: tool={tool_id}",
+                code="manifest_outside_catalog",
+                tool_id=tool_id,
+            )
+        if manifest_parent != expected_catalog:
+            _fail(
+                f"required tool manifest outside configured catalog: tool={tool_id}",
+                code="manifest_outside_catalog",
+                tool_id=tool_id,
+            )
+        if not manifest.enabled:
+            _fail(
+                f"required tool is disabled: tool={tool_id}",
+                code="required_tool_disabled",
+                tool_id=tool_id,
+            )
+        if not manifest.executable:
+            issue_code = next(
+                (i.code for i in manifest.issues if i.level == "error"),
+                "required_tool_invalid",
+            )
+            _fail(
+                f"required tool manifest is invalid: tool={tool_id} code={issue_code}",
+                code="required_tool_invalid",
+                tool_id=tool_id,
+            )
+        if tool_id in policy.denied_tools:
+            _fail(
+                f"required tool denied by capability policy: tool={tool_id}",
+                code="required_tool_denied",
+                tool_id=tool_id,
+            )
+        if policy.allowed_transports and manifest.transport not in policy.allowed_transports:
+            _fail(
+                f"required tool transport denied: tool={tool_id}",
+                code="required_transport_denied",
+                tool_id=tool_id,
+            )
+        if not registry.is_authorized(tool_id):
+            _fail(
+                f"required tool is not authorized: tool={tool_id}",
+                code="required_tool_unauthorized",
+                tool_id=tool_id,
+            )
+
+        bound = _resolve_langchain_tool(manifest)
+        if bound is None:
+            _fail(
+                f"required tool cannot be bound as a LangChain tool: tool={tool_id}",
+                code="required_tool_not_bindable",
+                tool_id=tool_id,
+            )
+        bound_name = getattr(bound, "name", None)
+        if bound_name != tool_id:
+            _fail(
+                f"bound tool name mismatch: tool={tool_id}",
+                code="bound_name_mismatch",
+                tool_id=tool_id,
+            )
 
 
 class ToolSnapshotStale(ValueError):

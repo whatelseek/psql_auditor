@@ -27,6 +27,7 @@ from auditor.tools.mcp_client import McpPoolShutdownTimeoutError, PoolState, Pos
 
 if TYPE_CHECKING:
     from auditor.graph import AuditorGraph
+    from auditor.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class ApplicationRuntime:
         mcp_pool: PostgresMcpPool | None = None,
         results_store: ResultsStore | None = None,
         task_registry: TaskRegistry | None = None,
+        tool_registry: "ToolRegistry | None" = None,
         graph_factory: Callable[["ApplicationRuntime"], "AuditorGraph"] | None = None,
         shutdown_timeout: float = 10.0,
     ) -> None:
@@ -82,6 +84,7 @@ class ApplicationRuntime:
         self.task_registry = task_registry or TaskRegistry(
             shutdown_timeout=min(5.0, shutdown_timeout)
         )
+        self.tool_registry: ToolRegistry | None = tool_registry
         self._graph_factory = graph_factory
         self.graph: AuditorGraph | None = None
         self._start_lock = asyncio.Lock()
@@ -109,7 +112,26 @@ class ApplicationRuntime:
                 raise RuntimeClosedError("cannot start a closed application runtime")
             self.state = RuntimeState.STARTING
             try:
+                from auditor.domain.audit_request import POC_TOOL_PROFILE
                 from auditor.graph import AuditorGraph
+                from auditor.tool_registry import (
+                    REQUIRED_POC_SSH_TOOL_IDS,
+                    load_tool_registry,
+                    validate_runtime_tool_registry,
+                )
+
+                if self.tool_registry is None:
+                    self.tool_registry = load_tool_registry(
+                        self.settings.tools_dir,
+                        profile=POC_TOOL_PROFILE,
+                    )
+
+                validate_runtime_tool_registry(
+                    self.tool_registry,
+                    required_tool_ids=REQUIRED_POC_SSH_TOOL_IDS,
+                    tools_dir=self.settings.tools_dir,
+                    expected_profile=POC_TOOL_PROFILE,
+                )
 
                 if self._graph_factory is not None:
                     self.graph = self._graph_factory(self)
@@ -119,16 +141,34 @@ class ApplicationRuntime:
                         mcp_pool=self.mcp_pool,
                         results_store=self.results_store,
                         task_registry=self.task_registry,
+                        tool_registry=self.tool_registry,
                     )
                 self.state = RuntimeState.RUNNING
                 return self
             except Exception as exc:
-                logger.exception("application runtime startup failed")
+                from auditor.tool_registry import RuntimeToolCatalogError
+
+                if isinstance(exc, RuntimeToolCatalogError):
+                    logger.error(
+                        "application runtime startup failed: code=%s tool=%s profile=%s",
+                        exc.code,
+                        exc.tool_id or "-",
+                        exc.policy_profile or "-",
+                    )
+                    detail = f"code={exc.code}"
+                    if exc.tool_id:
+                        detail = f"{detail} tool={exc.tool_id}"
+                    if exc.policy_profile:
+                        detail = f"{detail} profile={exc.policy_profile}"
+                    startup_message = f"application runtime startup failed: {detail}"
+                else:
+                    logger.exception("application runtime startup failed")
+                    startup_message = "application runtime startup failed"
                 try:
                     await self._close_unlocked(reason="startup_failure")
                 except RuntimeShutdownTimeoutError:
                     logger.warning("startup failure cleanup timed out; runtime left CLOSING")
-                raise RuntimeStartupError(f"application runtime startup failed: {exc}") from exc
+                raise RuntimeStartupError(startup_message) from exc
 
     async def close(self) -> None:
         """Idempotent shutdown of all owned resources.
