@@ -23,10 +23,15 @@ last_updated: 2026-07-28
 1. Load registry/policy; refuse bind if `executable` false or unauthorized.
 2. For discovery, call `select_discovery_tools` / registry transports — do not bypass with raw Paramiko in new code.
 3. Pin `tool_catalog_hash` / `capability_policy_hash` on plan and assert with `assert_tool_snapshot_current` at start.
-4. Map snapshot technologies to frameworks via `select_frameworks_for_inventory`.
+4. Map normalized facts to frameworks via declarative `select_frameworks_for_inventory`
+   (default dynamic path). Do not infer applicability from framework IDs or titles.
+5. Treat capability readiness as host-specific and separate from predicate match results.
+6. Candidate evaluation never invokes tools; authorization uses `registry.authorized_tools()` only.
 
 ## Gotchas
 - Catalog visibility ≠ authorization to bind.
+- Hardcoded tech→framework mapping is opt-in only (`use_legacy_tech_mapping`).
+- Capability unavailability must not rewrite `not_applicable` into `blocked`.
 - Stale hashes must fail closed (`tool_snapshot_stale`).
 
 ## Verify

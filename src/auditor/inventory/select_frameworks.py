@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Mapping
 
 from auditor.domain.inventory import (
     ClientInventory,
     FrameworkSelectionDecision,
     TechnologyDetection,
 )
+from auditor.domain.normalized_facts import HostFactSet
 from auditor.frameworks import Framework, get_framework, list_frameworks
 from auditor.inventory.detect import detection_status_for
+from auditor.inventory.dynamic_select import select_frameworks_dynamic
+from auditor.tool_registry import ToolRegistry
 
 # Maps detected technology → preferred framework family / id prefixes.
+# Compatibility-only: used exclusively by ``_select_frameworks_legacy``.
 _TECH_FRAMEWORK_PREFERENCES: dict[str, tuple[str, ...]] = {
     "ubuntu": ("ubuntu_cis_24_l2", "ubuntu", "linux_os", "linux"),
     "linux": ("ubuntu_cis_24_l2", "linux_os", "linux"),
@@ -26,17 +31,26 @@ def _framework_version(fw: Framework | None) -> str:
     return (fw.version if fw and fw.version else "") or "0"
 
 
-def select_frameworks_for_inventory(
+def _pick_available(
+    available: dict[str, Framework],
+    preferences: tuple[str, ...],
+) -> Framework | None:
+    for pref in preferences:
+        if pref in available:
+            return available[pref]
+        for fw_id, fw in available.items():
+            if fw_id.startswith(pref) or pref in fw.aliases:
+                return fw
+    return None
+
+
+def _select_frameworks_legacy(
     inventory: ClientInventory,
     detections: list[TechnologyDetection],
     *,
     agents_dir: Path | str | None = None,
 ) -> list[FrameworkSelectionDecision]:
-    """Select audit frameworks for each host/service based on detections.
-
-    Decision statuses (INPUT-005): selected, not_applicable,
-    requires_operator_decision, unsupported, blocked.
-    """
+    """Hardcoded technology→framework mapping (compatibility opt-in only)."""
     available = {fw.id: fw for fw in list_frameworks(agents_dir)}
     decisions: list[FrameworkSelectionDecision] = []
 
@@ -247,14 +261,33 @@ def select_frameworks_for_inventory(
     return decisions
 
 
-def _pick_available(
-    available: dict[str, Framework],
-    preferences: tuple[str, ...],
-) -> Framework | None:
-    for pref in preferences:
-        if pref in available:
-            return available[pref]
-        for fw_id, fw in available.items():
-            if fw_id.startswith(pref) or pref in fw.aliases:
-                return fw
-    return None
+def select_frameworks_for_inventory(
+    inventory: ClientInventory,
+    detections: list[TechnologyDetection],
+    *,
+    agents_dir: Path | str | None = None,
+    registry: ToolRegistry | None = None,
+    host_facts: Mapping[str, HostFactSet] | None = None,
+    preferred_language: str = "en",
+    use_legacy_tech_mapping: bool = False,
+) -> list[FrameworkSelectionDecision]:
+    """Select audit frameworks for each host/service based on detections.
+
+    Default path is declarative Markdown applicability (INPUT005-13). Pass
+    ``use_legacy_tech_mapping=True`` only for explicit compatibility with the
+    hardcoded technology map.
+    """
+    if use_legacy_tech_mapping:
+        return _select_frameworks_legacy(
+            inventory,
+            detections,
+            agents_dir=agents_dir,
+        )
+    return select_frameworks_dynamic(
+        inventory,
+        detections,
+        agents_dir=agents_dir,
+        registry=registry,
+        fact_sets=host_facts,
+        preferred_language=preferred_language,
+    )

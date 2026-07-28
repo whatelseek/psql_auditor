@@ -9,6 +9,24 @@ detect:
   binaries: [postgres, psql]
   ports: [5432]
 version: "1.0"
+
+applicability:
+  all:
+    - fact: technology.postgresql.status
+      operator: in
+      value:
+        - confirmed
+        - suspected
+        - possible
+        - probable
+        - unknown
+
+required_facts:
+  - technology.postgresql.status
+
+target:
+  scope: service
+  service: postgresql
 ---
 # PostgreSQL Security Audit Checklist
 

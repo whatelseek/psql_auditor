@@ -46,4 +46,18 @@ Markdown frameworks may expose **strict structured applicability metadata** in f
 - Invalid structured metadata remains **catalog-visible** but **non-executable**; sanitized validation errors are attached.
 - Legacy frameworks without structured metadata keep their previous executable state.
 - Predicates consume **normalized fact values only** (INPUT005-10); they do not run eval/regex/Jinja.
-- Production framework **selection** is still the existing hardcoded path in `inventory/select_frameworks.py` until INPUT005-12/13. Plans still record `selected` / `not_applicable` / `requires_operator_decision` / `unsupported` / `blocked`.
+- Production framework **selection** defaults to declarative Markdown applicability (`select_frameworks_dynamic`). The hardcoded tech map remains opt-in via `use_legacy_tech_mapping=True`. Plans still record `selected` / `not_applicable` / `requires_operator_decision` / `unsupported` / `blocked`.
+
+
+## Declarative selection (INPUT005-12 / INPUT005-13)
+
+- Candidate evaluation covers every host/framework pair (`evaluate_framework_candidates`).
+- Predicates consume normalized fact maps only (`HostFactSet.as_value_map()`).
+- Target scope (`client` / `host` / `service`) is declared in Markdown `target:` metadata.
+- Capability readiness is host-specific via authorized tools and inventory access facts.
+- Applicability match and authorization readiness are separate decisions.
+- Default production selector is declarative (`select_frameworks_dynamic`); the hardcoded
+  `_TECH_FRAMEWORK_PREFERENCES` path is compatibility-only via `use_legacy_tech_mapping=True`.
+- Candidate evaluation never binds or invokes tools.
+- Full evidence-backed selection provenance is deferred to INPUT005-18.
+
