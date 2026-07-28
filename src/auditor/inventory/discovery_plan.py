@@ -95,10 +95,41 @@ def _sha16(payload: Mapping[str, Any] | Sequence[Any] | str) -> str:
 
 
 def framework_catalog_hash(agents_dir: Path | str | None = None) -> str:
-    """Secret-free catalog identity (no filesystem paths)."""
+    """Secret-free catalog identity (no filesystem paths).
+
+    Includes typed discovery-hint identities (capability, operation_ids,
+    expected_facts) so hint edits invalidate plans even when no discovery
+    steps were generated. Excludes purpose, prose, and filesystem paths.
+    """
     rows: list[str] = []
     for framework, meta in list_frameworks_with_meta(agents_dir):
-        rows.append(f"{framework.id}@{framework.version or '0'}:{applicability_fingerprint(meta)}")
+        hint_rows = [
+            {
+                "capability": hint.capability,
+                "expected_facts": sorted(hint.expected_facts),
+                "operation_ids": sorted(hint.operation_ids),
+            }
+            for hint in sorted(
+                meta.discovery_hints,
+                key=lambda item: (
+                    item.capability,
+                    item.operation_ids,
+                    item.expected_facts,
+                ),
+            )
+        ]
+        rows.append(
+            json.dumps(
+                {
+                    "applicability_fingerprint": applicability_fingerprint(meta),
+                    "discovery_hints": hint_rows,
+                    "framework_id": framework.id,
+                    "framework_version": framework.version or "0",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
     rows.sort()
     return f"fc-{_sha16(rows)}"
 

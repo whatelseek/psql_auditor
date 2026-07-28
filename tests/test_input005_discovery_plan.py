@@ -20,7 +20,10 @@ from auditor.domain.normalized_facts import (
     HostFactSet,
     NormalizedFact,
 )
-from auditor.inventory.discovery_plan import build_capability_discovery_plan
+from auditor.inventory.discovery_plan import (
+    build_capability_discovery_plan,
+    framework_catalog_hash,
+)
 from auditor.inventory.framework_candidates import (
     FrameworkCandidate,
     evaluate_framework_candidates,
@@ -2138,3 +2141,178 @@ target:
     caps = sorted(s.capability for s in plan.steps)
     assert caps == ["host.read", "inventory.read"]
     assert all(s.status == "planned" for s in plan.steps)
+
+
+def _matched_fw(
+    directory: Path,
+    *,
+    name: str = "matched.md",
+    capability: str = "host.read",
+    ops: list[str] | None = None,
+    expected: list[str] | None = None,
+    purpose: str = "probe os",
+    reverse_hints: bool = False,
+) -> Path:
+    """Framework already matched on facts; discovery hints may still change identity."""
+    agents = directory
+    agents.mkdir(parents=True, exist_ok=True)
+    op_list = ops or ["ssh_run"]
+    exp_list = expected if expected is not None else ["os.name"]
+    hint_a = (
+        f"  - capability: {capability}\n"
+        f'    purpose: "{purpose}"\n'
+        f"    operation_ids:\n"
+        + "\n".join(f"      - {op}" for op in op_list)
+        + "\n    expected_facts:\n"
+        + "\n".join(f"      - {fact}" for fact in exp_list)
+        + "\n"
+    )
+    hint_b = (
+        "  - capability: inventory.read\n"
+        '    purpose: "secondary"\n'
+        "    operation_ids:\n"
+        "      - inv_op\n"
+        "    expected_facts:\n"
+        "      - os.version\n"
+    )
+    hints = hint_b + hint_a if reverse_hints else hint_a + hint_b
+    _write_fw(
+        agents,
+        name,
+        frontmatter=f"""
+id: matched_fw
+version: "1"
+family_id: matched_fw
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+discovery_hints:
+{hints}
+target:
+  scope: host
+""",
+    )
+    return agents
+
+
+def test_framework_catalog_hash_identical_metadata(tmp_path: Path) -> None:
+    a = _matched_fw(tmp_path / "a")
+    b = _matched_fw(tmp_path / "b")
+    assert framework_catalog_hash(a) == framework_catalog_hash(b)
+
+
+def test_framework_catalog_hash_hint_order_independent(tmp_path: Path) -> None:
+    a = _matched_fw(tmp_path / "a", reverse_hints=False)
+    b = _matched_fw(tmp_path / "b", reverse_hints=True)
+    assert framework_catalog_hash(a) == framework_catalog_hash(b)
+
+
+def test_framework_catalog_hash_operation_ids_change_identities(tmp_path: Path) -> None:
+    agents_a = _matched_fw(tmp_path / "a", ops=["ssh_run"])
+    agents_b = _matched_fw(tmp_path / "b", ops=["other_run"])
+    inv = _inventory([_host(os_name="Ubuntu", os_family="linux", connection_types=("ssh",))])
+    registry = _registry(
+        {
+            "ssh_run": _manifest("ssh_run"),
+            "other_run": _manifest("other_run"),
+            "inv_op": _manifest("inv_op", capabilities=("inventory.read",), inventory_access=()),
+        }
+    )
+    assert framework_catalog_hash(agents_a) != framework_catalog_hash(agents_b)
+    plan_a = generate_audit_plan(inv, [], agents_dir=agents_a, registry=registry)
+    plan_b = generate_audit_plan(inv, [], agents_dir=agents_b, registry=registry)
+    assert plan_a.framework_catalog_hash != plan_b.framework_catalog_hash
+    assert plan_a.discovery_plan_hash != plan_b.discovery_plan_hash
+    assert plan_a.plan_revision_id != plan_b.plan_revision_id
+
+
+def test_framework_catalog_hash_expected_facts_change_identities(tmp_path: Path) -> None:
+    agents_a = _matched_fw(tmp_path / "a", expected=["os.name"])
+    agents_b = _matched_fw(tmp_path / "b", expected=["os.version"])
+    inv = _inventory([_host(os_name="Ubuntu", os_family="linux", connection_types=("ssh",))])
+    registry = _registry(
+        {
+            "ssh_run": _manifest("ssh_run"),
+            "inv_op": _manifest("inv_op", capabilities=("inventory.read",), inventory_access=()),
+        }
+    )
+    assert framework_catalog_hash(agents_a) != framework_catalog_hash(agents_b)
+    plan_a = generate_audit_plan(inv, [], agents_dir=agents_a, registry=registry)
+    plan_b = generate_audit_plan(inv, [], agents_dir=agents_b, registry=registry)
+    assert plan_a.framework_catalog_hash != plan_b.framework_catalog_hash
+    assert plan_a.discovery_plan_hash != plan_b.discovery_plan_hash
+    assert plan_a.plan_revision_id != plan_b.plan_revision_id
+
+
+def test_framework_catalog_hash_capability_change_identities(tmp_path: Path) -> None:
+    agents_a = _matched_fw(tmp_path / "a", capability="host.read")
+    agents_b = _matched_fw(tmp_path / "b", capability="host.ssh.read")
+    inv = _inventory([_host(os_name="Ubuntu", os_family="linux", connection_types=("ssh",))])
+    registry = _registry(
+        {
+            "ssh_run": _manifest("ssh_run", capabilities=("host.read", "host.ssh.read")),
+            "inv_op": _manifest("inv_op", capabilities=("inventory.read",), inventory_access=()),
+        }
+    )
+    assert framework_catalog_hash(agents_a) != framework_catalog_hash(agents_b)
+    plan_a = generate_audit_plan(inv, [], agents_dir=agents_a, registry=registry)
+    plan_b = generate_audit_plan(inv, [], agents_dir=agents_b, registry=registry)
+    assert plan_a.framework_catalog_hash != plan_b.framework_catalog_hash
+    assert plan_a.discovery_plan_hash != plan_b.discovery_plan_hash
+    assert plan_a.plan_revision_id != plan_b.plan_revision_id
+
+
+def test_framework_catalog_hash_purpose_ignored(tmp_path: Path) -> None:
+    a = _matched_fw(tmp_path / "a", purpose="alpha purpose canary")
+    b = _matched_fw(tmp_path / "b", purpose="beta purpose different")
+    assert framework_catalog_hash(a) == framework_catalog_hash(b)
+
+
+def test_matched_framework_hint_change_invalidates_without_steps(tmp_path: Path) -> None:
+    """Fully matched framework with no discovery steps still goes stale on hint change."""
+    agents = _matched_fw(tmp_path / "base", ops=["ssh_run"])
+    inv = _inventory([_host(os_name="Ubuntu", os_family="linux", connection_types=("ssh",))])
+    facts = {
+        "host-01": _fact_set(
+            "host-01",
+            {"os.family": "linux", "os.name": "Ubuntu", "access.ssh.available": True},
+        )
+    }
+    registry = _registry(
+        {
+            "ssh_run": _manifest("ssh_run"),
+            "inv_op": _manifest("inv_op", capabilities=("inventory.read",), inventory_access=()),
+            "other_run": _manifest("other_run"),
+        }
+    )
+    plan = generate_audit_plan(inv, [], agents_dir=agents, registry=registry)
+    disc = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    assert disc.steps == ()
+
+    agents2 = _matched_fw(tmp_path / "changed", ops=["other_run"])
+    assert framework_catalog_hash(agents) != framework_catalog_hash(agents2)
+    with pytest.raises(PlanConfirmationRejected) as exc:
+        assert_plan_matches_discovery_plan(plan, inv, agents_dir=agents2, registry=registry)
+    assert exc.value.code == "audit_plan_stale"
+
+
+def test_assert_plan_stale_after_hint_operation_change(tmp_path: Path) -> None:
+    agents = _matched_fw(tmp_path / "a", ops=["ssh_run"])
+    inv = _inventory([_host(os_name="Ubuntu", os_family="linux", connection_types=("ssh",))])
+    registry = _registry(
+        {
+            "ssh_run": _manifest("ssh_run"),
+            "inv_op": _manifest("inv_op", capabilities=("inventory.read",), inventory_access=()),
+            "other_run": _manifest("other_run"),
+        }
+    )
+    plan = generate_audit_plan(inv, [], agents_dir=agents, registry=registry)
+    agents2 = _matched_fw(tmp_path / "b", ops=["other_run"])
+    with pytest.raises(PlanConfirmationRejected) as exc:
+        assert_plan_matches_discovery_plan(plan, inv, agents_dir=agents2, registry=registry)
+    assert exc.value.code == "audit_plan_stale"
