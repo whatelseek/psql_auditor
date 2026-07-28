@@ -32,28 +32,54 @@ _REDIRECT_RE = re.compile(r"(?:^|[\s])(?:>>?|<<?)\s")
 _EXACT_COMMANDS: frozenset[str] = frozenset(
     {
         "hostname",
+        "hostname -f",
+        "hostname -s",
+        "hostnamectl",
+        "hostnamectl status",
         "uname -a",
         "uname -r",
         "uname -m",
         "cat /etc/os-release",
+        "cat /proc/meminfo",
+        "cat /proc/cpuinfo",
+        "cat /proc/version",
+        "cat /proc/loadavg",
+        "cat /proc/uptime",
         "id",
         "whoami",
+        "who -b",
         "uptime",
         "df -h",
         "free -m",
+        "free -h",
+        "lscpu",
+        "lsblk",
+        "lsblk -f",
+        "blkid",
         "ps -ef",
         "ps aux",
         "ss -lntp",
         "ss -lntup",
         "ss -lnt",
+        "ss -tuln",
+        "ss -tulpen",
         "netstat -lntup",
         "netstat -lntp",
+        "netstat -tuln",
+        "netstat -tulpen",
         "psql --version",
         "postgres --version",
         "command -v psql",
         "command -v postgres",
+        "command -v smartctl",
+        "which smartctl",
+        "rpm -qa",
+        "dpkg -l",
+        "dpkg-query -W",
         "systemctl list-units --type=service --state=running --no-pager",
+        "systemctl list-units --type=service --state=running",
         "systemctl list-units --type=service --all --no-pager",
+        "systemctl list-units --type=service --all",
         "ls -ld /var/lib/postgresql",
         "ls -ld /var/lib/pgsql",
         "ls -ld /etc/postgresql",
@@ -65,7 +91,7 @@ _TEMPLATE_COMMANDS: tuple[re.Pattern[str], ...] = tuple(
     for p in (
         r"^sysctl\s+[A-Za-z0-9._*-]+$",
         r"^getent\s+(passwd|group)\s+[A-Za-z0-9._-]+$",
-        r"^systemctl\s+status\s+[A-Za-z0-9@._:-]+\s+--no-pager$",
+        r"^systemctl\s+status\s+[A-Za-z0-9@._:-]+(?:\s+--no-pager)?$",
         r"^systemctl\s+is-active\s+[A-Za-z0-9@._:-]+$",
         r"^systemctl\s+is-enabled\s+[A-Za-z0-9@._:-]+$",
         r"^ls\s+-l[aAd]*\s+/etc/postgresql(?:/[A-Za-z0-9._/-]+)?$",
@@ -75,8 +101,16 @@ _TEMPLATE_COMMANDS: tuple[re.Pattern[str], ...] = tuple(
         r"^stat\s+/var/lib/postgresql(?:/[A-Za-z0-9._/-]+)?$",
         r"^stat\s+/etc/os-release$",
         r"^readlink\s+-f\s+/etc/postgresql(?:/[A-Za-z0-9._/-]+)?$",
-        r"^dpkg-query\s+-W\s+[A-Za-z0-9._+-]+$",
+        r"^dpkg-query\s+-W(?:\s+[A-Za-z0-9._+-]+)?$",
         r"^rpm\s+-q\s+[A-Za-z0-9._+-]+$",
+        # Host inventory helpers commonly used by CIS / host_facts assessments.
+        r"^lsblk(?:\s+-[a-zA-Z]+)*(?:\s+-o\s+[A-Za-z0-9,]+)?$",
+        r"^ss\s+-[a-z]+$",
+        r"^netstat\s+-[a-z]+$",
+        r"^command\s+-v\s+[A-Za-z0-9._+-]+$",
+        r"^which\s+[A-Za-z0-9._+-]+$",
+        r"^smartctl\s+-H\s+/dev/[A-Za-z0-9]+$",
+        r"^smartctl\s+-i\s+/dev/[A-Za-z0-9]+$",
     )
 )
 
@@ -146,16 +180,73 @@ def _has_shell_composition(command: str) -> bool:
     return False
 
 
+
+def _policy_ssh_allow_all() -> bool:
+    """True when the active capability policy enables PoC allow-all SSH."""
+    try:
+        from auditor.tool_registry import get_active_tool_registry
+
+        policy = get_active_tool_registry().policy
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(policy and getattr(policy, "ssh_allow_all_commands", False))
+
+
+def _policy_ssh_allowlists() -> tuple[frozenset[str] | None, tuple[re.Pattern[str], ...] | None]:
+    """Load SSH allow-lists from the active capability policy, if configured.
+
+    Returns ``(None, None)`` when the policy omits both keys (use builtins).
+    When either key is present, returns policy lists (empty ⇒ deny-all for
+    that dimension). Patterns that fail to compile are skipped.
+    """
+    try:
+        from auditor.tool_registry import get_active_tool_registry
+
+        policy = get_active_tool_registry().policy
+    except Exception:  # noqa: BLE001 — fall back to builtins
+        return None, None
+    if policy is None:
+        return None, None
+    cmds = policy.ssh_allowed_commands
+    pats = policy.ssh_allowed_command_patterns
+    if cmds is None and pats is None:
+        return None, None
+    exact = frozenset(cmds or ())
+    compiled: list[re.Pattern[str]] = []
+    for raw in pats or ():
+        try:
+            compiled.append(re.compile(raw))
+        except re.error:
+            continue
+    return exact, tuple(compiled)
+
+
+def _resolve_ssh_allowlists() -> tuple[frozenset[str], tuple[re.Pattern[str], ...]]:
+    """Return the effective exact commands + patterns for approval checks."""
+    exact, patterns = _policy_ssh_allowlists()
+    if exact is None and patterns is None:
+        return _EXACT_COMMANDS, _TEMPLATE_COMMANDS
+    return exact or frozenset(), patterns or ()
+
+
 def is_approved_ssh_command(command: str) -> bool:
-    """Return True when ``command`` matches the strict allow-list."""
+    """Return True when ``command`` matches the strict allow-list.
+
+    Prefer ``ssh_allowed_commands`` / ``ssh_allowed_command_patterns`` from
+    ``tools/policies/<profile>.json`` when present; otherwise use builtins.
+    ``ssh_allow_all_commands`` (PoC) approves any non-empty command.
+    """
     text = (command or "").strip()
     if not text:
         return False
+    if _policy_ssh_allow_all():
+        return True
     if _has_shell_composition(text):
         return False
-    if text in _EXACT_COMMANDS:
+    exact, patterns = _resolve_ssh_allowlists()
+    if text in exact:
         return True
-    return any(pat.fullmatch(text) for pat in _TEMPLATE_COMMANDS)
+    return any(pat.fullmatch(text) for pat in patterns)
 
 
 def ssh_command_denial_reason(command: str) -> str | None:
@@ -163,11 +254,14 @@ def ssh_command_denial_reason(command: str) -> str | None:
     text = (command or "").strip()
     if not text:
         return "empty command"
+    if _policy_ssh_allow_all():
+        return None
     if _has_shell_composition(text):
         return "shell composition, redirects, or interpreters are not allowed"
-    if text in _EXACT_COMMANDS:
+    exact, patterns = _resolve_ssh_allowlists()
+    if text in exact:
         return None
-    if any(pat.fullmatch(text) for pat in _TEMPLATE_COMMANDS):
+    if any(pat.fullmatch(text) for pat in patterns):
         return None
     return "command is not on the approved SSH allow-list"
 

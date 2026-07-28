@@ -64,3 +64,6 @@ HITL interrupt payload: `type=skip_or_retry`. Resume via chat / `aresume` / `aco
 ## Questionnaire / intake
 
 Pre-audit intake collects client name, audit type, and related operator answers (`docs/pre-audit-intake.md`). Inventory may include `QUESTIONNAIRE.md` / `questionnaires/` — treated as operator inputs to planning, not as executable frameworks.
+
+Resume markers must be **visible** `[AUDIT_INTAKE:<thread>]` (OWUI strips markdown-reference comments). After access=yes, intake emits a progress phase while probing + `host_facts` discovery run before scope confirm. Open WebUI tag/title side-requests must not start intake.
+After host_facts discovery, production jobs start only when intake has confirmed `selected_jobs` (+ `client_id` / `client_slug`); otherwise the chat asks to **confirm** the plan instead of raising `AuditRequestRejected`.

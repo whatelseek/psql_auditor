@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Literal, NoReturn
@@ -78,6 +79,12 @@ class CapabilityPolicy:
     allowed_transports: tuple[str, ...]
     max_output_chars: int
     require_inventory_credentials: bool
+    # SSH command allow-list from policy JSON. ``None`` = use code builtins;
+    # empty tuple = deny-all for that dimension (fail closed when both empty).
+    # ``ssh_allow_all_commands`` (PoC/lab): skip allow-list + composition gates.
+    ssh_allowed_commands: tuple[str, ...] | None = None
+    ssh_allowed_command_patterns: tuple[str, ...] | None = None
+    ssh_allow_all_commands: bool = False
     source_path: str = ""
     source_hash: str = ""
     issues: tuple[ToolValidationIssue, ...] = ()
@@ -624,6 +631,62 @@ def _validate_policy(raw: dict[str, Any], *, path: Path, source_hash: str) -> Ca
         path=path,
         issues=issues,
     )
+    ssh_commands: tuple[str, ...] | None = None
+    ssh_patterns: tuple[str, ...] | None = None
+    if "ssh_allowed_commands" in raw:
+        raw_cmds = raw.get("ssh_allowed_commands")
+        if not isinstance(raw_cmds, list):
+            issues.append(
+                ToolValidationIssue(
+                    level="error",
+                    code="invalid_ssh_allowed_commands",
+                    message="ssh_allowed_commands must be a list of strings",
+                    location=str(path),
+                )
+            )
+            ssh_commands = ()
+        else:
+            ssh_commands = tuple(str(x).strip() for x in raw_cmds if str(x).strip())
+    if "ssh_allowed_command_patterns" in raw:
+        raw_pats = raw.get("ssh_allowed_command_patterns")
+        if not isinstance(raw_pats, list):
+            issues.append(
+                ToolValidationIssue(
+                    level="error",
+                    code="invalid_ssh_allowed_command_patterns",
+                    message="ssh_allowed_command_patterns must be a list of regex strings",
+                    location=str(path),
+                )
+            )
+            ssh_patterns = ()
+        else:
+            compiled: list[str] = []
+            for item in raw_pats:
+                pat = str(item).strip()
+                if not pat:
+                    continue
+                try:
+                    re.compile(pat)
+                except re.error as exc:
+                    issues.append(
+                        ToolValidationIssue(
+                            level="error",
+                            code="invalid_ssh_command_pattern",
+                            message=f"invalid ssh_allowed_command_patterns entry: {exc}",
+                            location=str(path),
+                        )
+                    )
+                    continue
+                compiled.append(pat)
+            ssh_patterns = tuple(compiled)
+    ssh_allow_all = _parse_bool(
+        raw.get("ssh_allow_all_commands", False),
+        default=False,
+        field_name="ssh_allow_all_commands",
+        tool_id="",
+        path=path,
+        issues=issues,
+    )
     return CapabilityPolicy(
         version=version,
         profile=profile or POC_TOOL_PROFILE,
@@ -634,6 +697,9 @@ def _validate_policy(raw: dict[str, Any], *, path: Path, source_hash: str) -> Ca
         allowed_transports=tuple(str(x).lower() for x in transports),
         max_output_chars=max_chars,
         require_inventory_credentials=require_inventory_credentials,
+        ssh_allowed_commands=ssh_commands,
+        ssh_allowed_command_patterns=ssh_patterns,
+        ssh_allow_all_commands=ssh_allow_all,
         source_path=str(path),
         source_hash=source_hash,
         issues=tuple(issues),
@@ -830,6 +896,8 @@ def load_tool_registry(
 
 # Process-level cache keyed by normalized tools directory + profile.
 _CACHED: dict[tuple[str, str], ToolRegistry] = {}
+# Last successfully returned registry key — used by SSH policy lookups.
+_ACTIVE_CACHE_KEY: tuple[str, str] | None = None
 
 
 def _registry_cache_key(
@@ -847,25 +915,39 @@ def get_tool_registry(
     refresh: bool = False,
 ) -> ToolRegistry:
     """Return the tool registry, caching by normalized directory and profile."""
+    global _ACTIVE_CACHE_KEY
     key = _registry_cache_key(tools_dir, profile)
     if refresh or key not in _CACHED:
         _CACHED[key] = load_tool_registry(tools_dir, profile=profile)
+    _ACTIVE_CACHE_KEY = key
     return _CACHED[key]
+
+
+def get_active_tool_registry() -> ToolRegistry:
+    """Return the most recently loaded registry (SSH policy / runtime binding)."""
+    if _ACTIVE_CACHE_KEY is not None and _ACTIVE_CACHE_KEY in _CACHED:
+        return _CACHED[_ACTIVE_CACHE_KEY]
+    return get_tool_registry()
 
 
 def reset_tool_registry_cache() -> None:
     """Drop all cached registries (tests)."""
+    global _ACTIVE_CACHE_KEY
     _CACHED.clear()
+    _ACTIVE_CACHE_KEY = None
 
 
 def _normalize_manifest_source_path(manifest: ToolManifest) -> ToolManifest:
-    """Return a copy with ``source_path`` resolved for snapshot equality."""
+    """Return a copy with ``source_path`` resolved for snapshot equality.
+
+    Always returns a ``replace``d manifest so ``None`` and ``""`` both normalize
+    to ``""`` (and relative paths resolve) before equality checks.
+    """
+    raw = manifest.source_path or ""
     try:
-        source_path = str(Path(manifest.source_path).resolve()) if manifest.source_path else ""
+        source_path = str(Path(raw).resolve()) if raw else ""
     except OSError:
-        source_path = manifest.source_path or ""
-    if source_path == (manifest.source_path or ""):
-        return manifest
+        source_path = raw
     return replace(manifest, source_path=source_path)
 
 

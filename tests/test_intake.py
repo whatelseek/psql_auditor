@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from auditor.frameworks import select_frameworks_for_host
 from auditor.hitl import resolve_pause_resume
 from auditor.host_facts import HostFacts, parse_host_facts_json
@@ -429,3 +431,193 @@ def test_extract_management_summary():
     summary = extract_management_summary(report)
     assert "Key risks" in summary or "Management summary" in summary
     assert "REQ-001" not in summary or summary.index("Management") < summary.find("REQ")
+
+
+@pytest.mark.asyncio
+async def test_aresume_preidentity_intake_allows_known_pause(tmp_path: Path):
+    """First intake interrupt uses audit-{hex}:intake before client/run IDs exist."""
+    import types
+
+    from langgraph.types import interrupt
+
+    from auditor.config import Settings
+    from auditor.graph import AuditorGraph
+
+    settings = Settings(
+        _env_file=None,
+        evidence_dir=tmp_path,
+        agents_dir=Path("agents"),
+        inventory_dir=tmp_path / "inventory",
+        intake_enabled=True,
+        hitl_enabled=False,
+        checkpoint_path=tmp_path / "cp.sqlite",
+    )
+    (tmp_path / "inventory").mkdir()
+    graph = AuditorGraph(settings=settings)
+    await graph.ensure_async_checkpointer()
+
+    async def stub_gate(self, state):
+        interrupt({"type": "intake", "prompt": "Q1?", "step": "a"})
+        interrupt({"type": "intake", "prompt": "Q2?", "step": "b"})
+        return {"intake_complete": False, "intake": {}}
+
+    graph.intake_gate = types.MethodType(stub_gate, graph)
+    graph.intake_graph = graph._build_intake()
+
+    paused = await graph.arun("start audit")
+    assert paused.get("awaiting_hitl") is True
+    tid = str(paused.get("thread_id") or "")
+    assert ":intake" in tid
+    assert tid.startswith("audit-")
+
+    # No client_id / audit_run_id — previously raised unbound checkpoint access.
+    resumed = await graph.aresume(tid, "answer-one")
+    assert resumed.get("awaiting_hitl") is True
+    assert "Q2" in (resumed.get("report") or "")
+
+    # After multi-session drop, interrupted checkpoint alone still authorizes resume.
+    graph._forget_multi_session(tid)
+    resumed2 = await graph.aresume(tid, "answer-two")
+    # Stub gate finishes; no further interrupt.
+    assert resumed2.get("awaiting_hitl") is False
+
+
+@pytest.mark.asyncio
+async def test_aresume_preidentity_intake_refuses_unbound(tmp_path: Path):
+    from auditor.config import Settings
+    from auditor.graph import AuditorGraph
+    from auditor.run_scope import RunScopeIsolationError
+
+    settings = Settings(
+        _env_file=None,
+        evidence_dir=tmp_path,
+        agents_dir=Path("agents"),
+        inventory_dir=tmp_path / "inventory",
+        intake_enabled=True,
+        checkpoint_path=tmp_path / "cp.sqlite",
+    )
+    (tmp_path / "inventory").mkdir()
+    graph = AuditorGraph(settings=settings)
+    await graph.ensure_async_checkpointer()
+    with pytest.raises(RunScopeIsolationError, match="refusing unbound"):
+        await graph.aresume("audit-deadbeef12:intake", "Acme_Corp")
+
+
+@pytest.mark.unit
+def test_load_intake_progress_restores_identity_not_answers(tmp_path: Path):
+    """Resume must reuse audit_run_id without restoring questionnaire answers."""
+    from auditor.config import Settings
+    from auditor.evidence_store import EvidenceStore
+    from auditor.graph import AuditorGraph
+    from auditor.workflows.intake import load_intake_progress, persist_intake_progress
+
+    settings = Settings(
+        _env_file=None,
+        evidence_dir=tmp_path,
+        agents_dir=Path("agents"),
+        inventory_dir=tmp_path / "inventory",
+        intake_enabled=True,
+    )
+    (tmp_path / "inventory").mkdir()
+    graph = AuditorGraph(settings=settings)
+    store = EvidenceStore(tmp_path, run_id="tmp_intake")
+    graph._evidence_by_run[store.run_id] = store
+    state = {"evidence_run_id": store.run_id, "thread_id": "audit-abc:intake", "intake": {}}
+    persist_intake_progress(
+        graph,
+        state,
+        {
+            "client_name": "Acme",
+            "client_id": "client_aaaaaaaaaaaaaa",
+            "audit_run_id": "arun_bbbbbbbbbbbbbb",
+            "client_slug": "acme",
+            "has_access": "yes",
+            "discovery_complete": True,
+            "proposed_jobs": [{"ssh_host": "10.0.0.1"}],
+        },
+        thread_id="audit-abc:intake",
+    )
+    loaded = load_intake_progress(graph, state, thread_id="audit-abc:intake")
+    assert loaded.get("audit_run_id") == "arun_bbbbbbbbbbbbbb"
+    assert loaded.get("client_id") == "client_aaaaaaaaaaaaaa"
+    assert loaded.get("client_slug") == "acme"
+    assert loaded.get("discovery_complete") is True
+    assert loaded.get("proposed_jobs")
+    # Answers must not be restored (would skip interrupt replay).
+    assert "client_name" not in loaded
+    assert "has_access" not in loaded
+
+
+def test_format_intake_assistant_message_visible_marker():
+    from auditor.hitl import resolve_pause_resume
+    from auditor.intake import format_intake_assistant_message
+
+    msg = format_intake_assistant_message("## Pre-audit intake (1/3)", "audit-abc:intake")
+    assert "[AUDIT_INTAKE:audit-abc:intake]" in msg
+    assert "[//]: # (AUDIT_INTAKE:" not in msg
+    assert resolve_pause_resume(
+        [{"role": "assistant", "content": msg}, {"role": "user", "content": "Acme"}]
+    ) == ("intake", "audit-abc:intake")
+
+
+@pytest.mark.unit
+def test_resolve_intake_evidence_store_prefers_rebound_run(tmp_path: Path):
+    """Resume must read intake progress from rebound client store, not temp run."""
+    from auditor.audit_registry import AuditRegistry
+    from auditor.config import Settings
+    from auditor.evidence_store import EvidenceStore
+    from auditor.graph import AuditorGraph
+    from auditor.workflows.intake import (
+        load_intake_progress,
+        persist_intake_progress,
+        resolve_intake_evidence_store,
+    )
+
+    settings = Settings(
+        _env_file=None,
+        evidence_dir=tmp_path,
+        agents_dir=Path("agents"),
+        inventory_dir=tmp_path / "inventory",
+        intake_enabled=True,
+    )
+    (tmp_path / "inventory").mkdir()
+    graph = AuditorGraph(settings=settings)
+
+    temp = EvidenceStore(tmp_path, run_id="20260101T000000Z_temp")
+    graph._evidence_by_run[temp.run_id] = temp
+
+    client_store = EvidenceStore(tmp_path, run_id="acme/arun_cccccccccccccccc")
+    graph._evidence_by_run[client_store.run_id] = client_store
+    persist_intake_progress(
+        graph,
+        {"evidence_run_id": client_store.run_id, "thread_id": "audit-abc:intake", "intake": {}},
+        {
+            "client_id": "client_aaaaaaaaaaaaaa",
+            "audit_run_id": "arun_cccccccccccccccc",
+            "client_slug": "acme",
+            "artifacts_run_id": client_store.run_id,
+            "discovery_complete": True,
+            "proposed_jobs": [
+                {"host_id": "h1", "ssh_host": "10.0.0.1", "frameworks": ["ubuntu_cis_24_l2"]}
+            ],
+        },
+        thread_id="audit-abc:intake",
+    )
+    registry = AuditRegistry(tmp_path / ".audit_registry.sqlite")
+    registry.create_run(
+        client_id="client_aaaaaaaaaaaaaa",
+        scope={"client_slug": "acme"},
+        evidence_run_id=client_store.run_id,
+        base_thread_id="audit-abc:intake",
+        audit_run_id="arun_cccccccccccccccc",
+    )
+
+    # Simulate resume: checkpoint still points at temp run.
+    state = {"evidence_run_id": temp.run_id, "thread_id": "audit-abc:intake", "intake": {}}
+    store = resolve_intake_evidence_store(graph, state, thread_id="audit-abc:intake")
+    assert store is not None
+    assert store.run_id == client_store.run_id
+    loaded = load_intake_progress(graph, state, thread_id="audit-abc:intake")
+    assert loaded.get("proposed_jobs")
+    assert loaded.get("discovery_complete") is True
+

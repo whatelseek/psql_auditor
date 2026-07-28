@@ -73,3 +73,43 @@ async def test_plain_intake_answer_still_resumes(monkeypatch):
     assert result["report"] == "resumed"
     auditor.aresume.assert_awaited_once_with("audit-abc:intake", "testcompany")
     auditor.alist_sessions.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_open_webui_tag_prompt_does_not_start_audit(monkeypatch):
+    """OWUI chat-tag helper must not invoke arun / intake."""
+    from auditor.api.openai_compat import ChatCompletionRequest, ChatMessage, _run_or_resume_once
+    from auditor.config import Settings
+
+    called = {"arun": 0}
+
+    class _FakeAuditor:
+        async def arun(self, *args, **kwargs):
+            called["arun"] += 1
+            return {"report": "should-not-run"}
+
+    class _FakeRuntime:
+        settings = Settings(_env_file=None, intake_enabled=True, adhoc_commands_enabled=False)
+
+    body = ChatCompletionRequest(
+        messages=[
+            ChatMessage(
+                role="user",
+                content=(
+                    "### Task:\nGenerate 1-3 broad tags categorizing the main "
+                    "themes of the chat history...\n\n### Chat History:\n"
+                    "<chat_history>\nUSER: hi\n</chat_history>"
+                ),
+            )
+        ]
+    )
+    result = await _run_or_resume_once(
+        _FakeRuntime(),  # type: ignore[arg-type]
+        _FakeAuditor(),
+        body,
+        settings=_FakeRuntime.settings,
+    )
+    assert called["arun"] == 0
+    assert "tags" in (result.get("report") or "").lower()
+    assert not result.get("awaiting_intake")
+

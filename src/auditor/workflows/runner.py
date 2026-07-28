@@ -284,6 +284,229 @@ async def arun_one(
                 return await _invoke()
 
 
+def _is_intake_thread(thread_id: str) -> bool:
+    tid = (thread_id or "").strip()
+    return ":intake" in tid or tid.endswith("intake")
+
+
+def _checkpoint_has_pending_work(snap: Any) -> bool:
+    """True when a LangGraph snapshot still has ``next`` nodes or interrupts."""
+    if snap is None:
+        return False
+    if snap.next:
+        return True
+    return bool(snap.tasks and any(getattr(t, "interrupts", None) for t in (snap.tasks or [])))
+
+
+def _identity_from_intake_values(values: dict[str, Any]) -> tuple[str, str]:
+    cid = str(values.get("client_id") or "").strip()
+    arid = str(values.get("audit_run_id") or "").strip()
+    intake = values.get("intake")
+    if isinstance(intake, dict):
+        if not cid:
+            cid = str(intake.get("client_id") or "").strip()
+        if not arid:
+            arid = str(intake.get("audit_run_id") or "").strip()
+    return cid, arid
+
+
+async def _authorize_intake_resume(
+    runtime: AuditRuntime,
+    *,
+    tid: str,
+    client_id: str | None,
+    audit_run_id: str | None,
+    pre_values: dict[str, Any],
+    snap: Any,
+) -> tuple[str, str]:
+    """Authorize intake resume; allow pre-identity bootstrap when pause is known.
+
+    Intake starts on ``audit-{hex}:intake`` before ``intake_gate`` assigns
+    ``client_id`` / ``audit_run_id``. Those threads may resume when a
+    multi-session entry or an interrupted checkpoint exists — never for an
+    arbitrary unbound thread_id.
+    """
+    cid = (client_id or "").strip()
+    arid = (audit_run_id or "").strip()
+    state_cid, state_arid = _identity_from_intake_values(pre_values)
+    if not cid:
+        cid = state_cid
+    if not arid:
+        arid = state_arid
+
+    if cid and arid:
+        cid = require_client_id(cid, context="aresume")
+        arid = require_audit_run_id(arid, context="aresume")
+        if state_cid and state_cid != cid:
+            raise RunScopeIsolationError(
+                f"checkpoint client_id={state_cid!r} does not match resume client_id={cid!r}"
+            )
+        if state_arid and state_arid != arid:
+            raise RunScopeIsolationError(
+                f"checkpoint audit_run_id={state_arid!r} does not match "
+                f"resume audit_run_id={arid!r}"
+            )
+        registry = get_audit_registry(runtime.settings.evidence_dir)
+        arun = registry.get_run(arid)
+        if arun is None:
+            raise RunScopeIsolationError(f"aresume: unknown audit_run_id {arid!r}")
+        verify_registry_ownership(
+            audit_run_id=arid,
+            run_client_id=arun.client_id,
+            requested_client_id=cid,
+            context="aresume",
+        )
+        assert_thread_belongs_to_run(
+            tid,
+            client_id=cid,
+            audit_run_id=arid,
+            context="aresume",
+            registered_base_thread_id=str(arun.base_thread_id or "").strip(),
+        )
+        return cid, arid
+
+    sessions = getattr(runtime, "_multi_sessions", None) or {}
+    known_session = isinstance(sessions, dict) and tid in sessions
+    if known_session or _checkpoint_has_pending_work(snap):
+        return "", ""
+    raise RunScopeIsolationError(
+        f"aresume: required client_id and audit_run_id for resume "
+        f"(thread_id={tid!r}); refusing unbound checkpoint access"
+    )
+
+
+async def _aresume_intake(
+    runtime: AuditRuntime,
+    thread_id: str,
+    user_text: str,
+    *,
+    client_id: str | None = None,
+    audit_run_id: str | None = None,
+) -> dict[str, Any]:
+    """Resume intake on the process ``intake_graph`` (same saver as ``arun_intake``).
+
+    Scoped checkpointer leases are not used here: intake checkpoints are written
+    before run identity exists, and must stay on the process saver until
+    ``intake_complete`` hands off to framework jobs.
+    """
+    tid = (thread_id or "").strip()
+    if not tid:
+        raise RunScopeIsolationError("aresume: thread_id is required")
+
+    # Production API upgrades the process saver before arun; keep that path.
+    # Calling ensure again is idempotent once ``_async_cp_ready``.
+    await ensure_async_checkpointer(runtime)
+    config = {"configurable": {"thread_id": tid}}
+    graph = runtime.intake_graph
+    try:
+        pre = await graph.aget_state(config)
+        pre_values = pre.values or {}
+    except Exception:  # noqa: BLE001
+        pre = None
+        pre_values = {}
+
+    cid, arid = await _authorize_intake_resume(
+        runtime,
+        tid=tid,
+        client_id=client_id,
+        audit_run_id=audit_run_id,
+        pre_values=pre_values,
+        snap=pre,
+    )
+
+    slug = runtime._client_slug_from_values(pre_values)
+    with runtime._target_scope(
+        client_slug=slug,
+        intake=pre_values.get("intake") if isinstance(pre_values.get("intake"), dict) else None,
+    ):
+        result = await graph.ainvoke(Command(resume=user_text), config)
+    snap = await graph.aget_state(config)
+    values = snap.values or {}
+    post_cid, post_arid = _identity_from_intake_values(values)
+    if post_cid:
+        cid = post_cid
+    if post_arid:
+        arid = post_arid
+
+    run_id = values.get("evidence_run_id") or ""
+    store = runtime._evidence_by_run.get(run_id)
+    if store is None and run_id and cid and arid:
+        try:
+            store = EvidenceStore.open_existing(
+                runtime.settings.evidence_dir,
+                str(run_id),
+                client_id=cid,
+                audit_run_id=arid,
+            )
+            runtime._evidence_by_run[store.run_id] = store
+        except Exception:  # noqa: BLE001
+            store = None
+    if store is not None and cid and arid:
+        store.require_ownership(client_id=cid, audit_run_id=arid)
+    decorated = runtime._decorate_result(result, thread_id=tid, store=store, intake=True)
+    if decorated.get("awaiting_hitl"):
+        return decorated
+
+    if values.get("intake_complete"):
+        if not cid or not arid:
+            raise RunScopeIsolationError(
+                f"aresume: intake completed without client_id/audit_run_id (thread_id={tid!r})"
+            )
+        session = runtime._forget_multi_session(tid) or {}
+        user_req = session.get("user_text") or values.get("user_request") or user_text
+        base_thread = session.get("base_thread") or checkpoint_thread_id(cid, arid)
+        run_id = values.get("evidence_run_id") or session.get("run_id") or run_id
+        intake = values.get("intake") or {}
+        if isinstance(intake, dict):
+            intake = {
+                **intake,
+                "client_id": cid,
+                "audit_run_id": arid,
+                "client_slug": str(intake.get("client_slug") or slug or ""),
+            }
+            if not list(intake.get("selected_jobs") or []):
+                from langchain_core.messages import AIMessage
+
+                msg = (
+                    "Pre-audit plan is not confirmed yet. "
+                    "Reply **confirm** (or describe exclusions) to start the audit."
+                )
+                return {
+                    "report": msg,
+                    "messages": [AIMessage(content=msg, name="auditor")],
+                    "awaiting_hitl": True,
+                    "awaiting_intake": True,
+                    "intake_complete": False,
+                    "thread_id": tid,
+                    "evidence_run_id": str(run_id or ""),
+                }
+        try:
+            return await runtime._start_frameworks_after_intake(
+                user_text=str(user_req),
+                base_thread=base_thread,
+                run_id=str(run_id),
+                intake=intake if isinstance(intake, dict) else {},
+            )
+        except Exception as exc:  # noqa: BLE001
+            from auditor.domain.audit_request import AuditRequestRejected
+
+            if isinstance(exc, AuditRequestRejected):
+                msg = exc.operator_message()
+                from langchain_core.messages import AIMessage
+
+                return {
+                    "report": msg,
+                    "messages": [AIMessage(content=msg, name="auditor")],
+                    "awaiting_hitl": False,
+                    "awaiting_intake": False,
+                    "error": exc.code if hasattr(exc, "code") else "audit_request_rejected",
+                    "thread_id": tid,
+                }
+            raise
+
+    return await runtime._continue_multi_after_resume(tid, decorated)
+
+
 async def aresume(
     runtime: AuditRuntime,
     thread_id: str,
@@ -294,9 +517,20 @@ async def aresume(
 ) -> dict[str, Any]:
     """Resume a graph paused on intake or ``human_gate``.
 
-    CORE-005: resume is bound to exact ``client_id`` + ``audit_run_id``. A
-    foreign ``thread_id`` cannot open another run's checkpoint.
+    CORE-005: HITL resume is bound to exact ``client_id`` + ``audit_run_id``.
+    Intake may resume pre-identity ``audit-{hex}:intake`` threads when the
+    pause is known (multi-session or interrupted checkpoint).
     """
+    tid = (thread_id or "").strip()
+    if _is_intake_thread(tid):
+        return await _aresume_intake(
+            runtime,
+            tid,
+            user_text,
+            client_id=client_id,
+            audit_run_id=audit_run_id,
+        )
+
     cid, arid, tid = await _resolve_resume_identity(
         runtime,
         thread_id=thread_id,
@@ -306,8 +540,7 @@ async def aresume(
     )
     async with _checkpointer_lease(runtime, client_id=cid, audit_run_id=arid) as scoped:
         config = {"configurable": {"thread_id": tid}}
-        is_intake = ":intake" in tid or tid.endswith("intake")
-        graph = scoped.intake_graph if is_intake else scoped.graph
+        graph = scoped.graph
         try:
             pre = await graph.aget_state(config)
             pre_values = pre.values or {}
@@ -348,29 +581,9 @@ async def aresume(
                 store = None
         if store is not None:
             store.require_ownership(client_id=cid, audit_run_id=arid)
-        decorated = runtime._decorate_result(result, thread_id=tid, store=store, intake=is_intake)
+        decorated = runtime._decorate_result(result, thread_id=tid, store=store, intake=False)
         if decorated.get("awaiting_hitl"):
             return decorated
-
-        if is_intake and values.get("intake_complete"):
-            # Continue into framework audits using intake answers.
-            session = runtime._forget_multi_session(tid) or {}
-            user_req = session.get("user_text") or values.get("user_request") or user_text
-            base_thread = session.get("base_thread") or checkpoint_thread_id(cid, arid)
-            run_id = values.get("evidence_run_id") or session.get("run_id") or run_id
-            intake = values.get("intake") or {}
-            if isinstance(intake, dict):
-                intake = {
-                    **intake,
-                    "client_id": cid,
-                    "audit_run_id": arid,
-                }
-            return await runtime._start_frameworks_after_intake(
-                user_text=str(user_req),
-                base_thread=base_thread,
-                run_id=str(run_id),
-                intake=intake if isinstance(intake, dict) else {},
-            )
 
         # If this thread was part of a multi-framework run, continue the queue.
         return await runtime._continue_multi_after_resume(tid, decorated)

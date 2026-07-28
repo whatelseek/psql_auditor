@@ -28,6 +28,8 @@ last_updated: 2026-07-28
 ## Gotchas
 - Mixing clients in one evidence root breaks CORE-001 ownership.
 - Large outputs: respect truncation policy without silent meaning loss (`EVID-007` open).
+- `rebind_run_id` must not transplant a source `ownership.json` into a new `audit_run_id` path; after move, ownership is rewritten to the destination identity when provided.
+- Intake resumes re-run `intake_gate`; durable `client_id` / `audit_run_id` are restored from meta, but questionnaire answers are not (interrupt replay order).
 
 ## Verify
 - [ ] Evidence path includes run id
