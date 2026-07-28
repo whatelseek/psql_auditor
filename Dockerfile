@@ -16,8 +16,10 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY agents ./agents
 COPY mcps ./mcps
+COPY tools ./tools
 
-RUN pip install --no-cache-dir .
+# mcp 2.x breaks langchain-mcp-adapters 0.3.x (RequestContext import).
+RUN pip install --no-cache-dir . "mcp>=1.0.0,<2"
 
 # Pre-warm Postgres MCP (npm).
 RUN npx -y mcp-postgres-server --help >/dev/null 2>&1 || true
@@ -25,6 +27,7 @@ RUN npx -y mcp-postgres-server --help >/dev/null 2>&1 || true
 ENV PYTHONUNBUFFERED=1 \
     AGENTS_DIR=/app/agents \
     MCPS_DIR=/app/mcps \
+    TOOLS_DIR=/app/tools \
     HOST=0.0.0.0 \
     PORT=8000 \
     MCP_POSTGRES_COMMAND=npx \

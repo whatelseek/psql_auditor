@@ -27,6 +27,7 @@ from auditor.tools.mcp_client import McpPoolShutdownTimeoutError, PoolState, Pos
 
 if TYPE_CHECKING:
     from auditor.graph import AuditorGraph
+    from auditor.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class ApplicationRuntime:
         mcp_pool: PostgresMcpPool | None = None,
         results_store: ResultsStore | None = None,
         task_registry: TaskRegistry | None = None,
+        tool_registry: "ToolRegistry | None" = None,
         graph_factory: Callable[["ApplicationRuntime"], "AuditorGraph"] | None = None,
         shutdown_timeout: float = 10.0,
     ) -> None:
@@ -82,6 +84,7 @@ class ApplicationRuntime:
         self.task_registry = task_registry or TaskRegistry(
             shutdown_timeout=min(5.0, shutdown_timeout)
         )
+        self.tool_registry: ToolRegistry | None = tool_registry
         self._graph_factory = graph_factory
         self.graph: AuditorGraph | None = None
         self._start_lock = asyncio.Lock()
@@ -109,7 +112,25 @@ class ApplicationRuntime:
                 raise RuntimeClosedError("cannot start a closed application runtime")
             self.state = RuntimeState.STARTING
             try:
+                from auditor.domain.audit_request import POC_TOOL_PROFILE
                 from auditor.graph import AuditorGraph
+                from auditor.tool_registry import (
+                    REQUIRED_POC_SSH_TOOL_IDS,
+                    load_tool_registry,
+                    validate_runtime_tool_registry,
+                )
+
+                if self.tool_registry is None:
+                    registry = load_tool_registry(
+                        self.settings.tools_dir,
+                        profile=POC_TOOL_PROFILE,
+                    )
+                    validate_runtime_tool_registry(
+                        registry,
+                        required_tool_ids=REQUIRED_POC_SSH_TOOL_IDS,
+                        tools_dir=self.settings.tools_dir,
+                    )
+                    self.tool_registry = registry
 
                 if self._graph_factory is not None:
                     self.graph = self._graph_factory(self)
@@ -119,6 +140,7 @@ class ApplicationRuntime:
                         mcp_pool=self.mcp_pool,
                         results_store=self.results_store,
                         task_registry=self.task_registry,
+                        tool_registry=self.tool_registry,
                     )
                 self.state = RuntimeState.RUNNING
                 return self

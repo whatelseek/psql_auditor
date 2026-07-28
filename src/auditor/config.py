@@ -40,6 +40,8 @@ class Settings(BaseSettings):
         agents_dir: Directory of drop-in framework Markdown files (``agents/*.md``).
         mcps_dir: Declarative MCP registry directory (``mcps/registry.json``);
             credentials come from inventory via ``envFrom``, not the JSON file.
+        tools_dir: Tool catalog and capability-policy root (``tools/`` locally,
+            ``/app/tools`` in the container). Never taken from inventory or LLM output.
         playbooks_dir: Seed YAML playbooks for long-term procedural memory
             (default ``agents/playbooks``).
         memory_dir: Persisted learned playbook overlay (LangGraph-style store).
@@ -129,6 +131,8 @@ class Settings(BaseSettings):
     memory_learn: bool = True
     # Declarative MCP servers (``mcps/registry.json``); credentials stay in inventory
     mcps_dir: Path = Field(default=Path("mcps"))
+    # Tool catalog + capability policies (``tools/catalog``, ``tools/policies``)
+    tools_dir: Path = Field(default=Path("tools"))
     # Per-requirement command execution artifacts
     evidence_dir: Path = Field(default=Path("artifacts"))
     # Durable LangGraph checkpointer (Sqlite) — survives agent restarts

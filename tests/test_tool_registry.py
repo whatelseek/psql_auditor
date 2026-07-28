@@ -724,3 +724,37 @@ async def test_execute_tool_calls_rejects_stale_run_snapshot(tmp_path: Path) -> 
     )
     assert not tool.called
     assert messages[0].content.startswith("Tool unauthorized:")
+
+
+
+@pytest.mark.unit
+def test_registry_cache_isolates_directories(tmp_path: Path) -> None:
+    """Process cache must not mix catalogs from different tools directories."""
+    root_a = tmp_path / "tools_a"
+    root_b = tmp_path / "tools_b"
+    for root, desc in ((root_a, "catalog-a"), (root_b, "catalog-b")):
+        catalog = root / "catalog"
+        payload_run = _valid_ssh_manifest("ssh_run")
+        payload_run["description"] = desc
+        _write_manifest(catalog, "ssh_run", payload_run)
+        _write_manifest(catalog, "ssh_read_file", _valid_ssh_manifest("ssh_read_file"))
+        _write_policy(
+            root,
+            "poc_audit_v1",
+            {
+                "version": "1.0.0",
+                "profile": "poc_audit_v1",
+                "readonly_required": True,
+                "allowed_tools": ["ssh_run", "ssh_read_file"],
+                "denied_tools": [],
+                "allowed_transports": ["ssh"],
+                "max_output_chars": 6000,
+                "require_inventory_credentials": True,
+            },
+        )
+
+    registry_a = get_tool_registry(tools_dir=root_a, profile="poc_audit_v1")
+    registry_b = get_tool_registry(tools_dir=root_b, profile="poc_audit_v1")
+    assert registry_a is not registry_b
+    assert registry_a.catalog_hash != registry_b.catalog_hash
+    assert get_tool_registry(tools_dir=root_a, profile="poc_audit_v1") is registry_a

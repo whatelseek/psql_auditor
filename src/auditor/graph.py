@@ -102,29 +102,35 @@ __all__ = [
 ]
 
 
-def _registry_ssh_tools() -> list:
+def _registry_ssh_tools(registry=None) -> list:
     """SSH tools authorized by the tool registry + capability policy (INPUT-004).
 
     Fail-closed: when the registry/policy authorizes no SSH tools, return an
     empty list. Never fall back to unbound legacy helpers in production.
     """
-    registry = get_tool_registry()
-    return registry.bindable_langchain_tools(transports=("ssh",))
+    from auditor.tool_registry import ToolRegistry
+
+    active: ToolRegistry = registry if registry is not None else get_tool_registry()
+    return active.bindable_langchain_tools(transports=("ssh",))
 
 
-def _all_tools(mcp_pool: PostgresMcpPool | None = None) -> list:
+def _all_tools(mcp_pool: PostgresMcpPool | None = None, *, tool_registry=None) -> list:
     """Collect LangChain tools for evidence gathering.
 
     SSH tools are bound only when authorized by the tool registry. WinRM and
     MCP remain on the transitional path until their TOOL-* migrations.
     """
     pool = mcp_pool or PostgresMcpPool()
-    return [*_registry_ssh_tools(), *get_winrm_tools(), *build_mcp_tools(pool)]
+    return [
+        *_registry_ssh_tools(tool_registry),
+        *get_winrm_tools(),
+        *build_mcp_tools(pool),
+    ]
 
 
-def _host_tools() -> list:
+def _host_tools(*, tool_registry=None) -> list:
     """Remote host tools (registry SSH + transitional WinRM) for discovery."""
-    return [*_registry_ssh_tools(), *get_winrm_tools()]
+    return [*_registry_ssh_tools(tool_registry), *get_winrm_tools()]
 
 
 class AuditorGraph:
@@ -142,6 +148,7 @@ class AuditorGraph:
         mcp_pool: PostgresMcpPool | None = None,
         results_store: Any | None = None,
         task_registry: TaskRegistry | None = None,
+        tool_registry: Any | None = None,
     ) -> None:
         """Wire settings, models, tools, memory, and compile LangGraph workflows.
 
@@ -150,6 +157,8 @@ class AuditorGraph:
             mcp_pool: Runtime-owned MCP pool; a private pool is created when omitted.
             results_store: Optional results warehouse bound into playbooks/tools.
             task_registry: Background task registry (created when omitted).
+            tool_registry: Validated registry owned by ``ApplicationRuntime`` when
+                provided; otherwise loads the configured default catalog.
         """
         self.settings = settings or get_settings()
         self._owns_mcp_pool = mcp_pool is None
@@ -157,7 +166,10 @@ class AuditorGraph:
         self.results_store = results_store
         self._owns_task_registry = task_registry is None
         self.task_registry = task_registry or TaskRegistry()
-        self.tools = _all_tools(self.mcp_pool)
+        self.tool_registry = tool_registry or get_tool_registry(
+            tools_dir=self.settings.tools_dir
+        )
+        self.tools = _all_tools(self.mcp_pool, tool_registry=self.tool_registry)
         self.tools_by_name = {t.name: t for t in self.tools}
         self._evidence = EvidenceRegistry()
         # Shared dict for back-compat with followup/adhoc/tests.
@@ -185,7 +197,9 @@ class AuditorGraph:
             else None
         )
         self.evidence_model = build_chat_model(self.settings).bind_tools(self.tools)
-        self.evidence_model_ssh = build_chat_model(self.settings).bind_tools(_host_tools())
+        self.evidence_model_ssh = build_chat_model(self.settings).bind_tools(
+            _host_tools(tool_registry=self.tool_registry)
+        )
         self.fill_model = build_chat_model(self.settings)
         self.deps = GraphDependencies(
             settings=self.settings,

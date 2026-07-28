@@ -29,10 +29,12 @@ last_updated: 2026-07-28
 
 [`ToolRegistry`](mex://class:a76e423f08f4386bde84cb33bfff24ca) in `src/auditor/tool_registry.py` + `tools/catalog/*.json`.
 
+- Catalog root is `settings.tools_dir` (`TOOLS_DIR`; default `tools`, container `/app/tools`)
+- `ApplicationRuntime.start()` loads, validates (`validate_runtime_tool_registry`), and injects the registry into `AuditorGraph` — missing/invalid required SSH tools fail startup (`RuntimeToolCatalogError` → `RuntimeStartupError`)
 - Manifests declare transport, entrypoint, limits, executability
 - Invalid tools may appear in catalog but are **not** LLM-bound
 - Plan/run pin `tool_catalog_hash` and `capability_policy_hash`; stale snapshots raise `tool_snapshot_stale`
-- SSH adapters: `ssh_run`, `ssh_read_file` (`TOOL-001` partial)
+- SSH adapters: `ssh_run`, `ssh_read_file` (`TOOL-001` partial; packaging/startup validation = TOOL001-07)
 
 ## Capability policy
 
