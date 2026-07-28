@@ -34,6 +34,7 @@ class AnalyzeBody(BaseModel):
 
 
 class ConfirmBody(BaseModel):
+    plan_revision_id: str = Field(min_length=1)
     action: str = "approve"
     host_ids: list[str] = Field(default_factory=list)
     framework_ids: list[str] = Field(default_factory=list)
@@ -83,6 +84,8 @@ async def analyze_inventory(client_id: str, request: Request) -> dict[str, Any]:
     persist_plan(plan, _plans_dir(Path(settings.inventory_dir), client_id) / "latest.json")
     return {
         "inventory_version": inventory.version.model_dump(),
+        "plan_id": plan.plan_id,
+        "plan_revision_id": plan.plan_revision_id,
         "plan": plan.model_dump(),
         "conflicts": [c.model_dump() for c in inventory.conflicts],
         "confirmation_prompt": plan_confirmation_prompt(plan),
@@ -143,6 +146,7 @@ async def confirm_plan(plan_id: str, body: ConfirmBody, request: Request) -> dic
                 note=body.note,
                 executor=_runtime_executor(request),
                 refresh_discovery=body.refresh_discovery,
+                expected_plan_revision_id=body.plan_revision_id,
             )
             persist_plan(started["plan"], plan_path)
             return {
@@ -161,6 +165,7 @@ async def confirm_plan(plan_id: str, body: ConfirmBody, request: Request) -> dic
             inventory=inventory if body.action == "approve" else None,
             inventory_dir=settings.inventory_dir,
             client_name=client_name,
+            expected_plan_revision_id=body.plan_revision_id,
         )
     except PlanConfirmationRejected as exc:
         status = 409 if getattr(exc, "code", "") in {"plan_stale", "audit_plan_stale"} else 400
