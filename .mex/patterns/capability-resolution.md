@@ -29,8 +29,10 @@ last_updated: 2026-07-28
 6. Candidate evaluation never invokes tools; authorization uses `registry.authorized_tools()` only.
 
 
-7. Build typed capability discovery plans from missing facts/capabilities + `discovery_hints` + authorized manifests; check host `access.<segment>.available` generically; dedupe identical host/operation work across frameworks.
-8. Pin `discovery_plan_hash` on `AuditPlan` / plan revision; assert on confirm/start.
+7. Build typed capability discovery plans from missing facts/capabilities + `discovery_hints` + authorized manifests; check host `access.<segment>.available` generically; dedupe identical host/operation work across frameworks (never across hosts).
+8. Prefer planned hint alternatives over blocked/operator ones; keep `any_of` as one group; require exact framework metadata identity.
+9. Use one ToolRegistry snapshot for candidate evaluation, discovery planning, and AuditPlan tool hashes.
+10. Pin `discovery_plan_hash` + `framework_catalog_hash` on `AuditPlan` / plan revision; assert on confirm/start with the same logical catalog.
 
 ## Gotchas
 - Catalog visibility ≠ authorization to bind.

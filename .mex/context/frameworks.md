@@ -65,5 +65,9 @@ Markdown frameworks may expose **strict structured applicability metadata** in f
 
 - Discovery proposals use **typed `discovery_hints` only** — never framework IDs, titles, ports, or Markdown prose.
 - Planning (`build_capability_discovery_plan`) is separate from execution (INPUT005-15+).
-- `AuditPlan` pins `discovery_plan_hash`; confirmation rejects stale discovery plans.
+- Invalid inventory hosts are blocked before hint/operation evaluation.
+- Hint alternatives for the same missing fact are evaluated together; blocked hints cannot hide a planned alternative.
+- `required_capabilities.all_of` resolves independently; `any_of` is one alternative group (`capability_options`).
+- Framework metadata resolves only by exact `(framework_id, framework_version)` — no id-only fallback.
+- `AuditPlan` pins `discovery_plan_hash` and secret-free `framework_catalog_hash`; confirmation rejects stale discovery plans / catalogs.
 

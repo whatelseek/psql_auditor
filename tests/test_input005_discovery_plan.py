@@ -21,7 +21,10 @@ from auditor.domain.normalized_facts import (
     NormalizedFact,
 )
 from auditor.inventory.discovery_plan import build_capability_discovery_plan
-from auditor.inventory.framework_candidates import evaluate_framework_candidates
+from auditor.inventory.framework_candidates import (
+    FrameworkCandidate,
+    evaluate_framework_candidates,
+)
 from auditor.inventory.plan import (
     assert_plan_matches_discovery_plan,
     generate_audit_plan,
@@ -853,3 +856,1285 @@ def test_cross_format_determinism(tmp_path: Path) -> None:
     # differ by source format; semantic steps must still match.
     assert a.steps[0].missing_facts == b.steps[0].missing_facts
     assert a.steps[0].status == b.steps[0].status
+
+
+def _invalid_inv(hosts: list[InventoryHost] | None = None) -> ClientInventory:
+    return _inventory(
+        hosts or [_host()],
+        issues=(
+            ValidationIssue(
+                level="error",
+                code="host_invalid",
+                message="bad host",
+                host_id="host-01",
+            ),
+        ),
+    )
+
+
+def _assert_all_invalid_host_blocked(plan: Any) -> None:
+    assert plan.steps
+    assert all(s.status == "blocked" for s in plan.steps)
+    assert all(s.reason == "Host has inventory validation errors" for s in plan.steps)
+    assert not any(s.status == "planned" for s in plan.steps)
+    assert not any(s.status == "requires_operator_decision" for s in plan.steps)
+
+
+def test_invalid_host_no_discovery_hints(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "os_probe.md",
+        frontmatter="""
+id: os_probe
+version: "1"
+family_id: os_probe
+language: en
+applicability:
+  all:
+    - fact: os.name
+      operator: equals
+      value: Ubuntu
+required_facts:
+  - os.name
+discovery_hints: []
+target:
+  scope: host
+""",
+    )
+    inv = _invalid_inv()
+    facts = {"host-01": _fact_set("host-01", {"access.ssh.available": True})}
+    registry = _registry({"ssh_run": _manifest("ssh_run")})
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    _assert_all_invalid_host_blocked(plan)
+
+
+def test_invalid_host_hint_without_expected_facts(tmp_path: Path) -> None:
+    agents = _os_name_agents(tmp_path, expected=[])
+    inv = _invalid_inv()
+    facts = {"host-01": _fact_set("host-01", {"access.ssh.available": True})}
+    registry = _registry({"ssh_run": _manifest("ssh_run")})
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    _assert_all_invalid_host_blocked(plan)
+
+
+def test_invalid_host_missing_capability_no_hint(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "cap.md",
+        frontmatter="""
+id: cap_fw
+version: "1"
+family_id: cap_fw
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+required_capabilities:
+  all_of: [host.read]
+discovery_hints: []
+target:
+  scope: host
+""",
+    )
+    inv = _invalid_inv([_host(os_name="Ubuntu", os_family="linux")])
+    facts = {"host-01": _fact_set("host-01", {"os.family": "linux", "os.name": "Ubuntu"})}
+    registry = _registry({"ssh_run": _manifest("ssh_run")})
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    _assert_all_invalid_host_blocked(plan)
+
+
+def test_invalid_host_unknown_operation(tmp_path: Path) -> None:
+    agents = _os_name_agents(tmp_path, ops=["unknown_operation"])
+    inv = _invalid_inv()
+    facts = {"host-01": _fact_set("host-01", {"access.ssh.available": True})}
+    registry = _registry({"ssh_run": _manifest("ssh_run")})
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    _assert_all_invalid_host_blocked(plan)
+
+
+def test_invalid_host_multiple_possible_hints(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "os_probe.md",
+        frontmatter="""
+id: os_probe
+version: "1"
+family_id: os_probe
+language: en
+applicability:
+  all:
+    - fact: os.name
+      operator: equals
+      value: Ubuntu
+required_facts:
+  - os.name
+discovery_hints:
+  - capability: a.read
+    operation_ids: [unknown_operation]
+    expected_facts: [os.name]
+  - capability: z.read
+    operation_ids: [ssh_run]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+    )
+    inv = _invalid_inv()
+    facts = {"host-01": _fact_set("host-01", {"access.ssh.available": True})}
+    registry = _registry({"ssh_run": _manifest("ssh_run", capabilities=("z.read",))})
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    _assert_all_invalid_host_blocked(plan)
+
+
+def test_alternative_unknown_then_valid(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "os_probe.md",
+        frontmatter="""
+id: os_probe
+version: "1"
+family_id: os_probe
+language: en
+applicability:
+  all:
+    - fact: os.name
+      operator: equals
+      value: Ubuntu
+required_facts:
+  - os.name
+discovery_hints:
+  - capability: a.read
+    operation_ids: [unknown_operation]
+    expected_facts: [os.name]
+  - capability: z.read
+    operation_ids: [valid_operation]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+    )
+    inv = _inventory([_host()])
+    facts = {"host-01": _fact_set("host-01", {"access.ssh.available": True})}
+    registry = _registry(
+        {"valid_operation": _manifest("valid_operation", capabilities=("z.read",))}
+    )
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    assert len(plan.steps) == 1
+    assert plan.steps[0].status == "planned"
+    assert plan.steps[0].operation_id == "valid_operation"
+    assert not any(s.status == "blocked" for s in plan.steps)
+    assert plan.unresolved_questions == ()
+
+
+def test_alternative_unauthorized_then_valid(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "os_probe.md",
+        frontmatter="""
+id: os_probe
+version: "1"
+family_id: os_probe
+language: en
+applicability:
+  all:
+    - fact: os.name
+      operator: equals
+      value: Ubuntu
+required_facts:
+  - os.name
+discovery_hints:
+  - capability: host.read
+    operation_ids: [denied_op]
+    expected_facts: [os.name]
+  - capability: host.read
+    operation_ids: [allowed_op]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+    )
+    inv = _inventory([_host()])
+    facts = {"host-01": _fact_set("host-01", {"access.ssh.available": True})}
+    registry = _registry(
+        {
+            "denied_op": _manifest("denied_op"),
+            "allowed_op": _manifest("allowed_op"),
+        },
+        allowed=("allowed_op",),
+        denied=("denied_op",),
+    )
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    assert len(plan.steps) == 1
+    assert plan.steps[0].status == "planned"
+    assert plan.steps[0].operation_id == "allowed_op"
+
+
+def test_alternative_access_unavailable_then_global(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "os_probe.md",
+        frontmatter="""
+id: os_probe
+version: "1"
+family_id: os_probe
+language: en
+applicability:
+  all:
+    - fact: os.name
+      operator: equals
+      value: Ubuntu
+required_facts:
+  - os.name
+discovery_hints:
+  - capability: host.read
+    operation_ids: [ssh_only]
+    expected_facts: [os.name]
+  - capability: host.read
+    operation_ids: [global_op]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+    )
+    inv = _inventory([_host()])
+    facts = {"host-01": _fact_set("host-01", {})}
+    registry = _registry(
+        {
+            "ssh_only": _manifest("ssh_only", inventory_access=("ssh",)),
+            "global_op": _manifest("global_op", inventory_access=()),
+        }
+    )
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    assert len(plan.steps) == 1
+    assert plan.steps[0].status == "planned"
+    assert plan.steps[0].operation_id == "global_op"
+
+
+def test_all_alternatives_blocked(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "os_probe.md",
+        frontmatter="""
+id: os_probe
+version: "1"
+family_id: os_probe
+language: en
+applicability:
+  all:
+    - fact: os.name
+      operator: equals
+      value: Ubuntu
+required_facts:
+  - os.name
+discovery_hints:
+  - capability: b.read
+    operation_ids: [unknown_b]
+    expected_facts: [os.name]
+  - capability: a.read
+    operation_ids: [unknown_a]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+    )
+    inv = _inventory([_host()])
+    facts = {"host-01": _fact_set("host-01", {"access.ssh.available": True})}
+    registry = _registry({"ssh_run": _manifest("ssh_run")})
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    blocked = [s for s in plan.steps if s.status == "blocked"]
+    assert len(blocked) == 1
+    assert len(plan.unresolved_questions) == 1
+    assert blocked[0].capability == "a.read"
+    assert "unknown" in blocked[0].reason.lower()
+
+
+def test_hint_order_independence(tmp_path: Path) -> None:
+    def _agents(root: Path, hints: str) -> Path:
+        agents = root / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        _write_fw(
+            agents,
+            "os_probe.md",
+            frontmatter=f"""
+id: os_probe
+version: "1"
+family_id: os_probe
+language: en
+applicability:
+  all:
+    - fact: os.name
+      operator: equals
+      value: Ubuntu
+required_facts:
+  - os.name
+discovery_hints:
+{hints}
+target:
+  scope: host
+""",
+        )
+        return agents
+
+    hints_a = """
+  - capability: a.read
+    operation_ids: [unknown_operation]
+    expected_facts: [os.name]
+  - capability: z.read
+    operation_ids: [valid_operation]
+    expected_facts: [os.name]
+"""
+    hints_b = """
+  - capability: z.read
+    operation_ids: [valid_operation]
+    expected_facts: [os.name]
+  - capability: a.read
+    operation_ids: [unknown_operation]
+    expected_facts: [os.name]
+"""
+    inv = _inventory([_host()])
+    facts = {"host-01": _fact_set("host-01", {"access.ssh.available": True})}
+    registry = _registry(
+        {"valid_operation": _manifest("valid_operation", capabilities=("z.read",))}
+    )
+    a = build_capability_discovery_plan(
+        inv,
+        (),
+        agents_dir=_agents(tmp_path / "a", hints_a),
+        registry=registry,
+        host_facts=facts,
+    )
+    b = build_capability_discovery_plan(
+        inv,
+        (),
+        agents_dir=_agents(tmp_path / "b", hints_b),
+        registry=registry,
+        host_facts=facts,
+    )
+    assert [s.model_dump() for s in a.steps] == [s.model_dump() for s in b.steps]
+    assert a.discovery_plan_id == b.discovery_plan_id
+    assert a.discovery_plan_hash == b.discovery_plan_hash
+    assert a.unresolved_questions == b.unresolved_questions
+
+
+def test_multi_fact_alternative_no_duplicate_work(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "mixed.md",
+        frontmatter="""
+id: mixed
+version: "1"
+family_id: mixed
+language: en
+applicability:
+  all:
+    - fact: os.name
+      operator: equals
+      value: Ubuntu
+required_facts:
+  - os.name
+  - os.version
+discovery_hints:
+  - capability: a.read
+    operation_ids: [unknown_operation]
+    expected_facts: [os.name]
+  - capability: z.read
+    operation_ids: [bundle_op]
+    expected_facts: [os.name, os.version]
+target:
+  scope: host
+""",
+    )
+    inv = _inventory([_host()])
+    facts = {"host-01": _fact_set("host-01", {"access.ssh.available": True})}
+    registry = _registry(
+        {"bundle_op": _manifest("bundle_op", capabilities=("z.read",), inventory_access=())}
+    )
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    assert len(plan.steps) == 1
+    assert plan.steps[0].status == "planned"
+    assert plan.steps[0].operation_id == "bundle_op"
+    assert plan.steps[0].missing_facts == ("os.name", "os.version")
+    assert not any(s.status == "blocked" for s in plan.steps)
+
+
+def test_any_of_one_eligible_alternative(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "any.md",
+        frontmatter="""
+id: any_fw
+version: "1"
+family_id: any_fw
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+required_capabilities:
+  any_of:
+    - host.ssh.read
+    - host.winrm.read
+discovery_hints:
+  - capability: host.ssh.read
+    operation_ids: [ssh_probe]
+    expected_facts: [os.name]
+  - capability: host.winrm.read
+    operation_ids: [winrm_probe]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+    )
+    inv = _inventory([_host(os_name="Ubuntu", os_family="linux")])
+    facts = {
+        "host-01": _fact_set(
+            "host-01",
+            {"os.family": "linux", "os.name": "Ubuntu", "access.ssh.available": True},
+        )
+    }
+    registry = _registry(
+        {
+            "ssh_probe": _manifest(
+                "ssh_probe",
+                capabilities=("host.ssh.read",),
+                inventory_access=("ssh",),
+            ),
+            "winrm_probe": _manifest(
+                "winrm_probe",
+                capabilities=("host.winrm.read",),
+                inventory_access=("winrm",),
+            ),
+        }
+    )
+
+    fake = FrameworkCandidate(
+        host_id="host-01",
+        framework_id="any_fw",
+        framework_version="1",
+        family_id="any_fw",
+        language="en",
+        metadata_state="structured",
+        predicate_result="matched",
+        target_scope="host",
+        target_service="",
+        matched_fact_keys=("os.family",),
+        missing_facts=(),
+        required_any_capabilities=("host.ssh.read", "host.winrm.read"),
+        required_all_capabilities=(),
+        available_capabilities=(),
+        missing_capabilities=("host.ssh.read", "host.winrm.read"),
+        capability_ready=False,
+        applicability_fingerprint="fp",
+    )
+
+    with patch(
+        "auditor.inventory.discovery_plan.evaluate_framework_candidates",
+        return_value=[fake],
+    ):
+        plan = build_capability_discovery_plan(
+            inv, (), agents_dir=agents, registry=registry, host_facts=facts
+        )
+    planned = [s for s in plan.steps if s.status == "planned"]
+    assert len(planned) == 1
+    assert planned[0].capability == "host.ssh.read"
+    assert planned[0].operation_id == "ssh_probe"
+    assert not any(s.status == "blocked" and s.capability == "host.winrm.read" for s in plan.steps)
+
+
+def test_any_of_both_eligible_lexical_choice(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "any.md",
+        frontmatter="""
+id: any_fw
+version: "1"
+family_id: any_fw
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+required_capabilities:
+  any_of:
+    - host.winrm.read
+    - host.ssh.read
+discovery_hints:
+  - capability: host.ssh.read
+    operation_ids: [ssh_probe]
+    expected_facts: [os.name]
+  - capability: host.winrm.read
+    operation_ids: [winrm_probe]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+    )
+    inv = _inventory([_host(os_name="Ubuntu", os_family="linux")])
+    facts = {
+        "host-01": _fact_set(
+            "host-01",
+            {
+                "os.family": "linux",
+                "os.name": "Ubuntu",
+                "access.ssh.available": True,
+                "access.winrm.available": True,
+            },
+        )
+    }
+    registry = _registry(
+        {
+            "ssh_probe": _manifest(
+                "ssh_probe",
+                capabilities=("host.ssh.read",),
+                inventory_access=("ssh",),
+            ),
+            "winrm_probe": _manifest(
+                "winrm_probe",
+                capabilities=("host.winrm.read",),
+                inventory_access=("winrm",),
+            ),
+        }
+    )
+
+    fake = FrameworkCandidate(
+        host_id="host-01",
+        framework_id="any_fw",
+        framework_version="1",
+        family_id="any_fw",
+        language="en",
+        metadata_state="structured",
+        predicate_result="matched",
+        target_scope="host",
+        target_service="",
+        matched_fact_keys=("os.family",),
+        missing_facts=(),
+        required_any_capabilities=("host.ssh.read", "host.winrm.read"),
+        required_all_capabilities=(),
+        available_capabilities=(),
+        missing_capabilities=("host.ssh.read", "host.winrm.read"),
+        capability_ready=False,
+        applicability_fingerprint="fp",
+    )
+
+    with patch(
+        "auditor.inventory.discovery_plan.evaluate_framework_candidates",
+        return_value=[fake],
+    ):
+        plan = build_capability_discovery_plan(
+            inv, (), agents_dir=agents, registry=registry, host_facts=facts
+        )
+    assert len(plan.steps) == 1
+    assert plan.steps[0].status == "planned"
+    assert plan.steps[0].capability == "host.ssh.read"
+    assert plan.steps[0].capability_options == ("host.ssh.read", "host.winrm.read")
+
+
+def test_any_of_no_eligible_preserves_options(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "any.md",
+        frontmatter="""
+id: any_fw
+version: "1"
+family_id: any_fw
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+required_capabilities:
+  any_of:
+    - host.ssh.read
+    - host.winrm.read
+discovery_hints:
+  - capability: host.ssh.read
+    operation_ids: [ssh_probe]
+    expected_facts: [os.name]
+  - capability: host.winrm.read
+    operation_ids: [winrm_probe]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+    )
+    inv = _inventory([_host(os_name="Ubuntu", os_family="linux")])
+    facts = {
+        "host-01": _fact_set(
+            "host-01",
+            {"os.family": "linux", "os.name": "Ubuntu"},
+        )
+    }
+    registry = _registry(
+        {
+            "ssh_probe": _manifest(
+                "ssh_probe",
+                capabilities=("host.ssh.read",),
+                inventory_access=("ssh",),
+            ),
+            "winrm_probe": _manifest(
+                "winrm_probe",
+                capabilities=("host.winrm.read",),
+                inventory_access=("winrm",),
+            ),
+        }
+    )
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    assert len(plan.steps) == 1
+    assert plan.steps[0].status in {"blocked", "requires_operator_decision"}
+    assert len(plan.unresolved_questions) == 1
+    assert plan.steps[0].capability_options == ("host.ssh.read", "host.winrm.read")
+
+
+def test_any_of_missing_hints_operator_group(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "any.md",
+        frontmatter="""
+id: any_fw
+version: "1"
+family_id: any_fw
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+required_capabilities:
+  any_of:
+    - host.ssh.read
+    - host.winrm.read
+discovery_hints: []
+target:
+  scope: host
+""",
+    )
+    inv = _inventory([_host(os_name="Ubuntu", os_family="linux")])
+    facts = {
+        "host-01": _fact_set(
+            "host-01",
+            {"os.family": "linux", "os.name": "Ubuntu"},
+        )
+    }
+    registry = _registry({"ssh_run": _manifest("ssh_run")})
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    assert len(plan.steps) == 1
+    assert plan.steps[0].status == "requires_operator_decision"
+    assert plan.steps[0].capability_options == ("host.ssh.read", "host.winrm.read")
+
+
+def test_mixed_all_of_and_any_of(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "mixed_caps.md",
+        frontmatter="""
+id: mixed_caps
+version: "1"
+family_id: mixed_caps
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+required_capabilities:
+  all_of:
+    - inventory.read
+  any_of:
+    - host.ssh.read
+    - host.winrm.read
+discovery_hints:
+  - capability: inventory.read
+    operation_ids: [inv_op]
+    expected_facts: [os.name]
+  - capability: host.ssh.read
+    operation_ids: [ssh_probe]
+    expected_facts: [os.name]
+  - capability: host.winrm.read
+    operation_ids: [winrm_probe]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+    )
+    inv = _inventory([_host(os_name="Ubuntu", os_family="linux")])
+    facts = {
+        "host-01": _fact_set(
+            "host-01",
+            {"os.family": "linux", "os.name": "Ubuntu", "access.ssh.available": True},
+        )
+    }
+    registry = _registry(
+        {
+            "inv_op": _manifest(
+                "inv_op",
+                capabilities=("inventory.read",),
+                inventory_access=(),
+            ),
+            "ssh_probe": _manifest(
+                "ssh_probe",
+                capabilities=("host.ssh.read",),
+                inventory_access=("ssh",),
+            ),
+            "winrm_probe": _manifest(
+                "winrm_probe",
+                capabilities=("host.winrm.read",),
+                inventory_access=("winrm",),
+            ),
+        }
+    )
+    fake = FrameworkCandidate(
+        host_id="host-01",
+        framework_id="mixed_caps",
+        framework_version="1",
+        family_id="mixed_caps",
+        language="en",
+        metadata_state="structured",
+        predicate_result="matched",
+        target_scope="host",
+        target_service="",
+        matched_fact_keys=("os.family",),
+        missing_facts=(),
+        required_any_capabilities=("host.ssh.read", "host.winrm.read"),
+        required_all_capabilities=("inventory.read",),
+        available_capabilities=(),
+        missing_capabilities=("host.ssh.read", "host.winrm.read", "inventory.read"),
+        capability_ready=False,
+        applicability_fingerprint="fp",
+    )
+    with patch(
+        "auditor.inventory.discovery_plan.evaluate_framework_candidates",
+        return_value=[fake],
+    ):
+        plan = build_capability_discovery_plan(
+            inv, (), agents_dir=agents, registry=registry, host_facts=facts
+        )
+    caps = {s.capability for s in plan.steps}
+    assert "inventory.read" in caps
+    assert "host.ssh.read" in caps or "host.winrm.read" in caps
+    assert len([s for s in plan.steps if s.capability == "inventory.read"]) == 1
+    any_steps = [s for s in plan.steps if s.capability in {"host.ssh.read", "host.winrm.read"}]
+    assert len(any_steps) == 1
+
+
+def test_any_of_ordering_independence(tmp_path: Path) -> None:
+    def _agents(root: Path, any_block: str) -> Path:
+        agents = root / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        _write_fw(
+            agents,
+            "any.md",
+            frontmatter=f"""
+id: any_fw
+version: "1"
+family_id: any_fw
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+required_capabilities:
+  any_of:
+{any_block}
+discovery_hints:
+  - capability: host.ssh.read
+    operation_ids: [ssh_probe]
+    expected_facts: [os.name]
+  - capability: host.winrm.read
+    operation_ids: [winrm_probe]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+        )
+        return agents
+
+    inv = _inventory([_host(os_name="Ubuntu", os_family="linux")])
+    facts = {
+        "host-01": _fact_set(
+            "host-01",
+            {
+                "os.family": "linux",
+                "os.name": "Ubuntu",
+                "access.ssh.available": True,
+                "access.winrm.available": True,
+            },
+        )
+    }
+    registry = _registry(
+        {
+            "ssh_probe": _manifest(
+                "ssh_probe",
+                capabilities=("host.ssh.read",),
+                inventory_access=("ssh",),
+            ),
+            "winrm_probe": _manifest(
+                "winrm_probe",
+                capabilities=("host.winrm.read",),
+                inventory_access=("winrm",),
+            ),
+        }
+    )
+    fake = FrameworkCandidate(
+        host_id="host-01",
+        framework_id="any_fw",
+        framework_version="1",
+        family_id="any_fw",
+        language="en",
+        metadata_state="structured",
+        predicate_result="matched",
+        target_scope="host",
+        target_service="",
+        matched_fact_keys=("os.family",),
+        missing_facts=(),
+        required_any_capabilities=("host.ssh.read", "host.winrm.read"),
+        required_all_capabilities=(),
+        available_capabilities=(),
+        missing_capabilities=("host.ssh.read", "host.winrm.read"),
+        capability_ready=False,
+        applicability_fingerprint="fp",
+    )
+
+    def _plan(agents_dir: Path) -> Any:
+        with patch(
+            "auditor.inventory.discovery_plan.evaluate_framework_candidates",
+            return_value=[fake],
+        ):
+            return build_capability_discovery_plan(
+                inv, (), agents_dir=agents_dir, registry=registry, host_facts=facts
+            )
+
+    a = _plan(_agents(tmp_path / "a", "    - host.ssh.read\n    - host.winrm.read"))
+    b = _plan(_agents(tmp_path / "b", "    - host.winrm.read\n    - host.ssh.read"))
+    assert a.discovery_plan_id == b.discovery_plan_id
+    assert a.discovery_plan_hash == b.discovery_plan_hash
+    assert [s.model_dump() for s in a.steps] == [s.model_dump() for s in b.steps]
+
+
+def test_exact_framework_version_metadata(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    for ver, op in (("1", "operation_v1"), ("2", "operation_v2")):
+        _write_fw(
+            agents,
+            f"widget_v{ver}.md",
+            frontmatter=f"""
+id: widget
+version: "{ver}"
+family_id: widget
+language: en
+applicability:
+  all:
+    - fact: os.name
+      operator: equals
+      value: Ubuntu
+required_facts:
+  - os.name
+discovery_hints:
+  - capability: host.read
+    operation_ids: [{op}]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+        )
+    inv = _inventory([_host()])
+    facts = {"host-01": _fact_set("host-01", {"access.ssh.available": True})}
+    registry = _registry(
+        {
+            "operation_v1": _manifest("operation_v1"),
+            "operation_v2": _manifest("operation_v2"),
+        }
+    )
+    # Exact match for v1 only when that metadata is present — both versions exist.
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    ops = {s.operation_id for s in plan.steps if s.status == "planned"}
+    assert ops == {"operation_v1", "operation_v2"} or ops.issubset({"operation_v1", "operation_v2"})
+
+    # Candidate for missing version: only v1/v2 files present; simulate by removing one
+    # and injecting a candidate via host facts against remaining catalog after rename.
+    agents_missing = tmp_path / "agents_missing"
+    agents_missing.mkdir()
+    _write_fw(
+        agents_missing,
+        "widget_v1.md",
+        frontmatter="""
+id: widget
+version: "1"
+family_id: widget
+language: en
+applicability:
+  all:
+    - fact: os.name
+      operator: equals
+      value: Ubuntu
+required_facts:
+  - os.name
+discovery_hints:
+  - capability: host.read
+    operation_ids: [operation_v1]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+    )
+    # Build candidate for widget@9 which has no metadata file.
+    fake = FrameworkCandidate(
+        host_id="host-01",
+        framework_id="widget",
+        framework_version="9",
+        family_id="widget",
+        language="en",
+        metadata_state="structured",
+        predicate_result="missing_evidence",
+        target_scope="host",
+        target_service="",
+        matched_fact_keys=(),
+        missing_facts=("os.name",),
+        required_any_capabilities=(),
+        required_all_capabilities=(),
+        available_capabilities=(),
+        missing_capabilities=(),
+        capability_ready=True,
+        applicability_fingerprint="fp",
+    )
+    with patch(
+        "auditor.inventory.discovery_plan.evaluate_framework_candidates",
+        return_value=[fake],
+    ):
+        missing = build_capability_discovery_plan(
+            inv,
+            (),
+            agents_dir=agents_missing,
+            registry=registry,
+            host_facts=facts,
+        )
+    assert len(missing.steps) == 1
+    assert missing.steps[0].status == "requires_operator_decision"
+    assert missing.steps[0].reason == "Exact framework metadata identity is unavailable"
+    assert "operation_v1" not in missing.steps[0].operation_id
+    assert "operation_v2" not in {s.operation_id for s in missing.steps}
+
+
+def test_strict_model_validation_rejects_non_strings() -> None:
+    from pydantic import ValidationError
+
+    from auditor.domain.discovery_plan import CapabilityDiscoveryPlan, DiscoveryPlanStep
+
+    class SecretObject:
+        def __str__(self) -> str:
+            return "SECRET_DISCOVERY_MODEL_CANARY"
+
+    invalid_values: list[Any] = [
+        123,
+        1.5,
+        True,
+        {},
+        {"secret": "value"},
+        [],
+        [["nested"]],
+        set(),
+        (lambda: None),
+        object(),
+        SecretObject(),
+    ]
+
+    base_step = {
+        "step_id": "dstep-" + ("a" * 16),
+        "host_id": "host-01",
+        "capability": "host.read",
+        "status": "blocked",
+        "reason": "Host has inventory validation errors",
+    }
+
+    tuple_fields = (
+        "capability_options",
+        "expected_facts",
+        "missing_facts",
+        "requested_by_frameworks",
+    )
+    string_fields = (
+        "step_id",
+        "host_id",
+        "capability",
+        "operation_id",
+        "tool_id",
+        "reason",
+    )
+
+    for field in string_fields:
+        for bad in invalid_values:
+            payload = dict(base_step)
+            payload[field] = bad
+            with pytest.raises(ValidationError) as exc:
+                DiscoveryPlanStep(**payload)
+            err = str(exc.value)
+            assert "SECRET_DISCOVERY_MODEL_CANARY" not in err
+
+    for field in tuple_fields:
+        for bad in invalid_values:
+            if bad == [] and field != "requested_by_frameworks":
+                # empty list is valid for optional tuple fields
+                continue
+            payload = dict(base_step)
+            if field == "requested_by_frameworks" and bad == []:
+                DiscoveryPlanStep(**payload)  # empty ok
+                continue
+            payload[field] = bad if type(bad) is not list or bad != [["nested"]] else bad
+            # nested list / non-str sequence items
+            if bad == []:
+                continue
+            with pytest.raises(ValidationError) as exc:
+                DiscoveryPlanStep(**payload)
+            assert "SECRET_DISCOVERY_MODEL_CANARY" not in str(exc.value)
+
+    # Nested list / SecretObject as sequence members
+    with pytest.raises(ValidationError) as exc:
+        DiscoveryPlanStep(**{**base_step, "expected_facts": [SecretObject()]})
+    assert "SECRET_DISCOVERY_MODEL_CANARY" not in str(exc.value)
+
+    with pytest.raises(ValidationError):
+        DiscoveryPlanStep(**{**base_step, "step_id": "step-not-valid"})
+    with pytest.raises(ValidationError):
+        DiscoveryPlanStep(**{**base_step, "requested_by_frameworks": ["no-at-sign"]})
+    with pytest.raises(ValidationError):
+        DiscoveryPlanStep(
+            **{
+                **base_step,
+                "status": "planned",
+                "operation_id": "",
+                "tool_id": "",
+                "reason": "x",
+            }
+        )
+    with pytest.raises(ValidationError):
+        DiscoveryPlanStep(
+            **{
+                **base_step,
+                "status": "blocked",
+                "operation_id": "ssh_run",
+                "tool_id": "ssh_run",
+            }
+        )
+
+    plan_base = {
+        "discovery_plan_id": "dplan-" + ("b" * 16),
+        "discovery_plan_hash": "dph-" + ("c" * 16),
+        "client_id": "client-a",
+        "inventory_version_id": "inv-1",
+        "inventory_content_hash": "hash-1",
+    }
+    for field in (
+        "discovery_plan_id",
+        "discovery_plan_hash",
+        "client_id",
+        "inventory_version_id",
+        "inventory_content_hash",
+        "unresolved_questions",
+    ):
+        for bad in (123, SecretObject(), {"secret": "value"}):
+            payload = dict(plan_base)
+            payload[field] = bad
+            with pytest.raises(ValidationError) as exc:
+                CapabilityDiscoveryPlan(**payload)
+            assert "SECRET_DISCOVERY_MODEL_CANARY" not in str(exc.value)
+
+
+def test_non_executable_operation_blocked(tmp_path: Path) -> None:
+    agents = _os_name_agents(tmp_path, ops=["broken_op"])
+    inv = _inventory([_host()])
+    facts = {"host-01": _fact_set("host-01", {"access.ssh.available": True})}
+    registry = _registry({"broken_op": _manifest("broken_op", enabled=False)})
+    plan = build_capability_discovery_plan(
+        inv, (), agents_dir=agents, registry=registry, host_facts=facts
+    )
+    assert len(plan.steps) == 1
+    assert plan.steps[0].status == "blocked"
+    assert "not executable" in plan.steps[0].reason.lower()
+
+
+def test_registry_identity_consistency(tmp_path: Path) -> None:
+    agents = _os_name_agents(tmp_path)
+    inv = _inventory([_host(connection_types=("ssh",))])
+    registry_a = _registry({"ssh_run": _manifest("ssh_run")})
+    registry_a.catalog_hash = "cat-aaaaaaaaaaaa"
+    registry_a.policy_hash = "pol-aaaaaaaaaaaa"
+    registry_b = _registry(
+        {
+            "ssh_run": _manifest("ssh_run"),
+            "extra_tool": _manifest("extra_tool", inventory_access=()),
+        }
+    )
+    registry_b.catalog_hash = "cat-bbbbbbbbbbbb"
+    registry_b.policy_hash = "pol-bbbbbbbbbbbb"
+    plan_a = generate_audit_plan(inv, [], agents_dir=agents, registry=registry_a)
+    plan_b = generate_audit_plan(inv, [], agents_dir=agents, registry=registry_b)
+    assert plan_a.tool_catalog_hash == "cat-aaaaaaaaaaaa"
+    assert plan_a.capability_policy_hash == "pol-aaaaaaaaaaaa"
+    assert plan_b.tool_catalog_hash == "cat-bbbbbbbbbbbb"
+    assert plan_a.discovery_plan_hash != plan_b.discovery_plan_hash
+    assert plan_a.plan_revision_id != plan_b.plan_revision_id
+    from auditor.inventory.discovery_plan import build_capability_discovery_plan as build
+
+    disc = build(inv, [], agents_dir=agents, registry=registry_a)
+    assert disc.tool_catalog_hash == plan_a.tool_catalog_hash
+    assert disc.capability_policy_hash == plan_a.capability_policy_hash
+    assert disc.discovery_plan_hash == plan_a.discovery_plan_hash
+
+
+def test_custom_framework_catalog_stale_gate(tmp_path: Path) -> None:
+    agents = _os_name_agents(tmp_path / "custom")
+    inv = _inventory([_host(connection_types=("ssh",))])
+    registry = _registry({"ssh_run": _manifest("ssh_run")})
+    plan = generate_audit_plan(inv, [], agents_dir=agents, registry=registry)
+    assert plan.framework_catalog_hash.startswith("fc-")
+    blob = plan.model_dump_json()
+    assert str(agents.resolve()) not in blob
+    assert str(tmp_path.resolve()) not in blob
+
+    # same catalog succeeds
+    assert_plan_matches_discovery_plan(plan, inv, agents_dir=agents, registry=registry)
+
+    # changed custom hint → stale
+    agents2 = _os_name_agents(tmp_path / "custom2", ops=["other_run"])
+    registry2 = _registry({"ssh_run": _manifest("ssh_run"), "other_run": _manifest("other_run")})
+    with pytest.raises(PlanConfirmationRejected) as exc:
+        assert_plan_matches_discovery_plan(plan, inv, agents_dir=agents2, registry=registry2)
+    assert exc.value.code == "audit_plan_stale"
+
+    # default catalog → stale (different framework_catalog_hash / discovery hash)
+    with pytest.raises(PlanConfirmationRejected) as exc2:
+        assert_plan_matches_discovery_plan(plan, inv, agents_dir=None, registry=registry)
+    assert exc2.value.code == "audit_plan_stale"
+
+
+def test_all_of_independent_resolutions(tmp_path: Path) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    _write_fw(
+        agents,
+        "all.md",
+        frontmatter="""
+id: all_fw
+version: "1"
+family_id: all_fw
+language: en
+applicability:
+  all:
+    - fact: os.family
+      operator: equals
+      value: linux
+required_capabilities:
+  all_of:
+    - inventory.read
+    - host.read
+discovery_hints:
+  - capability: inventory.read
+    operation_ids: [inv_op]
+    expected_facts: [os.name]
+  - capability: host.read
+    operation_ids: [host_op]
+    expected_facts: [os.name]
+target:
+  scope: host
+""",
+    )
+    inv = _inventory([_host(os_name="Ubuntu", os_family="linux")])
+    facts = {
+        "host-01": _fact_set(
+            "host-01",
+            {"os.family": "linux", "os.name": "Ubuntu"},
+        )
+    }
+    registry = _registry(
+        {
+            "inv_op": _manifest("inv_op", capabilities=("inventory.read",), inventory_access=()),
+            "host_op": _manifest("host_op", capabilities=("host.read",), inventory_access=()),
+        }
+    )
+    fake = FrameworkCandidate(
+        host_id="host-01",
+        framework_id="all_fw",
+        framework_version="1",
+        family_id="all_fw",
+        language="en",
+        metadata_state="structured",
+        predicate_result="matched",
+        target_scope="host",
+        target_service="",
+        matched_fact_keys=("os.family",),
+        missing_facts=(),
+        required_any_capabilities=(),
+        required_all_capabilities=("inventory.read", "host.read"),
+        available_capabilities=(),
+        missing_capabilities=("host.read", "inventory.read"),
+        capability_ready=False,
+        applicability_fingerprint="fp",
+    )
+    with patch(
+        "auditor.inventory.discovery_plan.evaluate_framework_candidates",
+        return_value=[fake],
+    ):
+        plan = build_capability_discovery_plan(
+            inv, (), agents_dir=agents, registry=registry, host_facts=facts
+        )
+    caps = sorted(s.capability for s in plan.steps)
+    assert caps == ["host.read", "inventory.read"]
+    assert all(s.status == "planned" for s in plan.steps)

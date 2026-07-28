@@ -283,6 +283,7 @@ def confirm_audit_plan(
     client_name: str | None = None,
     inventory: ClientInventory | None = None,
     expected_plan_revision_id: str | None = None,
+    agents_dir: Path | str | None = None,
 ) -> AuditPlan:
     """Confirm, reject, or adjust a draft plan.
 
@@ -326,7 +327,7 @@ def confirm_audit_plan(
             select_frameworks_for_inventory(
                 current,
                 detect_technologies(current),
-                agents_dir=None,
+                agents_dir=agents_dir,
             )
         )
         assert_plan_matches_framework_hash(plan, framework_hash=current_fw_hash)
@@ -334,6 +335,7 @@ def confirm_audit_plan(
             plan,
             current,
             detections=detect_technologies(current),
+            agents_dir=agents_dir,
         )
         # If a newer preflight exists for the same inventory with different
         # effective facts, the plan is stale (discovery changed post-plan).
@@ -375,6 +377,7 @@ def plan_to_audit_request_payload(
     archive_enabled: bool = True,
     max_parallel_assessments: int = 5,
     max_parallel_host_jobs: int = 2,
+    agents_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     """Convert a confirmed plan into an INPUT-001 AuditRequest payload.
 
@@ -396,7 +399,7 @@ def plan_to_audit_request_payload(
             select_frameworks_for_inventory(
                 inventory,
                 detect_technologies(inventory),
-                agents_dir=None,
+                agents_dir=agents_dir,
             )
         ),
     )
@@ -404,6 +407,7 @@ def plan_to_audit_request_payload(
         plan,
         inventory,
         detections=detect_technologies(inventory),
+        agents_dir=agents_dir,
     )
 
     host_by_id = {h.host_id: h for h in inventory.hosts}
@@ -572,6 +576,7 @@ async def astart_confirmed_audit(
             inventory_dir=inventory_dir,
             client_name=client_name,
             expected_plan_revision_id=expected_plan_revision_id,
+            agents_dir=agents_dir,
         )
         if expected_plan_revision_id is not None:
             # Materialize confirmed status into compatibility latest.json under lock.
@@ -595,6 +600,7 @@ async def astart_confirmed_audit(
         archive_enabled=bool(settings.archive_enabled),
         max_parallel_assessments=int(settings.max_parallel_assessments),
         max_parallel_host_jobs=int(settings.max_parallel_host_jobs),
+        agents_dir=agents_dir,
     )
     request = validate_audit_request_semantics(parse_audit_request(payload), settings)
 

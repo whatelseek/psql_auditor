@@ -66,6 +66,7 @@ def _plan_revision_id(
     tool_catalog_hash: str,
     capability_policy_hash: str,
     discovery_plan_hash: str = "",
+    framework_catalog_hash: str = "",
 ) -> str:
     """Immutable plan revision identity from all pinned plan inputs."""
     payload = {
@@ -78,6 +79,7 @@ def _plan_revision_id(
         "tool_catalog_hash": tool_catalog_hash,
         "capability_policy_hash": capability_policy_hash,
         "discovery_plan_hash": discovery_plan_hash,
+        "framework_catalog_hash": framework_catalog_hash,
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -93,6 +95,7 @@ def generate_audit_plan(
     discovery_result_hash: str = "",
     effective_facts_hash: str = "",
     preflight_revision_id: str = "",
+    registry: Any | None = None,
 ) -> AuditPlan:
     """Build a draft audit plan from inventory + technology detections.
 
@@ -101,7 +104,15 @@ def generate_audit_plan(
     frameworks are expanded into explicit per-host targets before confirmation
     so plan targets match execution jobs 1:1.
     """
-    decisions = select_frameworks_for_inventory(inventory, detections, agents_dir=agents_dir)
+    from auditor.tool_registry import ToolRegistry, get_tool_registry
+
+    tool_registry: ToolRegistry = registry if registry is not None else get_tool_registry()
+    decisions = select_frameworks_for_inventory(
+        inventory,
+        detections,
+        agents_dir=agents_dir,
+        registry=tool_registry,
+    )
     host_by_id = {h.host_id: h for h in inventory.hosts}
     eligible_host_ids = {host.host_id for host in inventory.hosts_without_errors()}
     executable_hosts = [
@@ -240,15 +251,22 @@ def generate_audit_plan(
         potentially_destructive=False,
     )
 
-    tool_hashes = _tool_snapshot_hashes()
-    framework_hash = _framework_selection_hash(decisions)
-    from auditor.inventory.discovery_plan import build_capability_discovery_plan
+    from auditor.inventory.discovery_plan import (
+        build_capability_discovery_plan,
+    )
+    from auditor.inventory.discovery_plan import (
+        framework_catalog_hash as _framework_catalog_hash,
+    )
 
     discovery_plan = build_capability_discovery_plan(
         inventory,
         detections,
         agents_dir=agents_dir,
+        registry=tool_registry,
     )
+    tool_hashes = tool_registry.snapshot_hashes()
+    framework_hash = _framework_selection_hash(decisions)
+    fw_catalog_hash = discovery_plan.framework_catalog_hash or _framework_catalog_hash(agents_dir)
     unresolved = list(dict.fromkeys([*unresolved, *discovery_plan.unresolved_questions]))
     plan_revision_id = _plan_revision_id(
         inventory_version_id=inventory.version.version_id,
@@ -260,6 +278,7 @@ def generate_audit_plan(
         tool_catalog_hash=str(tool_hashes["tool_catalog_hash"]),
         capability_policy_hash=str(tool_hashes["capability_policy_hash"]),
         discovery_plan_hash=discovery_plan.discovery_plan_hash,
+        framework_catalog_hash=fw_catalog_hash,
     )
     return AuditPlan(
         plan_id=_plan_id(inventory.client_id, inventory.version.version_id),
@@ -271,9 +290,11 @@ def generate_audit_plan(
         effective_facts_hash=effective_facts_hash,
         preflight_revision_id=preflight_revision_id,
         framework_hash=framework_hash,
-        **tool_hashes,
+        tool_catalog_hash=str(tool_hashes.get("tool_catalog_hash") or ""),
+        capability_policy_hash=str(tool_hashes.get("capability_policy_hash") or ""),
         discovery_plan_id=discovery_plan.discovery_plan_id,
         discovery_plan_hash=discovery_plan.discovery_plan_hash,
+        framework_catalog_hash=fw_catalog_hash,
         discovery_steps=discovery_plan.steps,
         status="draft",
         targets=tuple(targets),
@@ -497,18 +518,34 @@ def assert_plan_matches_discovery_plan(
     *,
     detections: list[Any] | tuple[Any, ...] | None = None,
     agents_dir: Path | str | None = None,
+    registry: Any | None = None,
 ) -> None:
     """Reject confirm/start when the typed discovery plan hash diverged."""
     pinned = (plan.discovery_plan_hash or "").strip()
     if not pinned:
         return
-    from auditor.inventory.discovery_plan import build_capability_discovery_plan
+    from auditor.inventory.discovery_plan import (
+        build_capability_discovery_plan,
+        framework_catalog_hash,
+    )
+    from auditor.tool_registry import get_tool_registry
 
+    tool_registry = registry if registry is not None else get_tool_registry()
     current = build_capability_discovery_plan(
         inventory,
         list(detections or ()),
         agents_dir=agents_dir,
+        registry=tool_registry,
     )
+    pinned_catalog = (plan.framework_catalog_hash or "").strip()
+    if pinned_catalog:
+        current_catalog = current.framework_catalog_hash or framework_catalog_hash(agents_dir)
+        if current_catalog != pinned_catalog:
+            raise PlanConfirmationRejected(
+                "audit plan is stale: framework catalog changed since plan "
+                "generation; re-run inventory analyze / audit plan",
+                code="audit_plan_stale",
+            )
     if current.discovery_plan_hash != pinned:
         raise PlanConfirmationRejected(
             "audit plan is stale: capability discovery plan changed since plan "

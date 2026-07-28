@@ -98,6 +98,7 @@ class AuditPlan(BaseModel):
     capability_policy_hash: StrictStr = ""
     discovery_plan_id: StrictStr = ""
     discovery_plan_hash: StrictStr = ""
+    framework_catalog_hash: StrictStr = ""
     discovery_steps: tuple[DiscoveryPlanStep, ...] = ()
     status: PlanStatus = "draft"
     targets: tuple[AuditPlanTarget, ...] = ()
