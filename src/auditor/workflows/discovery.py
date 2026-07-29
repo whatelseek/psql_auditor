@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,39 @@ from auditor.secrets_file import InventorySshTarget, list_client_ssh_targets
 from auditor.state import AuditorState, Finding
 from auditor.workflows.helpers import _as_finding, _extract_json
 from auditor.workflows.protocols import AuditRuntime
+
+
+def _discovery_identity_state(
+    store: EvidenceStore | None,
+    state: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Build identity-bearing state for host_facts discovery writes (CORE-001/003).
+
+    Intake discovery often has ``client_id`` / ``audit_run_id`` / ``asset_id`` on
+    evidence ``meta.json`` before graph state is fully threaded; merge both so
+    :func:`~auditor.workflows.assessment.fill_requirement_cells` can bind before
+    ``EvidenceStore.write_finding``.
+    """
+    out: dict[str, Any] = dict(state or {})
+    meta: dict[str, Any] = {}
+    if store is not None:
+        try:
+            loaded = store.read_run_meta()
+            if isinstance(loaded, dict):
+                meta = loaded
+        except Exception:  # noqa: BLE001
+            meta = {}
+    if not str(out.get("client_id") or "").strip():
+        out["client_id"] = str(meta.get("client_id") or "").strip()
+    if not str(out.get("audit_run_id") or "").strip():
+        out["audit_run_id"] = str(meta.get("audit_run_id") or "").strip()
+    if not str(out.get("asset_id") or "").strip():
+        out["asset_id"] = str(meta.get("asset_id") or "").strip()
+    if not str(out.get("framework_version") or "").strip():
+        out["framework_version"] = str(meta.get("framework_version") or "").strip() or "1"
+    if not isinstance(out.get("intake"), dict) and isinstance(meta.get("intake"), dict):
+        out["intake"] = meta["intake"]
+    return out
 
 
 async def route_framework_node(runtime: AuditRuntime, state: AuditorState) -> dict[str, Any]:
@@ -231,6 +265,7 @@ async def collect_host_facts(runtime: AuditRuntime, state: AuditorState) -> dict
                 store=store,
                 host_id=host_id,
                 user_request=str(state.get("user_request") or ""),
+                state=state,
             )
         facts_md = format_host_facts_markdown(facts, None, language=lang.code)
 
@@ -280,6 +315,7 @@ async def collect_host_facts_dispatch(
     host_id: str = "",
     user_request: str = "",
     extra_binaries: list[str] | None = None,
+    state: Mapping[str, Any] | None = None,
 ) -> HostFacts:
     """Run ``agents/host_facts.md`` (fallback: compact SSH discovery)."""
     del extra_binaries  # routing hints stay in framework detect / LLM tools
@@ -287,6 +323,7 @@ async def collect_host_facts_dispatch(
         store=store,
         host_id=host_id,
         user_request=user_request,
+        state=state,
     )
 
 
@@ -296,6 +333,7 @@ async def collect_host_facts_llm(
     store: EvidenceStore | None = None,
     host_id: str = "",
     user_request: str = "",
+    state: Mapping[str, Any] | None = None,
 ) -> HostFacts:
     """Assess ``agents/host_facts.md`` then fill ``HostFacts`` for routing.
 
@@ -306,6 +344,7 @@ async def collect_host_facts_llm(
     ssh_host = str(effective_settings(runtime.settings).ssh_host or "")
     if store is not None and host_id:
         store.host_segment = host_id
+    identity_state = _discovery_identity_state(store, state)
 
     fw = get_framework("host_facts", runtime.settings.agents_dir)
     if fw is None:
@@ -356,6 +395,7 @@ async def collect_host_facts_llm(
                     framework_id="host_facts",
                     store=store,
                     ssh_only=True,
+                    state=identity_state,
                 )
             except Exception as exc:  # noqa: BLE001
                 from auditor.result_identity_bind import attach_result_identity
@@ -377,17 +417,12 @@ async def collect_host_facts_llm(
                     pass_criteria=req_map[req_id].pass_criteria,
                 )
                 if store is not None:
-                    meta = store.read_run_meta()
+                    bind_state = _discovery_identity_state(store, identity_state)
                     finding = attach_result_identity(
                         err_result,
-                        state={
-                            "client_id": str(meta.get("client_id") or ""),
-                            "audit_run_id": str(meta.get("audit_run_id") or ""),
-                            "asset_id": str(meta.get("asset_id") or ""),
-                            "framework_version": str(meta.get("framework_version") or "1"),
-                        },
+                        state=bind_state,
                         framework_id="host_facts",
-                        framework_version=str(meta.get("framework_version") or "1"),
+                        framework_version=str(bind_state.get("framework_version") or "1"),
                     )
                     store.write_finding("host_facts", req_id, finding.to_persist_dict())
                 else:
@@ -583,6 +618,7 @@ async def discover_inventory_hosts(
     audit_run_id = str(intake.get("audit_run_id") or "").strip()
     for target in targets:
         # Intake discovery writes ToolResults/findings — need asset_id on run meta.
+        asset_id = ""
         if store is not None and client_id:
             from auditor.asset_registry import get_asset_registry
 
@@ -603,11 +639,19 @@ async def discover_inventory_hosts(
                 audit_run_id=audit_run_id,
                 asset_id=asset_id,
             )
+        identity_state = {
+            "client_id": client_id,
+            "audit_run_id": audit_run_id,
+            "asset_id": asset_id,
+            "intake": intake,
+            "framework_version": "1",
+        }
         with runtime._target_scope(client_slug=slug, ssh_target=target, intake=intake):
             facts = await runtime._collect_host_facts(
                 store=store,
                 host_id=target.slug,
                 user_request=str(intake.get("client_name") or ""),
+                state=identity_state,
             )
             # Optional LLM routing hints from collected software signals.
             try:
