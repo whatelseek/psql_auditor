@@ -47,6 +47,7 @@ from auditor.domain import AuditRequestRejected
 from auditor.hitl import is_continue_reply, resolve_pause_resume
 from auditor.intake import (
     clear_active_intake_pause,
+    intake_session_expired_message,
     load_active_intake_pause,
     looks_like_new_audit_kickoff,
 )
@@ -57,6 +58,7 @@ from auditor.results_store import (
     parse_continue_session_request,
     resolve_continue_target,
 )
+from auditor.run_scope import RunScopeIsolationError
 
 router = APIRouter(prefix="/v1")
 
@@ -67,6 +69,62 @@ def runtime_from_request(request: Request) -> ApplicationRuntime:
     if runtime is None:
         raise HTTPException(status_code=503, detail="Application runtime not initialized")
     return runtime
+
+
+def _is_intake_thread(thread_id: str) -> bool:
+    tid = (thread_id or "").strip()
+    return ":intake" in tid or tid.endswith("intake")
+
+
+def _intake_resume_kw(active: dict[str, str] | None = None, thread_id: str = "") -> dict[str, str]:
+    """Build optional client_id/audit_run_id kwargs for intake aresume."""
+    kw: dict[str, str] = {}
+    if active:
+        cid = str(active.get("client_id") or "").strip()
+        arid = str(active.get("audit_run_id") or "").strip()
+        if cid:
+            kw["client_id"] = cid
+        if arid:
+            kw["audit_run_id"] = arid
+    if kw:
+        return kw
+    from auditor.run_scope import parse_checkpoint_thread_id
+
+    parsed = parse_checkpoint_thread_id(thread_id)
+    if parsed is not None:
+        return {"client_id": parsed[0], "audit_run_id": parsed[1]}
+    return {}
+
+
+async def _aresume_or_expired(
+    auditor,
+    thread_id: str,
+    user_text: str,
+    *,
+    settings: Settings,
+    **resume_kw: str,
+) -> dict[str, Any]:
+    """Resume intake/HITL; map expired intake checkpoints to operator guidance."""
+    try:
+        return await auditor.aresume(thread_id, user_text, **resume_kw)
+    except RunScopeIsolationError as exc:
+        msg = str(exc)
+        if _is_intake_thread(thread_id) and (
+            "refusing unbound" in msg or "checkpoint missing" in msg or "session expired" in msg
+        ):
+            try:
+                clear_active_intake_pause(settings.evidence_dir)
+            except OSError:
+                pass
+            text = intake_session_expired_message(thread_id)
+            return {
+                "report": text,
+                "messages": [AIMessage(content=text)],
+                "awaiting_hitl": False,
+                "awaiting_intake": False,
+                "error": "intake_session_expired",
+            }
+        raise
 
 
 class ChatMessage(BaseModel):
@@ -829,15 +887,16 @@ async def _run_or_resume_once(
     paused = resolve_pause_resume(body.messages)
     if paused:
         kind, thread_id_pause = paused
-        from auditor.run_scope import parse_checkpoint_thread_id
-
-        parsed = parse_checkpoint_thread_id(thread_id_pause)
-        resume_kw: dict[str, str] = {}
-        if parsed is not None:
-            resume_kw = {"client_id": parsed[0], "audit_run_id": parsed[1]}
+        resume_kw = _intake_resume_kw(thread_id=thread_id_pause)
         if kind == "continue":
             return await auditor.acontinue(thread_id_pause, **resume_kw)
-        return await auditor.aresume(thread_id_pause, user_text, **resume_kw)
+        return await _aresume_or_expired(
+            auditor,
+            thread_id_pause,
+            user_text,
+            settings=settings,
+            **resume_kw,
+        )
 
     # OWUI Responses often omits prior assistant turns (and thus AUDIT_INTAKE
     # markers). Resume the latest incomplete intake unless the operator clearly
@@ -845,7 +904,13 @@ async def _run_or_resume_once(
     if settings.intake_enabled and not looks_like_new_audit_kickoff(user_text):
         active = load_active_intake_pause(settings.evidence_dir)
         if active and active.get("thread_id"):
-            return await auditor.aresume(str(active["thread_id"]), user_text)
+            return await _aresume_or_expired(
+                auditor,
+                str(active["thread_id"]),
+                user_text,
+                settings=settings,
+                **_intake_resume_kw(active),
+            )
 
     if looks_like_new_audit_kickoff(user_text):
         try:

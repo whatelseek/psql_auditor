@@ -380,6 +380,8 @@ class AuditorGraph:
                     thread_id=thread_id,
                     run_id=str(result.get("evidence_run_id") or ""),
                     step=step,
+                    client_id=str(result.get("client_id") or ""),
+                    audit_run_id=str(result.get("audit_run_id") or ""),
                 )
             except OSError:
                 pass

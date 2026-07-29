@@ -1042,6 +1042,8 @@ def write_active_intake_pause(
     thread_id: str,
     run_id: str = "",
     step: str = "",
+    client_id: str = "",
+    audit_run_id: str = "",
 ) -> None:
     """Persist the latest incomplete intake pause for marker-less chat UIs.
 
@@ -1058,6 +1060,8 @@ def write_active_intake_pause(
         "thread_id": (thread_id or "").strip(),
         "run_id": (run_id or "").strip(),
         "step": (step or "").strip(),
+        "client_id": (client_id or "").strip(),
+        "audit_run_id": (audit_run_id or "").strip(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     if not payload["thread_id"]:
@@ -1110,8 +1114,21 @@ def load_active_intake_pause(
         "thread_id": tid,
         "run_id": str(raw.get("run_id") or "").strip(),
         "step": str(raw.get("step") or "").strip(),
+        "client_id": str(raw.get("client_id") or "").strip(),
+        "audit_run_id": str(raw.get("audit_run_id") or "").strip(),
         "updated_at": updated,
     }
+
+
+def intake_session_expired_message(thread_id: str = "") -> str:
+    """Operator-facing text when an intake checkpoint can no longer be resumed."""
+    tid = (thread_id or "").strip()
+    suffix = f" (`{tid}`)" if tid else ""
+    return (
+        f"This intake session{suffix} is no longer available "
+        "(checkpoint was cleared or the agent restarted).\n\n"
+        "Say **start new audit** (or **новый аудит**) to begin again."
+    )
 
 
 def looks_like_new_audit_kickoff(text: str) -> bool:

@@ -633,12 +633,19 @@ def test_active_intake_pause_pointer(tmp_path: Path) -> None:
 
     assert load_active_intake_pause(tmp_path) is None
     write_active_intake_pause(
-        tmp_path, thread_id="audit-abc:intake", run_id="run1", step="client_name"
+        tmp_path,
+        thread_id="audit-abc:intake",
+        run_id="run1",
+        step="client_name",
+        client_id="client_deadbeefdeadbe",
+        audit_run_id="arun_deadbeefdeadbeef",
     )
     active = load_active_intake_pause(tmp_path)
     assert active is not None
     assert active["thread_id"] == "audit-abc:intake"
     assert active["step"] == "client_name"
+    assert active["client_id"] == "client_deadbeefdeadbe"
+    assert active["audit_run_id"] == "arun_deadbeefdeadbeef"
     clear_active_intake_pause(tmp_path)
     assert load_active_intake_pause(tmp_path) is None
 
@@ -692,3 +699,47 @@ async def test_markerless_resume_uses_active_intake_pointer(tmp_path: Path, monk
     assert called["thread_id"] == "audit-xyz:intake"
     assert called["user_text"] == "testcompany"
     assert result.get("report") == "resumed"
+
+
+@pytest.mark.asyncio
+async def test_stale_intake_marker_returns_expired_guidance(tmp_path: Path, monkeypatch):
+    """OWUI history may keep [AUDIT_INTAKE:…] after checkpoints were cleared."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from auditor.api import openai_compat as oc
+    from auditor.config import Settings
+    from auditor.run_scope import RunScopeIsolationError
+
+    settings = Settings(
+        _env_file=None,
+        evidence_dir=tmp_path,
+        agents_dir=Path("agents"),
+        inventory_dir=tmp_path / "inventory",
+        intake_enabled=True,
+    )
+    (tmp_path / "inventory").mkdir()
+
+    auditor = MagicMock()
+    auditor.aresume = AsyncMock(
+        side_effect=RunScopeIsolationError(
+            "aresume: required client_id and audit_run_id for resume "
+            "(thread_id='audit-f64282fe19f4:intake'); refusing unbound checkpoint access"
+        )
+    )
+    runtime = SimpleNamespace(settings=settings)
+
+    body = oc.ChatCompletionRequest(
+        model="auditor",
+        messages=[
+            {
+                "role": "assistant",
+                "content": "Q?\n\n[AUDIT_INTAKE:audit-f64282fe19f4:intake]",
+            },
+            {"role": "user", "content": "testcompany"},
+        ],
+    )
+    result = await oc._run_or_resume_once(runtime, auditor, body, settings=settings)
+    assert result.get("error") == "intake_session_expired"
+    assert "start new audit" in (result.get("report") or "").lower()
+    auditor.aresume.assert_awaited()
