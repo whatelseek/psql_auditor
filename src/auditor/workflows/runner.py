@@ -369,6 +369,17 @@ async def _authorize_intake_resume(
     known_session = isinstance(sessions, dict) and tid in sessions
     if known_session or _checkpoint_has_pending_work(snap):
         return "", ""
+
+    # Checkpoint gone (agent restart / cleared artifacts) — prefer a clear
+    # expired-session signal over a generic unbound-identity error.
+    registry = get_audit_registry(runtime.settings.evidence_dir)
+    base = tid[: -len(":intake")] if tid.endswith(":intake") else tid
+    prior = registry.find_run_by_base_thread(tid) or registry.find_run_by_base_thread(base)
+    if prior is not None:
+        raise RunScopeIsolationError(
+            f"aresume: intake checkpoint missing for thread_id={tid!r} "
+            f"(audit_run_id={prior.audit_run_id!r}); session expired — start a new audit"
+        )
     raise RunScopeIsolationError(
         f"aresume: required client_id and audit_run_id for resume "
         f"(thread_id={tid!r}); refusing unbound checkpoint access"
