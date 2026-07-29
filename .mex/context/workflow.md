@@ -23,7 +23,7 @@ grounds_to:
     fingerprint: "mh:64:2f2af11aa834367b761c8148a46c1f30ebdd8993e6bfc24325cdbd8428250524"
   - node: "class:68d8cf58cb1ff53b09033fa995f790fe"
     fingerprint: "mh:64:d10c38b420cb77843b484706e54df806478829f28ab8b4e4d1bf275641c95d9d"
-last_updated: 2026-07-28
+last_updated: 2026-07-29
 ---
 
 # Workflow
@@ -65,5 +65,5 @@ HITL interrupt payload: `type=skip_or_retry`. Resume via chat / `aresume` / `aco
 
 Pre-audit intake collects client name, audit type, and related operator answers (`docs/pre-audit-intake.md`). Inventory may include `QUESTIONNAIRE.md` / `questionnaires/` — treated as operator inputs to planning, not as executable frameworks.
 
-Resume markers must be **visible** `[AUDIT_INTAKE:<thread>]` (OWUI strips markdown-reference comments). After access=yes, intake emits a progress phase while probing + `host_facts` discovery run before scope confirm. Open WebUI tag/title side-requests must not start intake.
+Resume markers must be **visible** `[AUDIT_INTAKE:<thread>]` (OWUI strips markdown-reference comments). After access=yes, intake emits a progress phase while probing + `host_facts` discovery run before scope confirm. `collect_host_facts_llm` must pass identity-bearing `state` (merged from evidence `meta.json` when needed) into `fill_requirement_cells` before `write_finding`, or findings persist as empty `MissingAuditRunIdError` stubs. Open WebUI tag/title side-requests must not start intake.
 After host_facts discovery, production jobs start only when intake has confirmed `selected_jobs` (+ `client_id` / `client_slug`); otherwise the chat asks to **confirm** the plan instead of raising `AuditRequestRejected`.
