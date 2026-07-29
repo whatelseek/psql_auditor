@@ -34,6 +34,7 @@ from auditor.followup import followup_footer
 from auditor.frameworks import get_framework
 from auditor.host_facts import HostFacts, parse_host_facts_json
 from auditor.intake import (
+    clear_active_intake_pause,
     client_slug,
     filter_scope_framework_ids,
 )
@@ -952,6 +953,12 @@ async def start_frameworks_after_intake(
     client_slug_val = str(intake.get("client_slug") or "").strip()
     audit_run_id = str(intake.get("audit_run_id") or "").strip()
 
+    if selected_rows and client_id and client_slug_val:
+        try:
+            clear_active_intake_pause(runtime.settings.evidence_dir)
+        except OSError:
+            pass
+
     if not selected_rows or not client_id or not client_slug_val:
         raise AuditRequestRejected(
             issues=[
@@ -1505,9 +1512,7 @@ async def arun(
                 "awaiting_intake": True,
                 "intake_complete": False,
                 "thread_id": intake_tid,
-                "evidence_run_id": str(
-                    intake.get("artifacts_run_id") or shared.run_id or run_id
-                ),
+                "evidence_run_id": str(intake.get("artifacts_run_id") or shared.run_id or run_id),
             }
         try:
             return await runtime._start_frameworks_after_intake(

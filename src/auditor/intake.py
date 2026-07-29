@@ -1033,6 +1033,113 @@ def apply_scope_exclusions(
     return normalize_scope_jobs(out)
 
 
+ACTIVE_INTAKE_POINTER = ".active_intake.json"
+
+
+def write_active_intake_pause(
+    evidence_dir: Path | str,
+    *,
+    thread_id: str,
+    run_id: str = "",
+    step: str = "",
+) -> None:
+    """Persist the latest incomplete intake pause for marker-less chat UIs.
+
+    Open WebUI Responses often sends only the newest user message (no prior
+    assistant history), so ``[AUDIT_INTAKE:…]`` is missing on resume. The
+    pointer lets the next turn resume the same intake thread.
+    """
+    import json
+    from datetime import datetime, timezone
+
+    root = Path(evidence_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "thread_id": (thread_id or "").strip(),
+        "run_id": (run_id or "").strip(),
+        "step": (step or "").strip(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if not payload["thread_id"]:
+        return
+    (root / ACTIVE_INTAKE_POINTER).write_text(
+        json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def clear_active_intake_pause(evidence_dir: Path | str) -> None:
+    """Drop the active intake pointer (intake finished or superseded)."""
+    path = Path(evidence_dir) / ACTIVE_INTAKE_POINTER
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def load_active_intake_pause(
+    evidence_dir: Path | str,
+    *,
+    max_age_seconds: int = 6 * 3600,
+) -> dict[str, str] | None:
+    """Return the active intake pause if present and not stale."""
+    import json
+    from datetime import datetime, timezone
+
+    path = Path(evidence_dir) / ACTIVE_INTAKE_POINTER
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    tid = str(raw.get("thread_id") or "").strip()
+    if not tid:
+        return None
+    updated = str(raw.get("updated_at") or "").strip()
+    if updated:
+        try:
+            ts = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age > max_age_seconds:
+                return None
+        except ValueError:
+            pass
+    return {
+        "thread_id": tid,
+        "run_id": str(raw.get("run_id") or "").strip(),
+        "step": str(raw.get("step") or "").strip(),
+        "updated_at": updated,
+    }
+
+
+def looks_like_new_audit_kickoff(text: str) -> bool:
+    """True when the operator clearly wants a brand-new audit (not an intake answer)."""
+    import re
+
+    raw = (text or "").strip().lower()
+    if not raw:
+        return False
+    # Short answers (client names, yes/no, confirm) are resume candidates.
+    if len(raw) <= 64 and not re.search(
+        r"\b(audit|ауди|проверк|start|начать|run full|полный)\b", raw, re.I
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b("
+            r"start(\s+a)?(\s+new)?\s+audit|run(\s+a)?(\s+full)?\s+audit|"
+            r"new\s+audit|begin\s+audit|"
+            r"начать(\s+новый)?\s+аудит|запусти(ть)?(\s+полный)?\s+аудит|"
+            r"новый\s+аудит"
+            r")\b",
+            raw,
+            re.I,
+        )
+    )
+
+
 def format_intake_assistant_message(prompt: str, thread_id: str) -> str:
     """Wrap intake step prompt with a durable resume marker for chat UIs.
 

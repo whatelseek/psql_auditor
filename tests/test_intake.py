@@ -621,3 +621,74 @@ def test_resolve_intake_evidence_store_prefers_rebound_run(tmp_path: Path):
     assert loaded.get("proposed_jobs")
     assert loaded.get("discovery_complete") is True
 
+
+@pytest.mark.unit
+def test_active_intake_pause_pointer(tmp_path: Path) -> None:
+    from auditor.intake import (
+        clear_active_intake_pause,
+        load_active_intake_pause,
+        looks_like_new_audit_kickoff,
+        write_active_intake_pause,
+    )
+
+    assert load_active_intake_pause(tmp_path) is None
+    write_active_intake_pause(
+        tmp_path, thread_id="audit-abc:intake", run_id="run1", step="client_name"
+    )
+    active = load_active_intake_pause(tmp_path)
+    assert active is not None
+    assert active["thread_id"] == "audit-abc:intake"
+    assert active["step"] == "client_name"
+    clear_active_intake_pause(tmp_path)
+    assert load_active_intake_pause(tmp_path) is None
+
+    assert looks_like_new_audit_kickoff("start a new audit")
+    assert looks_like_new_audit_kickoff("начать аудит")
+    assert not looks_like_new_audit_kickoff("testcompany")
+    assert not looks_like_new_audit_kickoff("yes")
+    assert not looks_like_new_audit_kickoff("привет")
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_markerless_resume_uses_active_intake_pointer(tmp_path: Path, monkeypatch) -> None:
+    """Responses-style history (user-only) must still resume via active pointer."""
+    from auditor.api.openai_compat import ChatCompletionRequest, ChatMessage, _run_or_resume_once
+    from auditor.config import Settings
+    from auditor.intake import write_active_intake_pause
+
+    settings = Settings(
+        _env_file=None,
+        evidence_dir=tmp_path,
+        intake_enabled=True,
+        adhoc_commands_enabled=False,
+        agents_dir=Path("agents"),
+    )
+    write_active_intake_pause(tmp_path, thread_id="audit-xyz:intake", run_id="tmp")
+
+    called: dict[str, str] = {}
+
+    class _FakeAuditor:
+        async def aresume(self, thread_id: str, user_text: str, **kwargs):
+            called["thread_id"] = thread_id
+            called["user_text"] = user_text
+            return {"report": "resumed", "awaiting_intake": True}
+
+        async def arun(self, *args, **kwargs):
+            raise AssertionError("arun must not start a second intake")
+
+    class _FakeRuntime:
+        pass
+
+    runtime = _FakeRuntime()
+    runtime.settings = settings  # type: ignore[attr-defined]
+    body = ChatCompletionRequest(messages=[ChatMessage(role="user", content="testcompany")])
+    result = await _run_or_resume_once(
+        runtime,  # type: ignore[arg-type]
+        _FakeAuditor(),
+        body,
+        settings=settings,
+    )
+    assert called["thread_id"] == "audit-xyz:intake"
+    assert called["user_text"] == "testcompany"
+    assert result.get("report") == "resumed"

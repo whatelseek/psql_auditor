@@ -304,9 +304,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
     intake["cmdb_probe"] = {}
     # Never persist raw INVENTORY.md (credentials) into intake/meta.
     intake["inventory_scope"] = (
-        f"Inventory file present at `{inv_path}`."
-        if found and inv_path
-        else str(scope or "")
+        f"Inventory file present at `{inv_path}`." if found and inv_path else str(scope or "")
     )
     intake["inventory_found"] = found
     intake["inventory_path"] = str(inv_path) if inv_path else ""
@@ -800,9 +798,7 @@ async def intake_gate(runtime: AuditRuntime, state: AuditorState) -> dict[str, A
             )
             scope_prompt = f"{prompts.scope}{hint}\n\n{plan_md}"
 
-    store = resolve_intake_evidence_store(
-        runtime, state, thread_id=thread_hint, intake=intake
-    )
+    store = resolve_intake_evidence_store(runtime, state, thread_id=thread_hint, intake=intake)
     if store is not None:
         store.write_run_meta(
             intake_complete=can_handoff,
@@ -952,9 +948,7 @@ def persist_intake_progress(
     Мержит в существующий dict ``intake``, чтобы частичная запись не стёрла
     ранние ключи (например совместимые поля inventory-only).
     """
-    store = resolve_intake_evidence_store(
-        runtime, state, thread_id=thread_id, intake=intake
-    )
+    store = resolve_intake_evidence_store(runtime, state, thread_id=thread_id, intake=intake)
     if store is None:
         return
     tid = thread_id or str(state.get("thread_id") or "")
@@ -988,9 +982,7 @@ def load_intake_progress(
     """
     intake: dict[str, Any] = dict(state.get("intake") or {})
     tid = thread_id or str(state.get("thread_id") or "")
-    store = resolve_intake_evidence_store(
-        runtime, state, thread_id=tid, intake=intake
-    )
+    store = resolve_intake_evidence_store(runtime, state, thread_id=tid, intake=intake)
     if store is None:
         return intake
     meta = store.read_run_meta()

@@ -58,6 +58,7 @@ from auditor.hitl import (
 )
 from auditor.intake import (
     format_intake_assistant_message,
+    write_active_intake_pause,
 )
 from auditor.llm import build_chat_model
 from auditor.memory.playbook_store import PlaybookMemory
@@ -370,6 +371,18 @@ class AuditorGraph:
         is_intake = intake or (isinstance(value, dict) and str(value.get("type") or "") == "intake")
         if is_intake:
             msg = format_intake_assistant_message(prompt, thread_id)
+            step = ""
+            if isinstance(value, dict):
+                step = str(value.get("step") or "")
+            try:
+                write_active_intake_pause(
+                    self.settings.evidence_dir,
+                    thread_id=thread_id,
+                    run_id=str(result.get("evidence_run_id") or ""),
+                    step=step,
+                )
+            except OSError:
+                pass
         else:
             msg = format_hitl_assistant_message(prompt, thread_id)
         result["report"] = msg

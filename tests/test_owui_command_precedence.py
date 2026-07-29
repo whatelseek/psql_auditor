@@ -112,4 +112,3 @@ async def test_open_webui_tag_prompt_does_not_start_audit(monkeypatch):
     assert called["arun"] == 0
     assert "tags" in (result.get("report") or "").lower()
     assert not result.get("awaiting_intake")
-

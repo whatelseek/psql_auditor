@@ -45,6 +45,11 @@ from auditor.application_runtime import ApplicationRuntime
 from auditor.config import Settings, get_settings
 from auditor.domain import AuditRequestRejected
 from auditor.hitl import is_continue_reply, resolve_pause_resume
+from auditor.intake import (
+    clear_active_intake_pause,
+    load_active_intake_pause,
+    looks_like_new_audit_kickoff,
+)
 from auditor.intent import classify_intent
 from auditor.progress import ProgressSink, bind_progress_sink
 from auditor.report_archive import archive_filename, verify_download_token
@@ -659,7 +664,6 @@ async def download_archive(
     )
 
 
-
 def _is_open_webui_side_request(text: str) -> bool:
     """Return True for OWUI auxiliary prompts that must not start an audit.
 
@@ -687,6 +691,7 @@ def _open_webui_side_request_reply(text: str) -> str:
     if "tag" in raw or "themes of the chat" in raw:
         return '{"tags": ["General"]}'
     return "General"
+
 
 async def _run_or_resume(
     runtime: ApplicationRuntime,
@@ -833,6 +838,20 @@ async def _run_or_resume_once(
         if kind == "continue":
             return await auditor.acontinue(thread_id_pause, **resume_kw)
         return await auditor.aresume(thread_id_pause, user_text, **resume_kw)
+
+    # OWUI Responses often omits prior assistant turns (and thus AUDIT_INTAKE
+    # markers). Resume the latest incomplete intake unless the operator clearly
+    # kicks off a brand-new audit.
+    if settings.intake_enabled and not looks_like_new_audit_kickoff(user_text):
+        active = load_active_intake_pause(settings.evidence_dir)
+        if active and active.get("thread_id"):
+            return await auditor.aresume(str(active["thread_id"]), user_text)
+
+    if looks_like_new_audit_kickoff(user_text):
+        try:
+            clear_active_intake_pause(settings.evidence_dir)
+        except OSError:
+            pass
 
     try:
         return await auditor.arun(user_text, thread_id=thread_id)

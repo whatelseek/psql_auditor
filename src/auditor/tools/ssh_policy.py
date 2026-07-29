@@ -180,7 +180,6 @@ def _has_shell_composition(command: str) -> bool:
     return False
 
 
-
 def _policy_ssh_allow_all() -> bool:
     """True when the active capability policy enables PoC allow-all SSH."""
     try:
