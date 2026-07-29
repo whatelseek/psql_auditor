@@ -395,7 +395,7 @@ async def collect_host_facts_llm(
                     framework_id="host_facts",
                     store=store,
                     ssh_only=True,
-                    state=identity_state,  # type: ignore[arg-type]
+                    state=identity_state,
                 )
             except Exception as exc:  # noqa: BLE001
                 from auditor.result_identity_bind import attach_result_identity
